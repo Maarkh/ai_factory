@@ -1,0 +1,183 @@
+import json
+import os
+import re
+from pathlib import Path
+from typing import Optional
+
+from config import FACTORY_DIR, SRC_DIR
+from artifacts import save_artifact
+from json_utils import _safe_contract
+from lang_utils import get_docker_image, get_execution_command, LANG_DISPLAY
+from infra import run_command
+
+MAX_FEEDBACK_HISTORY = 3
+
+
+def save_state(project_path: Path, state: dict) -> None:
+    """Состояние хранится в .factory/state.json.
+
+    Поля с _ не сериализуются в основной файл, но _prev_file_contracts
+    сохраняется отдельно для корректной работы каскадного revise_spec.
+    """
+    factory_dir = project_path / FACTORY_DIR
+    factory_dir.mkdir(parents=True, exist_ok=True)
+    clean = {k: v for k, v in state.items() if not k.startswith("_")}
+    (factory_dir / "state.json").write_text(
+        json.dumps(clean, indent=4, ensure_ascii=False), encoding="utf-8"
+    )
+    # Сохраняем _prev_file_contracts отдельно для корректного каскада
+    prev = state.get("_prev_file_contracts")
+    if prev is not None:
+        (factory_dir / "prev_contracts.json").write_text(
+            json.dumps(prev, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+
+def load_state(project_path: Path) -> Optional[dict]:
+    p = project_path / FACTORY_DIR / "state.json"
+    if not p.exists():
+        return None
+    state = json.loads(p.read_text(encoding="utf-8"))
+    # Восстанавливаем _prev_file_contracts
+    prev_path = project_path / FACTORY_DIR / "prev_contracts.json"
+    if prev_path.exists():
+        state["_prev_file_contracts"] = json.loads(prev_path.read_text(encoding="utf-8"))
+    return state
+
+
+def _push_feedback(state: dict, filename: str, feedback: str) -> None:
+    """Добавляет замечание в историю файла. Хранит только последние MAX_FEEDBACK_HISTORY."""
+    if not feedback:
+        return
+    history = state.setdefault("feedback_history", {}).setdefault(filename, [])
+    history.append(feedback)
+    if len(history) > MAX_FEEDBACK_HISTORY:
+        state["feedback_history"][filename] = history[-MAX_FEEDBACK_HISTORY:]
+    state["feedbacks"][filename] = feedback
+
+
+def _get_feedback_ctx(state: dict, filename: str) -> str:
+    """Формирует блок замечаний для контекста разработчика."""
+    history = state.get("feedback_history", {}).get(filename, [])
+    if not history:
+        return state["feedbacks"].get(filename, "")
+    if len(history) == 1:
+        return f"ЗАМЕЧАНИЕ (исправь это):\n{history[-1]}"
+    parts = ["ИСТОРИЯ ЗАМЕЧАНИЙ (не повторяй одни и те же ошибки):"]
+    for i, fb in enumerate(history, 1):
+        parts.append(f"--- Попытка {i} ---\n{fb}")
+    return "\n".join(parts)
+
+
+def ensure_feedback_keys(state: dict) -> None:
+    for f in state["files"]:
+        state["feedbacks"].setdefault(f, "")
+    state.setdefault("feedback_history", {})
+    _safe_contract(state)
+
+
+def generate_summary(project_path: Path, state: dict) -> None:
+    """SUMMARY.md — в корне проекта (видно в Git)."""
+    language   = state.get("language", "python")
+    entry      = state.get("entry_point", "main.py")
+    docker_img = get_docker_image(language)
+    run_cmd    = get_execution_command(language, entry)
+    text = (
+        f"# Проект: {project_path.name}\n\n"
+        f"## Задача\n{state['task']}\n\n"
+        f"## Язык\n{LANG_DISPLAY.get(language, language.upper())}\n\n"
+        f"## Архитектура\n{state['architecture']}\n\n"
+        "## Файлы\n" + "\n".join(f"- {f}" for f in state["files"])
+        + f"\n\n## Итераций: {state['iteration'] - 1}\n\n"
+        f"## Запуск\n```bash\n"
+        f"docker run --rm -v $(pwd)/src:/app -w /app {docker_img} bash -c '{run_cmd}'\n```\n"
+    )
+    (project_path / "SUMMARY.md").write_text(text, encoding="utf-8")
+    print("📄 Сгенерирован SUMMARY.md")
+
+
+def update_requirements(src_path: Path, orig: str, alt: str) -> None:
+    """requirements.txt — в src/."""
+    req_path = src_path / "requirements.txt"
+    if not req_path.exists():
+        return
+    lines     = req_path.read_text(encoding="utf-8").splitlines()
+    new_lines = [line if line.strip() != orig.strip() else alt for line in lines]
+    req_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+def _sanitize_package_name(pkg: str) -> str:
+    """Санитизация имени пакета: разрешены только безопасные символы."""
+    # Разрешены буквы, цифры, дефис, подчёркивание, точка, ==, >=, <=, ~=, [extras]
+    clean = re.sub(r"[^\w\-\.\[\]=<>~,!]", "", pkg)
+    return clean.strip()
+
+
+def update_dependencies(src_path: Path, language: str, pkg: str) -> None:
+    """Зависимости добавляются в src/."""
+    pkg = _sanitize_package_name(pkg)
+    if not pkg:
+        print("⚠️  Пустое или небезопасное имя пакета — пропускаю.")
+        return
+    if language == "python":
+        req_path = src_path / "requirements.txt"
+        current_reqs = req_path.read_text(encoding="utf-8") if req_path.exists() else ""
+        pkg_base = re.split(r'[=<>~\[!]', pkg)[0].strip().lower()
+        existing = [
+            re.split(r'[=<>~\[!]', line)[0].strip().lower()
+            for line in current_reqs.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        if pkg_base in existing:
+            print(f"  ℹ️  '{pkg_base}' уже в requirements.txt — пропускаю.")
+            return
+        with open(req_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{pkg}\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+    elif language == "typescript":
+        pkg_json_path = src_path / "package.json"
+        if pkg_json_path.exists():
+            try:
+                raw_text = pkg_json_path.read_text(encoding="utf-8")
+                pkg_data = json.loads(raw_text)  # гарантируем валидный JSON перед редактированием
+                if not isinstance(pkg_data, dict):
+                    raise ValueError("package.json должен быть объектом, а не массивом/строкой")
+                pkg_data.setdefault("dependencies", {})[pkg] = "latest"
+                new_text = json.dumps(pkg_data, indent=2, ensure_ascii=False)
+                json.loads(new_text)  # двойная проверка перед записью
+                pkg_json_path.write_text(new_text, encoding="utf-8")
+                print(f"  → Добавлен {pkg} в package.json")
+            except Exception as e:
+                print(f"  ⚠️  Не удалось обновить package.json: {e}")
+
+    else:
+        print(f"⚠️  Добавление пакета для {language} требует ручного вмешательства: {pkg}")
+
+
+def update_dockerfile(src_path: Path, patch: str) -> None:
+    """Dockerfile — в src/."""
+    dockerfile = src_path / "Dockerfile"
+    if not dockerfile.exists():
+        return
+    content = dockerfile.read_text(encoding="utf-8").rstrip()
+    if patch.strip() not in content:
+        if not patch.strip().upper().startswith("RUN"):
+            patch = f"RUN {patch}"
+        content += f"\n\n# DevOps fix\n{patch}\n"
+    dockerfile.write_text(content + "\n", encoding="utf-8")
+
+
+def generate_tor_md(project_path: Path, ba_resp: dict) -> None:
+    """A1 сохраняется как артефакт."""
+    tor_text = (
+        "# A1: Business Requirements (TOR)\n\n"
+        f"## Цель проекта\n{ba_resp.get('project_goal', '')}\n\n"
+        "## User Stories\n"
+        + "\n".join(f"- {s}" for s in ba_resp.get("user_stories", []))
+        + "\n\n## Критерии приёмки\n"
+        + "\n".join(f"- {c}" for c in ba_resp.get("acceptance_criteria", []))
+    )
+    save_artifact(project_path, "A1", tor_text)
+    print("📄 Артефакт A1 (Business Requirements) сохранён.")
