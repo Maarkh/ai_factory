@@ -2,12 +2,12 @@ import os
 import re
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Optional
 
 from config import MAX_CONTEXT_CHARS
 
 
 def extract_public_api(code: str) -> str:
+    """Извлекает публичный API файла: импорты, классы, функции, публичные переменные."""
     api_lines: list[str] = []
     total = 0
     PUBLIC_PREFIXES = (
@@ -36,9 +36,9 @@ def extract_public_api(code: str) -> str:
 def get_global_context(
     src_path: Path,
     files: list[str],
-    exclude: Optional[str] = None,
+    exclude: str | None = None,
 ) -> str:
-    """Читает файлы из src_path (не из project_path напрямую)."""
+    """Читает файлы из src_path и возвращает их публичный API в виде строки."""
     parts: list[str] = []
     total = 0
     for fname in files:
@@ -60,7 +60,7 @@ def get_global_context(
 
 
 def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
-    """Ищет файлы в src_path."""
+    """Возвращает файлы в порядке топологической сортировки по импортам."""
     graph: dict[str, list[str]]  = defaultdict(list)
     indegree: dict[str, int]     = {f: 0 for f in files}
     file_set = set(files)
@@ -99,6 +99,7 @@ def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
 
 
 def _find_failing_file(stderr: str, stdout: str, files: list[str]) -> str:
+    """Определяет файл с ошибкой по traceback. Возвращает имя файла или files[0]."""
     combined = stderr + "\n" + stdout
     # Python: File "path/file.py", line N
     for match in re.findall(r'File "([^"]+)", line \d+', stderr):

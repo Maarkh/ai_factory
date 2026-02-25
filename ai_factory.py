@@ -4,6 +4,7 @@
 
 """
 
+import asyncio
 import json
 import re
 import signal
@@ -130,7 +131,7 @@ def _init_project_files(
     return files_list, entry_point
 
 
-def main() -> None:
+async def main() -> None:
     if not check_docker_installed():
         return
 
@@ -187,7 +188,7 @@ def main() -> None:
 
         print("\n📊 Business Analyst (→ A1) ...")
         try:
-            ba_resp = ask_agent(logger, "business_analyst", f"Запрос:\n{task}", cache, language=language)
+            ba_resp = await ask_agent(logger, "business_analyst", f"Запрос:\n{task}", cache, language=language)
             generate_tor_md(project_path, ba_resp)  # сохраняет A1
         except Exception as e:
             print(f"❌ Business Analyst упал: {e}")
@@ -195,7 +196,7 @@ def main() -> None:
 
         print("⚙️  System Analyst (→ A2) ...")
         try:
-            sa_resp = ask_agent(
+            sa_resp = await ask_agent(
                 logger, "system_analyst",
                 f"Запрос:\n{task}\n\nТЗ от БА (A1):\n{json.dumps(ba_resp, ensure_ascii=False, indent=2)}",
                 cache, language=language,
@@ -211,9 +212,9 @@ def main() -> None:
             if arch_attempt > 0:
                 delay = 2 ** arch_attempt
                 print(f"  ⏳ Пауза {delay}с перед попыткой {arch_attempt + 1}/5 ...")
-                time.sleep(delay)
+                await asyncio.sleep(delay)
             try:
-                arch_resp = ask_agent(
+                arch_resp = await ask_agent(
                     logger, "architect",
                     (
                         f"Запрос:\n{task}\n\n"
@@ -222,7 +223,7 @@ def main() -> None:
                     ),
                     cache, arch_attempt, randomize_models, language,
                 )
-                if phase_validate_architecture(
+                if await phase_validate_architecture(
                     logger, project_path, None, cache, stats,
                     arch_resp, sa_resp, task, language, randomize_models,
                 ):
@@ -273,7 +274,7 @@ def main() -> None:
         }
 
         # Генерируем A5 (API Contract)
-        api_contract = phase_generate_api_contract(
+        api_contract = await phase_generate_api_contract(
             logger, project_path, state, cache, stats,
             arch_resp, sa_resp, randomize_models,
         )
@@ -306,7 +307,7 @@ def main() -> None:
                 stats.print_report()
                 return
 
-        decision   = ask_supervisor(logger, state, cache, randomize_models, language)
+        decision   = await ask_supervisor(logger, state, cache, randomize_models, language)
         next_phase = decision.get("next_phase", "develop")
         confidence = decision.get("confidence", 0)
         reason     = decision.get("reason", "")
@@ -320,7 +321,7 @@ def main() -> None:
                 f"Фаза '{next_phase}' провалилась {total_fails} раз. "
                 "Вероятно, фундаментальная проблема в спецификации."
             )
-            revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+            await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
             state["max_iters"] += 10
             state["phase_total_fails"][next_phase] = 0
             save_state(project_path, state)
@@ -333,7 +334,7 @@ def main() -> None:
 
         # ── Диспетчер фаз ────────────────────────────────────────────────────
         if next_phase == "develop":
-            exhausted = phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
+            exhausted = await phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
             _reset_phase_fail(state, "develop")
             if exhausted:
                 problem = (
@@ -345,19 +346,19 @@ def main() -> None:
                     )
                 )
                 print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
-                revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                 state["max_iters"] += 10
                 for f in exhausted:
                     state["file_attempts"][f] = 0
 
         elif next_phase == "e2e_review":
-            if not phase_e2e_review(logger, project_path, state, cache, stats, e2e_attempt, randomize=randomize_models):
+            if not await phase_e2e_review(logger, project_path, state, cache, stats, e2e_attempt, randomize=randomize_models):
                 fails = _bump_phase_fail(state, "e2e_review")
                 e2e_attempt += 1
                 if fails >= 3:
                     print("⚠️  E2E падает 3 раза подряд → принудительный revise_spec.")
                     problem = "E2E Review падает несколько итераций подряд. Возможны архитектурные противоречия."
-                    revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                    await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                     state["max_iters"] += 5
             else:
                 state["e2e_passed"] = True
@@ -365,26 +366,26 @@ def main() -> None:
                 _reset_phase_fail(state, "e2e_review")
 
         elif next_phase == "integration_test":
-            if not phase_integration_test(logger, project_path, state, cache, stats, randomize=randomize_models):
+            if not await phase_integration_test(logger, project_path, state, cache, stats, randomize=randomize_models):
                 _bump_phase_fail(state, "integration_test")
             else:
                 state["integration_passed"] = True
                 _reset_phase_fail(state, "integration_test")
 
         elif next_phase == "unit_tests":
-            if not phase_unit_tests(logger, project_path, state, cache, stats, randomize=randomize_models):
+            if not await phase_unit_tests(logger, project_path, state, cache, stats, randomize=randomize_models):
                 _bump_phase_fail(state, "unit_tests")
             else:
                 state["tests_passed"] = True
                 _reset_phase_fail(state, "unit_tests")
 
         elif next_phase == "document":
-            phase_document(logger, project_path, state, cache, randomize=randomize_models)
+            await phase_document(logger, project_path, state, cache, randomize=randomize_models)
             state["document_generated"] = True
 
         elif next_phase == "revise_spec":
             problem = input("Опишите противоречие (или Enter для авто): ").strip() or "Авто-эскалация от Supervisor"
-            revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+            await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
             state["max_iters"] += 10
 
         elif next_phase == "success":
@@ -443,7 +444,7 @@ def main() -> None:
                     save_state(project_path, state)
             elif act == "spec":
                 problem = input("Опишите противоречие: ").strip() or "Запрос заказчика"
-                revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                 state["e2e_passed"] = state["integration_passed"] = \
                     state["tests_passed"] = state["document_generated"] = False
                 state["max_iters"] += 10
@@ -454,7 +455,7 @@ def main() -> None:
 
         else:
             logger.warning(f"Неизвестная фаза от Supervisor: '{next_phase}'. Fallback → develop.")
-            phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
+            await phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
 
         save_cache(project_path, cache)
         state["iteration"] += 1
@@ -464,4 +465,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

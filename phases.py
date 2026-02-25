@@ -1,11 +1,12 @@
+import asyncio
 import json
 import re
-import concurrent.futures
 import logging
 from pathlib import Path
 from typing import Optional
 
 from config import MAX_FILE_ATTEMPTS, MAX_CONTEXT_CHARS, MIN_COVERAGE, FACTORY_DIR, LOGS_DIR, SRC_DIR
+from exceptions import LLMError
 from llm import ask_agent
 from stats import ModelStats
 from json_utils import _to_str, _safe_contract
@@ -19,7 +20,7 @@ from contract import _refresh_api_contract
 from cache import ThreadSafeCache
 
 
-def _review_file(
+async def _review_file(
     logger: logging.Logger,
     cache: ThreadSafeCache,
     current_file: str,
@@ -30,21 +31,21 @@ def _review_file(
     language: str = "python",
 ) -> tuple[str, str]:
     rev_model = get_model("reviewer", attempt, randomize=randomize)
-    print(f"👀 [{rev_model}] Reviewer проверяет {current_file} ...")
+    logger.info(f"👀 [{rev_model}] Reviewer проверяет {current_file} ...")
     try:
-        result   = ask_agent(logger, "reviewer", f"Файл: {current_file}\nКод:\n{code}",
-                             cache, attempt, randomize, language)
+        result   = await ask_agent(logger, "reviewer", f"Файл: {current_file}\nКод:\n{code}",
+                                   cache, attempt, randomize, language)
         status   = result.get("status", "REJECT")
         feedback = _to_str(result.get("feedback", ""))
         stats.record("reviewer", rev_model, status == "APPROVE")
         return status, feedback
-    except Exception as e:
+    except (LLMError, ValueError) as e:
         logger.exception(f"Reviewer упал: {e}")
         stats.record("reviewer", rev_model, False)
         return "REJECT", f"Reviewer упал: {e}"
 
 
-def do_self_reflect(
+async def do_self_reflect(
     logger: logging.Logger,
     cache: ThreadSafeCache,
     src_path: Path,
@@ -57,10 +58,10 @@ def do_self_reflect(
     """Self-Reflect проверяет соответствие A2 и A5."""
     language  = state.get("language", "python")
     sr_model  = get_model("self_reflect", 0, randomize=randomize)
-    print(f"🤔 [{sr_model}] Self-Reflect проверяет {current_file} ...")
+    logger.info(f"🤔 [{sr_model}] Self-Reflect проверяет {current_file} ...")
 
     # Контракт для текущего файла из A5
-    file_contract = _safe_contract(state).get("file_contracts", {}).get(current_file, [])
+    file_contract  = _safe_contract(state).get("file_contracts", {}).get(current_file, [])
     global_imports = _safe_contract(state).get("global_imports", {}).get(current_file, [])
 
     try:
@@ -72,24 +73,24 @@ def do_self_reflect(
             f"Ключевые внешние импорты из A5 (могут быть расширены разработчиком — это нормально):\n"
             f"{json.dumps(global_imports, ensure_ascii=False, indent=2)}"
         )
-        result   = ask_agent(logger, "self_reflect", ctx, cache, 0, randomize, language)
+        result   = await ask_agent(logger, "self_reflect", ctx, cache, 0, randomize, language)
         status   = result.get("status", "OK")
         feedback = _to_str(result.get("feedback", ""))
         improved = _to_str(result.get("improved_code", "")).strip()
 
         if status == "NEEDS_IMPROVEMENT" and improved:
             (src_path / current_file).write_text(improved, encoding="utf-8")
-            print(f"  → Self-Reflect улучшил код: {feedback[:80]}")
+            logger.info(f"  → Self-Reflect улучшил код: {feedback[:80]}")
 
         stats.record("self_reflect", sr_model, status == "OK")
         return status, feedback
-    except Exception as e:
+    except (LLMError, ValueError) as e:
         logger.exception(f"Self-Reflect упал: {e}")
         stats.record("self_reflect", sr_model, False)
         return "OK", ""
 
 
-def phase_validate_architecture(
+async def phase_validate_architecture(
     logger: logging.Logger,
     project_path: Path,
     state: Optional[dict],
@@ -115,7 +116,7 @@ def phase_validate_architecture(
 
     rejections = 0
     for label, agent_key, instruction in validation_map:
-        print(f"🔍 Валидация архитектуры — {label} ...")
+        logger.info(f"🔍 Валидация архитектуры — {label} ...")
         val_ctx = (
             f"Запрос: {task}\n\n"
             f"Спецификация (SA): {sa_text}\n\n"
@@ -124,27 +125,27 @@ def phase_validate_architecture(
             f"Задача проверки: {instruction}"
         )
         try:
-            val_resp = ask_agent(logger, agent_key, val_ctx, cache, 0, randomize, language)
+            val_resp = await ask_agent(logger, agent_key, val_ctx, cache, 0, randomize, language)
             if val_resp.get("status") in ("REJECT", "CANNOT_FIX"):
                 fb = _to_str(val_resp.get("feedback", val_resp.get("explanation", "")))
-                print(f"  ❌ {label} отклонил: {fb[:150]}")
+                logger.warning(f"  ❌ {label} отклонил: {fb[:150]}")
                 rejections += 1
                 stats.record(agent_key, get_model(agent_key), False)
             else:
-                print(f"  ✅ {label} одобрил.")
+                logger.info(f"  ✅ {label} одобрил.")
                 stats.record(agent_key, get_model(agent_key), True)
-        except Exception as e:
+        except (LLMError, ValueError) as e:
             logger.exception(f"{label} упал: {e}")
             rejections += 1
 
         if rejections > 1:
             return False
 
-    print("✅ Архитектура прошла многоуровневую валидацию!")
+    logger.info("✅ Архитектура прошла многоуровневую валидацию!")
     return True
 
 
-def phase_develop(
+async def phase_develop(
     logger: logging.Logger,
     project_path: Path,
     state: dict,
@@ -160,13 +161,15 @@ def phase_develop(
 
     for current_file in order:
         if current_file in state.get("approved_files", []):
-            print(f"⏭️  {current_file} уже одобрен.")
+            logger.info(f"⏭️  {current_file} уже одобрен.")
             continue
 
         attempt = file_attempts.get(current_file, 0)
 
         if attempt >= MAX_FILE_ATTEMPTS:
-            print(f"⚠️  {current_file} исчерпал {MAX_FILE_ATTEMPTS} попыток → эскалация в spec_reviewer.")
+            logger.warning(
+                f"⚠️  {current_file} исчерпал {MAX_FILE_ATTEMPTS} попыток → эскалация в spec_reviewer."
+            )
             state["feedbacks"][current_file] = (
                 f"Файл не удалось написать за {MAX_FILE_ATTEMPTS} попыток. "
                 "Возможно, спецификация противоречива. Требуется revise_spec."
@@ -223,12 +226,14 @@ def phase_develop(
             dev_ctx += feedback_ctx
 
         dev_model = get_model("developer", attempt, randomize=randomize)
-        print(f"💻 [{dev_model}] Разработчик пишет {current_file} (попытка {attempt + 1}/{MAX_FILE_ATTEMPTS}) ...")
+        logger.info(
+            f"💻 [{dev_model}] Разработчик пишет {current_file} (попытка {attempt + 1}/{MAX_FILE_ATTEMPTS}) ..."
+        )
 
         try:
-            dev_resp = ask_agent(logger, "developer", dev_ctx, cache, attempt, randomize, language)
+            dev_resp = await ask_agent(logger, "developer", dev_ctx, cache, attempt, randomize, language)
             code     = dev_resp.get("code", "").strip()
-        except Exception as e:
+        except (LLMError, ValueError) as e:
             logger.exception(f"Developer упал: {e}")
             stats.record("developer", dev_model, False)
             state["feedbacks"][current_file] = f"Агент не вернул код: {e}"
@@ -244,7 +249,7 @@ def phase_develop(
         file_path.write_text(code, encoding="utf-8")
 
         # Self-Reflect с проверкой A5
-        sr_status, sr_feedback = do_self_reflect(
+        sr_status, sr_feedback = await do_self_reflect(
             logger, cache, src_path, current_file, code, state, stats, randomize
         )
         if sr_status == "NEEDS_IMPROVEMENT":
@@ -252,13 +257,13 @@ def phase_develop(
             code = file_path.read_text(encoding="utf-8")
 
         # Внешний ревью
-        rev_status, rev_feedback = _review_file(
+        rev_status, rev_feedback = await _review_file(
             logger, cache, current_file, code, attempt, stats, randomize, language
         )
 
         if rev_status == "APPROVE":
             stats.record("developer", dev_model, True)
-            print(f"✅ {current_file} одобрен.")
+            logger.info(f"✅ {current_file} одобрен.")
             state.setdefault("approved_files", []).append(current_file)
             state["feedbacks"][current_file] = ""
             state.setdefault("feedback_history", {})[current_file] = []
@@ -268,15 +273,14 @@ def phase_develop(
         else:
             stats.record("developer", dev_model, False)
             combined = "\n".join(filter(None, [_to_str(sr_feedback), _to_str(rev_feedback)]))
-            print(f"❌ {current_file} отклонён: {combined[:100]}")
+            logger.warning(f"❌ {current_file} отклонён: {combined[:100]}")
             _push_feedback(state, current_file, combined)
             file_attempts[current_file] = attempt + 1
-
 
     return exhausted_files
 
 
-def phase_e2e_review(
+async def phase_e2e_review(
     logger: logging.Logger,
     project_path: Path,
     state: dict,
@@ -285,53 +289,43 @@ def phase_e2e_review(
     attempt: int = 0,
     randomize: bool = False,
 ) -> bool:
-    print("\n🧐 Parallel E2E-ревью (Architect + QA) ...")
+    logger.info("\n🧐 Parallel E2E-ревью (Architect + QA) ...")
     language = state.get("language", "python")
     src_path = project_path / SRC_DIR
     all_code = get_global_context(src_path, state["files"])
 
     agents = [("e2e_architect", "Architect"), ("e2e_qa", "QA Lead")]
     result_ok = True
-    # Локальный список результатов — модифицируем state только после завершения всех потоков
     rejections: list[tuple[str, str, str]] = []  # (agent_key, target, feedback)
     successes:  list[str]                  = []   # agent_keys
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        future_map: dict[concurrent.futures.Future, tuple[str, str]] = {
-            executor.submit(ask_agent, logger, agent_key, all_code, cache, attempt, randomize, language):
-            (agent_key, label)
-            for agent_key, label in agents
-        }
+    # Параллельный запуск через asyncio.gather вместо ThreadPoolExecutor
+    gather_results = await asyncio.gather(
+        *[ask_agent(logger, ak, all_code, cache, attempt, randomize, language) for ak, _ in agents],
+        return_exceptions=True,
+    )
 
-        done, not_done = concurrent.futures.wait(
-            future_map, return_when=concurrent.futures.ALL_COMPLETED
-        )
+    for (agent_key, label), result in zip(agents, gather_results):
+        model = get_model(agent_key, attempt, randomize)
+        if isinstance(result, Exception):
+            logger.exception(f"[{label}] future error: {result}")
+            stats.record(agent_key, model, False)
+            result_ok = False
+            continue
 
-        for future in list(done) + list(not_done):
-            agent_key, label = future_map[future]
-            model = get_model(agent_key, attempt, randomize)
-            if future.cancelled():
-                continue
-            try:
-                resp = future.result()
-            except Exception as e:
-                logger.exception(f"[{label}] future error: {e}")
-                stats.record(agent_key, model, False)
-                result_ok = False
-                continue
+        resp = result
+        if resp.get("status") == "REJECT":
+            target   = resp.get("target_file", "").strip() or state["files"][0]
+            feedback = _to_str(resp.get("feedback", ""))
+            logger.warning(f"❌ E2E [{label}] REJECT на {target}: {feedback[:120]}")
+            stats.record(agent_key, model, False)
+            rejections.append((agent_key, target, feedback))
+            result_ok = False
+        else:
+            stats.record(agent_key, model, True)
+            successes.append(agent_key)
 
-            if resp.get("status") == "REJECT":
-                target   = resp.get("target_file", "").strip() or state["files"][0]
-                feedback = _to_str(resp.get("feedback", ""))
-                print(f"❌ E2E [{label}] REJECT на {target}: {feedback[:120]}")
-                stats.record(agent_key, model, False)
-                rejections.append((agent_key, target, feedback))
-                result_ok = False
-            else:
-                stats.record(agent_key, model, True)
-                successes.append(agent_key)
-
-    # Применяем изменения к state после завершения всех потоков (нет гонки)
+    # Применяем изменения к state после завершения всех корутин
     for agent_key, target, feedback in rejections:
         label = dict(agents).get(agent_key, agent_key)
         if target in state.get("approved_files", []):
@@ -339,11 +333,11 @@ def phase_e2e_review(
         state["feedbacks"][target] = f"E2E {label} Reject:\n{feedback}"
 
     if result_ok:
-        print("✅ Parallel E2E-ревью пройдено!")
+        logger.info("✅ Parallel E2E-ревью пройдено!")
     return result_ok
 
 
-def phase_integration_test(
+async def phase_integration_test(
     logger: logging.Logger,
     project_path: Path,
     state: dict,
@@ -362,24 +356,26 @@ def phase_integration_test(
     build_success = False
     for build_attempt in range(1, 4):
         if use_custom:
-            print(f"\n🏗️ Сборка Docker-образа (попытка {build_attempt}/3) ...")
+            logger.info(f"\n🏗️ Сборка Docker-образа (попытка {build_attempt}/3) ...")
             build_success, _, build_err = build_docker_image(src_path, image_tag)
             if build_success:
-                print("✅ Образ собран.")
+                logger.info("✅ Образ собран.")
                 break
-            print(f"❌ Ошибка сборки:\n{build_err[:400]}")
+            logger.error(f"❌ Ошибка сборки:\n{build_err[:400]}")
             try:
                 devops_ctx  = (
                     f"Ошибка сборки Docker:\n{build_err}\n\n"
                     f"Текущий Dockerfile:\n{dockerfile.read_text(encoding='utf-8')}"
                 )
-                devops_resp = ask_agent(logger, "devops_runtime", devops_ctx, cache, 0, randomize, language)
+                devops_resp = await ask_agent(
+                    logger, "devops_runtime", devops_ctx, cache, 0, randomize, language
+                )
                 stats.record("devops_runtime", get_model("devops_runtime"), True)
                 patch = devops_resp.get("dockerfile_patch", "")
                 if devops_resp.get("status") == "FIX_PROPOSED" and isinstance(patch, str) and patch.strip():
                     update_dockerfile(src_path, patch)
-                    print("  → Dockerfile обновлён, пересобираю.")
-            except Exception as e:
+                    logger.info("  → Dockerfile обновлён, пересобираю.")
+            except (LLMError, ValueError) as e:
                 logger.exception(f"DevOps (build) упал: {e}")
                 stats.record("devops_runtime", get_model("devops_runtime"), False)
         else:
@@ -393,7 +389,7 @@ def phase_integration_test(
     # ── Запуск приложения ────────────────────────────────────────────────────
     from config import RUN_TIMEOUT
     for run_attempt in range(1, 6):
-        print(f"\n🚀 Запуск в Docker (попытка {run_attempt}/5) ...")
+        logger.info(f"\n🚀 Запуск в Docker (попытка {run_attempt}/5) ...")
         cmd = get_execution_command(language, entry_point)
 
         env_fixes = state.get("env_fixes", {})
@@ -411,36 +407,38 @@ def phase_integration_test(
         (logs_dir / "test.log").write_text(
             f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}", encoding="utf-8"
         )
-        print("\n--- STDOUT ---\n", stdout[:2000])
-        print("\n--- STDERR ---\n", stderr[:2000])
+        logger.info(f"\n--- STDOUT ---\n{stdout[:2000]}")
+        logger.info(f"\n--- STDERR ---\n{stderr[:2000]}")
 
         if rc == 0:
-            print("\n✅ Приложение завершилось успешно!")
+            logger.info("\n✅ Приложение завершилось успешно!")
             state["env_fixes"] = {}
             return True
 
-        print("\n💥 Ошибка выполнения!")
+        logger.error("\n💥 Ошибка выполнения!")
         log_runtime_error(project_path, stderr)
 
         failing_file = _find_failing_file(stderr, stdout, state["files"])
 
         if any(kw in stderr.lower() for kw in ["lib", ".so", "cannot open shared object", "no such file"]):
-            print("🛠️  DevOps анализирует ошибку окружения ...")
+            logger.info("🛠️  DevOps анализирует ошибку окружения ...")
             try:
                 devops_ctx  = (
                     f"Traceback:\n{stderr}\n\n"
                     f"Dockerfile: {dockerfile.read_text(encoding='utf-8') if dockerfile.exists() else 'Нет'}"
                 )
-                devops_resp = ask_agent(logger, "devops_runtime", devops_ctx, cache, 0, randomize, language)
+                devops_resp = await ask_agent(
+                    logger, "devops_runtime", devops_ctx, cache, 0, randomize, language
+                )
                 stats.record("devops_runtime", get_model("devops_runtime"), True)
                 if devops_resp.get("status") == "FIX_PROPOSED":
                     if devops_resp.get("dockerfile_patch"):
                         update_dockerfile(src_path, devops_resp["dockerfile_patch"])
-                        print("  → Dockerfile обновлён, требуется пересборка.")
+                        logger.info("  → Dockerfile обновлён, требуется пересборка.")
                         return False
                     state["env_fixes"] = devops_resp
                     continue
-            except Exception as e:
+            except (LLMError, ValueError) as e:
                 logger.exception(f"DevOps (runtime) упал: {e}")
                 stats.record("devops_runtime", get_model("devops_runtime"), False)
 
@@ -448,7 +446,7 @@ def phase_integration_test(
         fix         = "Смотри traceback."
         missing_pkg = ""
         try:
-            qa_resp     = ask_agent(
+            qa_resp     = await ask_agent(
                 logger, "qa_runtime",
                 f"Traceback:\n{stderr}\n\nФайл с ошибкой: {failing_file}",
                 cache, run_attempt - 1, randomize, language,
@@ -459,7 +457,7 @@ def phase_integration_test(
             if agent_file and agent_file in state["files"]:
                 failing_file = agent_file
             stats.record("qa_runtime", qa_model, True)
-        except Exception as e:
+        except (LLMError, ValueError) as e:
             logger.exception(f"QA Runtime упал: {e}")
             stats.record("qa_runtime", qa_model, False)
 
@@ -471,7 +469,9 @@ def phase_integration_test(
                 existing     = [re.split(r'[=<>~]', l)[0].strip().lower()
                                 for l in current_reqs.splitlines() if l.strip() and not l.startswith("#")]
                 if pkg_clean in existing:
-                    print(f"⚠️  '{pkg_clean}' уже в requirements, но всё равно падает → возврат разработчику.")
+                    logger.warning(
+                        f"⚠️  '{pkg_clean}' уже в requirements, но всё равно падает → возврат разработчику."
+                    )
                     state["feedbacks"][failing_file] = (
                         f"ПРОГРАММА УПАЛА. Пакет '{pkg_clean}' установлен, но код падает. "
                         f"Проблема в логике или импортах.\nTraceback:\n{stderr}"
@@ -480,24 +480,24 @@ def phase_integration_test(
                         state["approved_files"].remove(failing_file)
                     return False
                 else:
-                    print(f"🔧 Добавляю пакет: {missing_pkg}")
+                    logger.info(f"🔧 Добавляю пакет: {missing_pkg}")
                     update_dependencies(src_path, language, missing_pkg)
                     continue
             elif language == "typescript":
-                print(f"🔧 Добавляю пакет в package.json: {missing_pkg}")
+                logger.info(f"🔧 Добавляю пакет в package.json: {missing_pkg}")
                 update_dependencies(src_path, language, missing_pkg)
                 continue
 
         if failing_file in state.get("approved_files", []):
             state["approved_files"].remove(failing_file)
         state["feedbacks"][failing_file] = f"ПРОГРАММА УПАЛА.\nTRACEBACK:\n{stderr}\nQA:\n{fix}"
-        print("🔄 Возврат к разработчику.")
+        logger.info("🔄 Возврат к разработчику.")
         return False
 
     return False
 
 
-def phase_unit_tests(
+async def phase_unit_tests(
     logger: logging.Logger,
     project_path: Path,
     state: dict,
@@ -505,7 +505,7 @@ def phase_unit_tests(
     stats: ModelStats,
     randomize: bool = False,
 ) -> bool:
-    print("\n🧪 Генерация unit-тестов ...")
+    logger.info("\n🧪 Генерация unit-тестов ...")
     language = state.get("language", "python")
     src_path = project_path / SRC_DIR
     all_code = get_global_context(src_path, state["files"])
@@ -515,7 +515,7 @@ def phase_unit_tests(
 
     tg_model = get_model("test_generator", 0, randomize)
     try:
-        test_resp  = ask_agent(
+        test_resp  = await ask_agent(
             logger, "test_generator",
             f"Спецификации (A2):\n{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}"
             f"\n\nAPI Контракт (A5):\n{json.dumps(_safe_contract(state), ensure_ascii=False, indent=2)}"
@@ -525,8 +525,8 @@ def phase_unit_tests(
         )
         test_files = test_resp.get("test_files", [])
         stats.record("test_generator", tg_model, True)
-    except Exception as e:
-        print(f"⚠️  Не удалось сгенерировать тесты: {e}. Пропускаю.")
+    except (LLMError, ValueError) as e:
+        logger.warning(f"⚠️  Не удалось сгенерировать тесты: {e}. Пропускаю.")
         stats.record("test_generator", tg_model, False)
         return True
 
@@ -544,7 +544,7 @@ def phase_unit_tests(
                 code, encoding="utf-8"
             )
 
-    print("🚀 Запуск тестов в Docker ...")
+    logger.info("🚀 Запуск тестов в Docker ...")
     from config import RUN_TIMEOUT
     cmd = get_test_command(language)
     rc, stdout, stderr = run_in_docker(src_path, cmd, RUN_TIMEOUT * 2, language)
@@ -554,7 +554,7 @@ def phase_unit_tests(
     (logs_dir / "coverage.log").write_text(stdout + "\n" + stderr, encoding="utf-8")
 
     if rc != 0:
-        print("❌ Тесты провалены!")
+        logger.warning("❌ Тесты провалены!")
         failing_file = _find_failing_file(stderr, stdout, state["files"])
         state["feedbacks"][failing_file] = f"UNIT-ТЕСТЫ УПАЛИ:\n{stderr[-2000:]}\n\nВывод:\n{stdout[-1000:]}"
         if failing_file in state.get("approved_files", []):
@@ -565,7 +565,7 @@ def phase_unit_tests(
     coverage = int(m.group(1)) if m else 100
 
     if coverage < MIN_COVERAGE:
-        print(f"❌ Покрытие {coverage}% < {MIN_COVERAGE}%")
+        logger.warning(f"❌ Покрытие {coverage}% < {MIN_COVERAGE}%")
         entry = state.get("entry_point", "main.py")
         state["feedbacks"][entry] = (
             f"Покрытие {coverage}% < порога {MIN_COVERAGE}%. "
@@ -575,21 +575,21 @@ def phase_unit_tests(
             state["approved_files"].remove(entry)
         return False
 
-    print(f"✅ Тесты пройдены! Покрытие: {coverage}%")
+    logger.info(f"✅ Тесты пройдены! Покрытие: {coverage}%")
     return True
 
 
-def phase_document(
+async def phase_document(
     logger: logging.Logger,
     project_path: Path,
     state: dict,
     cache: ThreadSafeCache,
     randomize: bool = False,
 ) -> None:
-    print("📝 Генерация README.md (A10) ...")
+    logger.info("📝 Генерация README.md (A10) ...")
     language = state.get("language", "python")
     try:
-        resp = ask_agent(
+        resp = await ask_agent(
             logger, "documenter",
             (
                 f"Задача: {state['task']}\n"
@@ -604,12 +604,12 @@ def phase_document(
         (project_path / SRC_DIR / "README.md").write_text(readme_text, encoding="utf-8")
         # Также сохраняем как артефакт A10
         save_artifact(project_path, "A10", readme_text)
-        print("✅ README.md сгенерирован (A10 сохранён).")
-    except Exception as e:
-        print(f"⚠️  Documenter не справился: {e}")
+        logger.info("✅ README.md сгенерирован (A10 сохранён).")
+    except (LLMError, ValueError) as e:
+        logger.warning(f"⚠️  Documenter не справился: {e}")
 
 
-def revise_spec(
+async def revise_spec(
     logger: logging.Logger,
     project_path: Path,
     state: dict,
@@ -623,7 +623,7 @@ def revise_spec(
     A2 обновляется → автоматически пересчитывается A5 →
     сбрасываются только файлы, затронутые изменённым контрактом.
     """
-    print("\n🔁 Пересмотр спецификации (каскад A2 → A5) ...")
+    logger.info("\n🔁 Пересмотр спецификации (каскад A2 → A5) ...")
     language = state.get("language", "python")
     ctx = (
         f"Запрос заказчика:\n{state['task']}\n\n"
@@ -631,7 +631,7 @@ def revise_spec(
         f"Проблема:\n{problem}"
     )
     try:
-        new_specs      = ask_agent(logger, "spec_reviewer", ctx, cache, 0, randomize, language)
+        new_specs      = await ask_agent(logger, "spec_reviewer", ctx, cache, 0, randomize, language)
         change_summary = new_specs.get("change_summary", "нет описания")
         # Извлекаем только ожидаемые ключи спецификации
         state["system_specs"] = {
@@ -646,8 +646,8 @@ def revise_spec(
 
         # Каскад: пересчитываем A5
         from stats import ModelStats as _ModelStats
-        _refresh_api_contract(logger, project_path, state, cache,
-                              stats or _ModelStats(project_path), randomize)
+        await _refresh_api_contract(logger, project_path, state, cache,
+                                    stats or _ModelStats(project_path), randomize)
 
         # Определяем, какие файлы затронуты новым контрактом
         from json_utils import _safe_contract as _sc
@@ -681,12 +681,12 @@ def revise_spec(
         state["tests_passed"]       = False
         state["document_generated"] = False
 
-        print(f"✅ Спецификация обновлена (A2): {change_summary}")
+        logger.info(f"✅ Спецификация обновлена (A2): {change_summary}")
         if affected_files:
-            print(f"ℹ️  Сброшены затронутые файлы: {', '.join(affected_files)}")
+            logger.info(f"ℹ️  Сброшены затронутые файлы: {', '.join(affected_files)}")
         unchanged = [f for f in previously_approved if f not in affected_files]
         if unchanged:
-            print(f"✅ Незатронутые файлы сохранены: {', '.join(unchanged)}")
+            logger.info(f"✅ Незатронутые файлы сохранены: {', '.join(unchanged)}")
 
         state.setdefault("spec_history", []).append({
             "iteration":      state["iteration"],
@@ -707,5 +707,5 @@ def revise_spec(
         )
         arch_path.write_text(arch_md, encoding="utf-8")
 
-    except Exception as e:
-        print(f"⚠️  Не удалось обновить спецификацию: {e}")
+    except (LLMError, ValueError) as e:
+        logger.warning(f"⚠️  Не удалось обновить спецификацию: {e}")

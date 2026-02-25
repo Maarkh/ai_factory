@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from config import FACTORY_DIR, ARTIFACTS_DIR
 
@@ -20,9 +20,14 @@ ARTIFACT_LABELS = {
 }
 
 
-def save_artifact(project_path: Path, artifact_id: str, content: "str | dict", extra_label: str = "") -> None:
-    """
-    Сохраняет артефакт в .factory/artifacts/AX_label.md
+def save_artifact(
+    project_path: Path,
+    artifact_id: str,
+    content: Union[str, dict],
+    extra_label: str = "",
+) -> None:
+    """Сохраняет артефакт в .factory/artifacts/AX_label.md.
+
     content может быть строкой (markdown) или dict (будет завёрнут в JSON-блок).
     """
     art_dir = project_path / FACTORY_DIR / ARTIFACTS_DIR
@@ -32,7 +37,10 @@ def save_artifact(project_path: Path, artifact_id: str, content: "str | dict", e
     fname = f"{artifact_id}_{label}.md"
 
     if isinstance(content, dict):
-        text = f"# {artifact_id}: {label.replace('_', ' ').title()}\n\n```json\n{json.dumps(content, ensure_ascii=False, indent=2)}\n```\n"
+        text = (
+            f"# {artifact_id}: {label.replace('_', ' ').title()}\n\n"
+            f"```json\n{json.dumps(content, ensure_ascii=False, indent=2)}\n```\n"
+        )
     else:
         text = content
 

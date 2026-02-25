@@ -1,10 +1,24 @@
+import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # ─────────────────────────────────────────────
-# КОНФИГУРАЦИЯ
+# КОНФИГУРАЦИЯ — значения из окружения (.env)
 # ─────────────────────────────────────────────
 
-BASE_DIR            = Path("/media/mikhail/RAD/py_proj")
+BASE_DIR     = Path(os.getenv("PROJECT_BASE_DIR", "/media/mikhail/RAD/py_proj"))
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/")
+LLM_API_KEY  = os.getenv("LLM_API_KEY",  "ollama")
+LLM_TIMEOUT  = float(os.getenv("LLM_TIMEOUT", "120.0"))
+LOG_LEVEL    = os.getenv("LOG_LEVEL", "INFO")
+
+# ─────────────────────────────────────────────
+# Параметры пайплайна (не секреты — хардкод OK)
+# ─────────────────────────────────────────────
+
 WAIT_TIMEOUT        = 30
 RUN_TIMEOUT         = 6_000
 MAX_CONTEXT_CHARS   = 60_000

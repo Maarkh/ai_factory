@@ -1,4 +1,5 @@
 import re
+from typing import Any
 
 from prompts import PROMPTS
 
@@ -53,7 +54,7 @@ def get_system_prompt(agent: str, language: str = "python") -> str:
     return base.replace("{lang}", lang_name).replace("{ext}", ext)
 
 
-def sanitize_files_list(files_raw: list, language: str = "python") -> list[str]:
+def sanitize_files_list(files_raw: list[Any], language: str = "python") -> list[str]:
     """Санитизация: только безопасные относительные пути."""
     safe: list[str] = []
     for f in files_raw:

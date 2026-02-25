@@ -1,17 +1,19 @@
+import asyncio
 import json
 import logging
-import time
 from typing import Optional
 
-from openai import OpenAI
+import openai
+from openai import AsyncOpenAI
 
-from config import CACHEABLE_AGENTS
+from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT
 from cache import ThreadSafeCache, _cache_key
+from exceptions import LLMError
 from log_utils import get_model, log_model_choice, log_interaction
 from json_utils import _extract_json_from_text
 from lang_utils import get_system_prompt
 
-CLIENT = OpenAI(base_url="http://localhost:11434/v1/", api_key="ollama", timeout=120.0)
+CLIENT = AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, timeout=LLM_TIMEOUT)
 
 AGENT_TEMPERATURES: dict[str, float] = {
     "developer":        0.1,
@@ -33,7 +35,7 @@ AGENT_TEMPERATURES: dict[str, float] = {
 }
 
 
-def ask_agent(
+async def ask_agent(
     logger: logging.Logger,
     agent: str,
     user_text: str,
@@ -42,7 +44,9 @@ def ask_agent(
     randomize: bool = False,
     language: str = "python",
     max_retries: int = 3,
+    client: Optional[AsyncOpenAI] = None,
 ) -> dict:
+    _client = client or CLIENT
     model = get_model(agent, attempt, randomize=randomize)
     log_model_choice(logger, agent, model, attempt)
 
@@ -60,15 +64,15 @@ def ask_agent(
         {"role": "user",   "content": user_text},
     ]
 
-    last_exc: Exception = RuntimeError("Нет попыток")
+    last_exc: Exception = LLMError("Нет попыток")
     for retry in range(max_retries):
         if retry > 0:
             delay = 2 ** retry
             logger.info(f"[{agent}:{model}] Backoff {delay}с (retry={retry})")
-            time.sleep(delay)
-        raw: Optional[str] = None
+            await asyncio.sleep(delay)
+        raw: str | None = None
         try:
-            response = CLIENT.chat.completions.create(
+            response = await _client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
@@ -80,11 +84,11 @@ def ask_agent(
             if agent in CACHEABLE_AGENTS and attempt == 0:
                 cache[_cache_key(agent, model, user_text, language)] = result
             return result
-        except Exception as e:
+        except (openai.APIError, json.JSONDecodeError, ValueError) as e:
             last_exc = e
             logger.warning(f"[{agent}:{model}] json_object failed: {e}, пробую plain text...")
             try:
-                response = CLIENT.chat.completions.create(
+                response = await _client.chat.completions.create(
                     model=model,
                     messages=messages,
                     temperature=temperature,
@@ -95,8 +99,8 @@ def ask_agent(
                 if agent in CACHEABLE_AGENTS and attempt == 0:
                     cache[_cache_key(agent, model, user_text, language)] = result
                 return result
-            except Exception as e2:
+            except (openai.APIError, json.JSONDecodeError, ValueError) as e2:
                 last_exc = e2
                 logger.warning(f"[{agent}:{model}] plain text fallback failed: {e2}")
 
-    raise RuntimeError(f"[{agent}:{model}] все попытки исчерпаны") from last_exc
+    raise LLMError(f"[{agent}:{model}] все попытки исчерпаны") from last_exc

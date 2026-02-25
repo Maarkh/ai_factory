@@ -6,9 +6,12 @@ from pathlib import Path
 from typing import Optional
 
 from cache import ThreadSafeCache
+from exceptions import LLMError, StateError
 from llm import ask_agent
 from state import save_state
 from log_utils import get_model
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineContext:
@@ -31,9 +34,9 @@ class PipelineContext:
         if self.state is not None and self.project_path is not None:
             try:
                 save_state(self.project_path, self.state)
-                print("✅ Состояние сохранено.")
-            except Exception as e:
-                print(f"⚠️  Не удалось сохранить состояние: {e}")
+                logger.info("✅ Состояние сохранено.")
+            except (StateError, OSError) as e:
+                logger.warning(f"⚠️  Не удалось сохранить состояние: {e}")
 
 
 _ctx = PipelineContext()
@@ -45,7 +48,7 @@ def signal_handler(sig, frame) -> None:
     sys.exit(0)
 
 
-def ask_supervisor(
+async def ask_supervisor(
     logger: logging.Logger,
     state: dict,
     cache: ThreadSafeCache,
@@ -78,9 +81,9 @@ def ask_supervisor(
         "Реши следующую фазу строго по правилам из промпта."
     )
     try:
-        result = ask_agent(logger, "supervisor", ctx, cache, 0, randomize, language)
+        result = await ask_agent(logger, "supervisor", ctx, cache, 0, randomize, language)
         return result
-    except Exception as e:
+    except (LLMError, ValueError) as e:
         logger.exception(f"Supervisor упал: {e}")
         if approved < total:
             return {"next_phase": "develop",           "reason": "fallback: не все файлы одобрены"}

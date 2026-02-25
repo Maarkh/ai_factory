@@ -1,8 +1,11 @@
 import json
+import logging
 from pathlib import Path
 
 from config import FACTORY_DIR
 from lang_utils import LANG_DISPLAY
+
+logger = logging.getLogger(__name__)
 
 
 class ModelStats:
@@ -42,6 +45,7 @@ class ModelStats:
             self._flush()
 
     def print_report(self) -> None:
+        """Выводит статистику в консоль (UI — print сохранён намеренно)."""
         self.flush()
         print("\n📊 Статистика моделей:")
         if not self.data:
@@ -54,6 +58,7 @@ class ModelStats:
 
 
 def print_iteration_table(state: dict) -> None:
+    """Выводит таблицу итерации в консоль (UI — print сохранён намеренно)."""
     language = state.get("language", "python")
     approved = len(state.get("approved_files", []))
     total    = len(state.get("files", []))

@@ -1,8 +1,11 @@
 import json
 import re
+from typing import Any, TypeVar
+
+T = TypeVar("T")
 
 
-def _parse_if_str(value, expected_type: type, fallback):
+def _parse_if_str(value: Any, expected_type: type[T], fallback: T) -> T:
     """Если value — строка, пробует json.loads. Если тип не совпал — возвращает fallback."""
     if isinstance(value, expected_type):
         return value
@@ -16,7 +19,7 @@ def _parse_if_str(value, expected_type: type, fallback):
     return fallback
 
 
-def _to_str(value) -> str:
+def _to_str(value: Any) -> str:
     """Приводит любое значение к строке — защита от dict/list в полях feedback."""
     if isinstance(value, str):
         return value

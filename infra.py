@@ -1,10 +1,14 @@
 import hashlib
+import logging
 import subprocess
 from pathlib import Path
 from typing import Optional
 
 from config import FACTORY_DIR, RUN_TIMEOUT
+from exceptions import DockerError
 from lang_utils import get_docker_image
+
+logger = logging.getLogger(__name__)
 
 
 def run_command(
@@ -86,9 +90,9 @@ def build_docker_image(src_path: Path, tag: str) -> tuple[bool, str, str]:
 def check_docker_installed() -> bool:
     rc, _, stderr = run_command(["docker", "version"])
     if rc != 0:
-        print(f"❌ Docker не установлен или демон не запущен.\nДетали: {stderr}")
-        print("  → Установите Docker: https://docs.docker.com/engine/install/")
-        print("  → Убедитесь, что демон запущен: sudo systemctl start docker")
+        logger.error(f"❌ Docker не установлен или демон не запущен.\nДетали: {stderr}")
+        logger.info("  → Установите Docker: https://docs.docker.com/engine/install/")
+        logger.info("  → Убедитесь, что демон запущен: sudo systemctl start docker")
         return False
     return True
 

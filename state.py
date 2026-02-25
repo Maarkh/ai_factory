@@ -1,14 +1,18 @@
 import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Optional
 
 from config import FACTORY_DIR, SRC_DIR
+from exceptions import StateError
 from artifacts import save_artifact
 from json_utils import _safe_contract
 from lang_utils import get_docker_image, get_execution_command, LANG_DISPLAY
 from infra import run_command
+
+logger = logging.getLogger(__name__)
 
 MAX_FEEDBACK_HISTORY = 3
 
@@ -22,22 +26,28 @@ def save_state(project_path: Path, state: dict) -> None:
     factory_dir = project_path / FACTORY_DIR
     factory_dir.mkdir(parents=True, exist_ok=True)
     clean = {k: v for k, v in state.items() if not k.startswith("_")}
-    (factory_dir / "state.json").write_text(
-        json.dumps(clean, indent=4, ensure_ascii=False), encoding="utf-8"
-    )
-    # Сохраняем _prev_file_contracts отдельно для корректного каскада
-    prev = state.get("_prev_file_contracts")
-    if prev is not None:
-        (factory_dir / "prev_contracts.json").write_text(
-            json.dumps(prev, indent=2, ensure_ascii=False), encoding="utf-8"
+    try:
+        (factory_dir / "state.json").write_text(
+            json.dumps(clean, indent=4, ensure_ascii=False), encoding="utf-8"
         )
+        # Сохраняем _prev_file_contracts отдельно для корректного каскада
+        prev = state.get("_prev_file_contracts")
+        if prev is not None:
+            (factory_dir / "prev_contracts.json").write_text(
+                json.dumps(prev, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+    except OSError as e:
+        raise StateError(f"Не удалось сохранить state.json: {e}") from e
 
 
 def load_state(project_path: Path) -> Optional[dict]:
     p = project_path / FACTORY_DIR / "state.json"
     if not p.exists():
         return None
-    state = json.loads(p.read_text(encoding="utf-8"))
+    try:
+        state = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        raise StateError(f"Не удалось загрузить state.json: {e}") from e
     # Восстанавливаем _prev_file_contracts
     prev_path = project_path / FACTORY_DIR / "prev_contracts.json"
     if prev_path.exists():
@@ -93,7 +103,7 @@ def generate_summary(project_path: Path, state: dict) -> None:
         f"docker run --rm -v $(pwd)/src:/app -w /app {docker_img} bash -c '{run_cmd}'\n```\n"
     )
     (project_path / "SUMMARY.md").write_text(text, encoding="utf-8")
-    print("📄 Сгенерирован SUMMARY.md")
+    logger.info("📄 Сгенерирован SUMMARY.md")
 
 
 def update_requirements(src_path: Path, orig: str, alt: str) -> None:
@@ -117,7 +127,7 @@ def update_dependencies(src_path: Path, language: str, pkg: str) -> None:
     """Зависимости добавляются в src/."""
     pkg = _sanitize_package_name(pkg)
     if not pkg:
-        print("⚠️  Пустое или небезопасное имя пакета — пропускаю.")
+        logger.warning("⚠️  Пустое или небезопасное имя пакета — пропускаю.")
         return
     if language == "python":
         req_path = src_path / "requirements.txt"
@@ -129,7 +139,7 @@ def update_dependencies(src_path: Path, language: str, pkg: str) -> None:
             if line.strip() and not line.strip().startswith("#")
         ]
         if pkg_base in existing:
-            print(f"  ℹ️  '{pkg_base}' уже в requirements.txt — пропускаю.")
+            logger.info(f"  ℹ️  '{pkg_base}' уже в requirements.txt — пропускаю.")
             return
         with open(req_path, "a", encoding="utf-8") as f:
             f.write(f"\n{pkg}\n")
@@ -148,12 +158,12 @@ def update_dependencies(src_path: Path, language: str, pkg: str) -> None:
                 new_text = json.dumps(pkg_data, indent=2, ensure_ascii=False)
                 json.loads(new_text)  # двойная проверка перед записью
                 pkg_json_path.write_text(new_text, encoding="utf-8")
-                print(f"  → Добавлен {pkg} в package.json")
-            except Exception as e:
-                print(f"  ⚠️  Не удалось обновить package.json: {e}")
+                logger.info(f"  → Добавлен {pkg} в package.json")
+            except (json.JSONDecodeError, ValueError, OSError) as e:
+                logger.warning(f"  ⚠️  Не удалось обновить package.json: {e}")
 
     else:
-        print(f"⚠️  Добавление пакета для {language} требует ручного вмешательства: {pkg}")
+        logger.warning(f"⚠️  Добавление пакета для {language} требует ручного вмешательства: {pkg}")
 
 
 def update_dockerfile(src_path: Path, patch: str) -> None:
@@ -180,4 +190,4 @@ def generate_tor_md(project_path: Path, ba_resp: dict) -> None:
         + "\n".join(f"- {c}" for c in ba_resp.get("acceptance_criteria", []))
     )
     save_artifact(project_path, "A1", tor_text)
-    print("📄 Артефакт A1 (Business Requirements) сохранён.")
+    logger.info("📄 Артефакт A1 (Business Requirements) сохранён.")

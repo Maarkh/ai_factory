@@ -1,12 +1,14 @@
 import logging
+import logging.handlers
 import queue
 import random
+import sys
 import threading
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from config import FACTORY_DIR, LOGS_DIR
+from config import FACTORY_DIR, LOGS_DIR, LOG_LEVEL
 from models_pool import MODEL_POOLS
 
 
@@ -40,25 +42,43 @@ def input_with_timeout(prompt: str, timeout: int, default: str) -> str:
 
 
 def setup_logger(project_path: Path) -> logging.Logger:
-    """Логи пишутся в .factory/logs/."""
+    """Логи пишутся в .factory/logs/. Консоль — через StreamHandler на root logger."""
     logs_dir = project_path / FACTORY_DIR / LOGS_DIR
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger(str(project_path))
     if logger.handlers:
         return logger
+
+    level = logging.getLevelName(LOG_LEVEL)
     logger.setLevel(logging.DEBUG)
-    handler = RotatingFileHandler(
+
+    # Файловый обработчик (DEBUG — все детали)
+    file_handler = RotatingFileHandler(
         logs_dir / "agent_interactions.log",
         maxBytes=10 * 1024 * 1024,
         backupCount=5,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter(
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
         "%(asctime)s | %(levelname)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
-    logger.addHandler(handler)
+    logger.addHandler(file_handler)
+
+    # Консольный обработчик на root logger — виден и модульным логгерам (infra, state, …)
+    root = logging.getLogger()
+    if not any(type(h) is logging.StreamHandler for h in root.handlers):
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(level)
+        console_handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        root.addHandler(console_handler)
+        root.setLevel(level)
+
     return logger
 
 

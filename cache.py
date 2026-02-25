@@ -3,6 +3,7 @@ import json
 import hashlib
 import threading
 from pathlib import Path
+from typing import Any, Optional
 
 from config import FACTORY_DIR
 
@@ -14,7 +15,7 @@ class ThreadSafeCache:
         self._data = data
         self._lock = threading.RLock()
 
-    def get(self, key: str, default=None):
+    def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
             return self._data.get(key, default)
 
@@ -22,11 +23,11 @@ class ThreadSafeCache:
         with self._lock:
             return key in self._data
 
-    def __setitem__(self, key: str, value) -> None:
+    def __setitem__(self, key: str, value: Any) -> None:
         with self._lock:
             self._data[key] = value
 
-    def __getitem__(self, key: str):
+    def __getitem__(self, key: str) -> Any:
         with self._lock:
             return self._data[key]
 
