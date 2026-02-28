@@ -43,7 +43,15 @@ def _cache_key(agent: str, model: str, user_text: str, language: str) -> str:
 def load_cache(project_path: Path) -> ThreadSafeCache:
     """Кэш хранится в .factory/cache.json."""
     p = project_path / FACTORY_DIR / "cache.json"
-    data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            import logging
+            logging.getLogger(__name__).warning(f"⚠️  Повреждённый кэш {p}, начинаю с пустого.")
+            data = {}
+    else:
+        data = {}
     return ThreadSafeCache(data)
 
 

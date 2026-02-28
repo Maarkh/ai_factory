@@ -23,6 +23,9 @@ AGENT_TEMPERATURES: dict[str, float] = {
     "reviewer":         0.0,
     "e2e_architect":    0.0,
     "e2e_qa":           0.0,
+    "a5_business_reviewer": 0.0,
+    "a5_architect_reviewer": 0.0,
+    "a5_contract_reviewer":  0.0,
     "qa_runtime":       0.2,
     "spec_reviewer":    0.0,
     "test_generator":   0.2,
@@ -32,6 +35,7 @@ AGENT_TEMPERATURES: dict[str, float] = {
     "supervisor":       0.2,
     "self_reflect":     0.0,
     "contract_analyst": 0.0,
+    "a5_validator":     0.0,
 }
 
 
@@ -50,11 +54,12 @@ async def ask_agent(
     model = get_model(agent, attempt, randomize=randomize)
     log_model_choice(logger, agent, model, attempt)
 
-    if agent in CACHEABLE_AGENTS and attempt == 0:
-        key = _cache_key(agent, model, user_text, language)
-        if key in cache:
+    cache_key = _cache_key(agent, model, user_text, language) if agent in CACHEABLE_AGENTS and attempt == 0 else None
+
+    if cache_key is not None:
+        if cache_key in cache:
             logger.info(f"[{agent}:{model}] Cache hit")
-            return cache[key]
+            return cache[cache_key]
 
     sys_prompt  = get_system_prompt(agent, language)
     temperature = AGENT_TEMPERATURES.get(agent, 0.2)
@@ -81,8 +86,8 @@ async def ask_agent(
             raw    = response.choices[0].message.content
             result = json.loads(raw)
             log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
-            if agent in CACHEABLE_AGENTS and attempt == 0:
-                cache[_cache_key(agent, model, user_text, language)] = result
+            if cache_key is not None:
+                cache[cache_key] = result
             return result
         except (openai.APIError, json.JSONDecodeError, ValueError) as e:
             last_exc = e
@@ -96,8 +101,8 @@ async def ask_agent(
                 raw    = response.choices[0].message.content
                 result = _extract_json_from_text(raw)
                 log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
-                if agent in CACHEABLE_AGENTS and attempt == 0:
-                    cache[_cache_key(agent, model, user_text, language)] = result
+                if cache_key is not None:
+                    cache[cache_key] = result
                 return result
             except (openai.APIError, json.JSONDecodeError, ValueError) as e2:
                 last_exc = e2

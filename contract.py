@@ -78,6 +78,125 @@ async def _validate_and_patch_contract(
     return contract
 
 
+async def patch_contract_for_file(
+    logger: logging.Logger,
+    project_path: Path,
+    state: dict,
+    cache: ThreadSafeCache,
+    stats: ModelStats,
+    filename: str,
+    developer_code: str,
+    feedback: str,
+    randomize: bool = False,
+) -> bool:
+    """
+    Патчит A5 контракт для одного файла на основе фидбэка ревьюера.
+    Вызывается когда файл не проходит ревью N раз подряд —
+    значит контракт не соответствует реальности и нужно его починить.
+    Возвращает True если контракт обновлён.
+    """
+    language = state.get("language", "python")
+    contract = state.get("api_contract", {})
+    fc = contract.get("file_contracts", {})
+    gi = contract.get("global_imports", {})
+    current = fc.get(filename, [])
+
+    logger.info(f"🔧 Патч A5 для {filename} на основе фидбэка ревьюера ...")
+
+    ctx = (
+        f"Текущий API контракт (A5) для файла `{filename}`:\n"
+        f"{json.dumps(current, ensure_ascii=False, indent=2)}\n\n"
+        f"Код разработчика (НЕ прошёл ревью):\n{developer_code[:3000]}\n\n"
+        f"Замечания ревьюера (код отклонён из-за этих проблем):\n{feedback[:1500]}\n\n"
+        f"Контракты ДРУГИХ файлов проекта (для called_by ссылок):\n"
+        f"{json.dumps({k: v for k, v in fc.items() if k != filename}, ensure_ascii=False, indent=2)}\n\n"
+        f"Язык: {LANG_DISPLAY.get(language, language)}\n\n"
+        f"ЗАДАЧА: Исправь контракт A5 ТОЛЬКО для файла `{filename}`.\n"
+        f"Проанализируй замечания ревьюера и код разработчика.\n"
+        f"Если функция требует дополнительных параметров — добавь их в сигнатуру.\n"
+        f"Если нужны дополнительные функции/классы — добавь их.\n"
+        f"Если сигнатура неидиоматична — исправь.\n"
+        f"Верни JSON с ключами file_contracts и global_imports только для этого файла."
+    )
+
+    try:
+        patch = await ask_agent(logger, "contract_analyst", ctx, cache, 0, randomize, language)
+        patch_fc = _parse_if_str(patch.get("file_contracts", {}), dict, {})
+        patch_gi = _parse_if_str(patch.get("global_imports", {}), dict, {})
+
+        file_contract = patch_fc.get(filename) or next(iter(patch_fc.values()), [])
+        file_imports  = patch_gi.get(filename) or next(iter(patch_gi.values()), [])
+
+        if file_contract:
+            fc[filename] = _parse_if_str(file_contract, list, [])
+            gi[filename] = _parse_if_str(file_imports, list, [])
+            contract["file_contracts"] = fc
+            contract["global_imports"] = gi
+            state["api_contract"] = contract
+            save_artifact(project_path, "A5", contract)
+            stats.record("contract_analyst", get_model("contract_analyst"), True)
+            logger.info(f"   ✅ A5 для {filename} обновлён ({len(fc[filename])} функций).")
+            return True
+        else:
+            logger.warning(f"   ⚠️  Патч A5 для {filename} пустой.")
+            stats.record("contract_analyst", get_model("contract_analyst"), False)
+            return False
+    except (LLMError, ValueError) as e:
+        logger.exception(f"Патч A5 для {filename} упал: {e}")
+        stats.record("contract_analyst", get_model("contract_analyst"), False)
+        return False
+
+
+async def phase_review_api_contract(
+    logger: logging.Logger,
+    project_path: Path,
+    state: dict,
+    cache: ThreadSafeCache,
+    stats: ModelStats,
+    contract: dict,
+    arch_resp: dict,
+    sa_resp: dict,
+    randomize: bool = False,
+) -> bool:
+    """
+    Ревью A5 (API Contract) на согласованность с A2/A3.
+    Возвращает True если контракт одобрен, False если отклонён.
+    При исключении возвращает True (не блокируем пайплайн).
+    """
+    language = state.get("language", "python")
+    logger.info("🔍 Ревью A5 (API Contract) ...")
+
+    files_list = [f.get("path", f) if isinstance(f, dict) else f
+                  for f in arch_resp.get("files", state.get("files", []))]
+
+    ctx = (
+        f"API контракт (A5):\n{json.dumps(contract, ensure_ascii=False, indent=2)}\n\n"
+        f"Системная спецификация (A2):\n{json.dumps(sa_resp, ensure_ascii=False, indent=2)}\n\n"
+        f"Архитектура (A3/A4):\n{json.dumps(arch_resp, ensure_ascii=False, indent=2)}\n\n"
+        f"Файлы проекта: {files_list}\n\n"
+        f"Язык: {language}"
+    )
+
+    try:
+        result = await ask_agent(logger, "a5_validator", ctx, cache, 0, randomize, language)
+        status = result.get("status", "REJECT")
+        feedback = result.get("feedback", "")
+        model = get_model("a5_validator")
+
+        if status == "APPROVE":
+            logger.info("✅ A5 прошёл ревью.")
+            stats.record("a5_validator", model, True)
+            save_artifact(project_path, "A5.1", result)
+            return True
+        else:
+            logger.warning(f"❌ A5 отклонён: {feedback}")
+            stats.record("a5_validator", model, False)
+            return False
+    except (LLMError, ValueError) as e:
+        logger.warning(f"⚠️  A5 Validator упал: {e}. Пропускаем ревью.")
+        return True
+
+
 async def phase_generate_api_contract(
     logger: logging.Logger,
     project_path: Path,

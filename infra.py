@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Optional
 
 from config import FACTORY_DIR, RUN_TIMEOUT
-from exceptions import DockerError
 from lang_utils import get_docker_image
 
 logger = logging.getLogger(__name__)

@@ -1,5 +1,4 @@
 import logging
-import logging.handlers
 import queue
 import random
 import sys

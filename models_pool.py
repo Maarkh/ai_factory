@@ -16,4 +16,5 @@ MODEL_POOLS: dict[str, list[str]] = {
     "supervisor":       ["qwen3:latest"],
     "self_reflect":     ["qwen2.5-coder:7b"],
     "contract_analyst": ["qwen2.5-coder:7b"],  # NEW: генерирует A5
+    "a5_validator":     ["qwen2.5-coder:7b"],
 }

@@ -14,7 +14,7 @@ def _parse_if_str(value: Any, expected_type: type[T], fallback: T) -> T:
             parsed = json.loads(value)
             if isinstance(parsed, expected_type):
                 return parsed
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError:
             pass
     return fallback
 

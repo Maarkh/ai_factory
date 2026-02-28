@@ -70,9 +70,19 @@ def _get_feedback_ctx(state: dict, filename: str) -> str:
     """Формирует блок замечаний для контекста разработчика."""
     history = state.get("feedback_history", {}).get(filename, [])
     if not history:
-        return state["feedbacks"].get(filename, "")
+        return state.get("feedbacks", {}).get(filename, "")
     if len(history) == 1:
         return f"ЗАМЕЧАНИЕ (исправь это):\n{history[-1]}"
+    # Детекция зацикливания: все замечания одинаковые
+    unique = set(history)
+    if len(unique) == 1 and len(history) >= MAX_FEEDBACK_HISTORY:
+        return (
+            "КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ: одно и то же замечание повторяется "
+            f"{len(history)} раз подряд. Твой предыдущий подход НЕ РАБОТАЕТ.\n"
+            "Попробуй ПРИНЦИПИАЛЬНО ДРУГУЮ структуру кода. "
+            "НЕ используй ту же архитектуру классов/функций.\n\n"
+            f"ЗАМЕЧАНИЕ:\n{history[-1]}"
+        )
     parts = ["ИСТОРИЯ ЗАМЕЧАНИЙ (не повторяй одни и те же ошибки):"]
     for i, fb in enumerate(history, 1):
         parts.append(f"--- Попытка {i} ---\n{fb}")
@@ -80,6 +90,7 @@ def _get_feedback_ctx(state: dict, filename: str) -> str:
 
 
 def ensure_feedback_keys(state: dict) -> None:
+    state.setdefault("feedbacks", {})
     for f in state["files"]:
         state["feedbacks"].setdefault(f, "")
     state.setdefault("feedback_history", {})

@@ -1,11 +1,8 @@
 import json
-import logging
 from pathlib import Path
 
 from config import FACTORY_DIR
 from lang_utils import LANG_DISPLAY
-
-logger = logging.getLogger(__name__)
 
 
 class ModelStats:

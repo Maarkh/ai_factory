@@ -24,7 +24,7 @@ RUN_TIMEOUT         = 6_000
 MAX_CONTEXT_CHARS   = 60_000
 MIN_COVERAGE        = 40
 MAX_ABSOLUTE_ITERS  = 30000
-MAX_FILE_ATTEMPTS   = 40
+MAX_FILE_ATTEMPTS   = 5
 MAX_PHASE_TOTAL_FAILS = 50   # Абсолютный потолок фейлов одной фазы за весь проект
 
 # Папки внутри project_path

@@ -59,6 +59,29 @@ def get_global_context(
     return "".join(parts)
 
 
+def get_full_context(
+    src_path: Path,
+    files: list[str],
+) -> str:
+    """Читает ПОЛНЫЙ код файлов для E2E ревью (не только API)."""
+    parts: list[str] = []
+    total = 0
+    for fname in files:
+        fpath = src_path / fname
+        if not fpath.exists():
+            continue
+        code = fpath.read_text(encoding="utf-8")
+        chunk = f"\n--- {fname} ---\n{code}\n"
+        if total + len(chunk) > MAX_CONTEXT_CHARS:
+            remaining = MAX_CONTEXT_CHARS - total
+            if remaining > 200:
+                parts.append(chunk[:remaining] + "\n[... обрезано ...]")
+            break
+        parts.append(chunk)
+        total += len(chunk)
+    return "".join(parts)
+
+
 def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
     """Возвращает файлы в порядке топологической сортировки по импортам."""
     graph: dict[str, list[str]]  = defaultdict(list)
@@ -102,7 +125,7 @@ def _find_failing_file(stderr: str, stdout: str, files: list[str]) -> str:
     """Определяет файл с ошибкой по traceback. Возвращает имя файла или files[0]."""
     combined = stderr + "\n" + stdout
     # Python: File "path/file.py", line N
-    for match in re.findall(r'File "([^"]+)", line \d+', stderr):
+    for match in re.findall(r'File "([^"]+)", line \d+', combined):
         candidate = os.path.basename(match)
         if candidate in files:
             return candidate
