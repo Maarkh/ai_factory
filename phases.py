@@ -516,6 +516,34 @@ async def phase_e2e_review(
     return result_ok
 
 
+def _fix_docker_requirements(src_path: Path, logger: logging.Logger) -> None:
+    """Автоматическая замена пакетов, несовместимых с headless Docker-окружением."""
+    req_path = src_path / "requirements.txt"
+    if not req_path.exists():
+        return
+    HEADLESS_SUBSTITUTIONS = {
+        "opencv-python": "opencv-python-headless",
+        "opencv-contrib-python": "opencv-contrib-python-headless",
+    }
+    lines = req_path.read_text(encoding="utf-8").splitlines()
+    changed = False
+    new_lines = []
+    for line in lines:
+        pkg_base = re.split(r'[=<>~!\[]', line.strip())[0].strip().lower()
+        if pkg_base in HEADLESS_SUBSTITUTIONS:
+            replacement = HEADLESS_SUBSTITUTIONS[pkg_base]
+            # Сохраняем версию если была
+            suffix = line.strip()[len(pkg_base):]
+            new_line = replacement + suffix
+            logger.info(f"  🔧 {line.strip()} → {new_line} (headless для Docker)")
+            new_lines.append(new_line)
+            changed = True
+        else:
+            new_lines.append(line)
+    if changed:
+        req_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
 async def phase_integration_test(
     logger: logging.Logger,
     project_path: Path,
@@ -530,6 +558,10 @@ async def phase_integration_test(
     dockerfile  = src_path / "Dockerfile"    # Dockerfile теперь в src/
     use_custom  = dockerfile.exists()
     image_tag   = f"{project_path.name}:latest" if use_custom else get_docker_image(language)
+
+    # Превентивная замена пакетов, несовместимых с Docker (opencv → headless)
+    if language == "python":
+        _fix_docker_requirements(src_path, logger)
 
     # ── Сборка образа ────────────────────────────────────────────────────────
     build_success = False
@@ -715,6 +747,11 @@ async def phase_unit_tests(
     logger.info("\n🧪 Генерация unit-тестов ...")
     language = state.get("language", "python")
     src_path = project_path / SRC_DIR
+
+    # Превентивная замена пакетов, несовместимых с Docker (opencv → headless)
+    if language == "python":
+        _fix_docker_requirements(src_path, logger)
+
     all_code = get_global_context(src_path, state["files"])
 
     # Передаём A7 (Test Plan) если есть
@@ -761,6 +798,19 @@ async def phase_unit_tests(
 
     if rc != 0:
         logger.warning("❌ Тесты провалены!")
+        # Ошибка окружения Docker (missing .so, pip) — не вина кода, не снимаем approve
+        if language == "python" and any(kw in stderr for kw in [
+            "cannot open shared object file",
+            "ImportError: lib",
+            "pip subprocess to install build dependencies",
+            "Failed building wheel",
+            "No matching distribution found",
+        ]):
+            logger.warning("  ⚠️  Ошибка окружения Docker, не кода. Файлы не сбрасываем.")
+            state["feedbacks"][state.get("entry_point", "main.py")] = (
+                f"ОШИБКА ОКРУЖЕНИЯ DOCKER (не кода):\n{stderr[-1000:]}"
+            )
+            return False
         failing_file = _find_failing_file(stderr, stdout, state["files"])
         state["feedbacks"][failing_file] = f"UNIT-ТЕСТЫ УПАЛИ:\n{stderr[-2000:]}\n\nВывод:\n{stdout[-1000:]}"
         if failing_file in state.get("approved_files", []):
@@ -837,6 +887,8 @@ async def revise_spec(
             f"⚠️  Лимит пересмотров спецификации ({MAX_SPEC_REVISIONS}) исчерпан. "
             "Продолжаем с текущей спецификацией."
         )
+        # Сбрасываем consecutive-счётчики чтобы supervisor перестал слать revise_spec
+        state["phase_fail_counts"] = {}
         return
 
     logger.info("\n🔁 Пересмотр спецификации (каскад A2 → A5) ...")

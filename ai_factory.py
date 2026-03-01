@@ -324,7 +324,9 @@ async def main() -> None:
 
         # Проверка абсолютного лимита фейлов одной фазы (но не чаще 1 раза)
         total_fails = state.get("phase_total_fails", {}).get(next_phase, 0)
-        spec_escalated_phases = state.setdefault("_spec_escalated_phases", [])
+        if not isinstance(state.get("_spec_escalated_phases"), list):
+            state["_spec_escalated_phases"] = []
+        spec_escalated_phases = state["_spec_escalated_phases"]
         if total_fails >= MAX_PHASE_TOTAL_FAILS and next_phase not in spec_escalated_phases:
             print(f"\n🛑 Фаза '{next_phase}' провалилась {total_fails} раз за проект. "
                   f"Принудительный revise_spec.")
