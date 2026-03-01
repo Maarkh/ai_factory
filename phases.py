@@ -12,7 +12,7 @@ from stats import ModelStats
 from json_utils import _to_str, _safe_contract
 from lang_utils import LANG_DISPLAY, LANG_EXT, get_execution_command, get_test_command, get_docker_image
 from log_utils import get_model, log_runtime_error
-from code_context import get_global_context, get_full_context, build_dependency_order, _find_failing_file
+from code_context import get_global_context, get_full_context, build_dependency_order, _find_failing_file, validate_imports
 from state import _push_feedback, _get_feedback_ctx, update_dependencies, update_dockerfile, update_requirements
 from artifacts import update_artifact_a9, save_artifact
 from infra import run_in_docker, build_docker_image
@@ -405,6 +405,26 @@ async def phase_develop(
             logger.warning(f"⛔ {current_file}: дублирование {len(dup_warnings)} классов → автоматический REJECT")
             stats.record("developer", dev_model, False)
             _push_feedback(state, current_file, dup_feedback)
+            file_attempts[current_file] = attempt + 1
+            cumulative_attempts[current_file] = total_attempts + 1
+            continue
+
+        # Детерминистская проверка: валидность импортов (stdlib / pip / проект)
+        req_path = src_path / "requirements.txt"
+        import_warnings = validate_imports(
+            code, current_file, state["files"],
+            req_path if req_path.exists() else None, language, src_path,
+        )
+        if import_warnings:
+            import_feedback = (
+                "АВТОМАТИЧЕСКИЙ REJECT — невалидные импорты:\n"
+                + "\n".join(f"  - {w}" for w in import_warnings)
+                + "\n\nИсправь: используй только stdlib, pip-пакеты из requirements.txt "
+                "или модули проекта: " + ", ".join(state["files"])
+            )
+            logger.warning(f"⛔ {current_file}: {len(import_warnings)} ошибок импорта → авто-REJECT")
+            stats.record("developer", dev_model, False)
+            _push_feedback(state, current_file, import_feedback)
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue

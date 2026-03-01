@@ -1,5 +1,7 @@
 import json
 import logging
+import re
+import sys
 from pathlib import Path
 
 from exceptions import LLMError
@@ -10,6 +12,176 @@ from lang_utils import LANG_DISPLAY
 from log_utils import get_model
 from cache import ThreadSafeCache
 from stats import ModelStats
+
+
+# ─────────────────────────────────────────────
+# Детерминистские валидации A5 контракта
+# ─────────────────────────────────────────────
+
+def _validate_data_model_coverage(
+    contract: dict,
+    system_specs: dict,
+    logger: logging.Logger,
+) -> list[str]:
+    """Проверяет что каждая data_model из A2 определена как класс хотя бы в одном файле A5.
+
+    Возвращает список имён моделей, не покрытых контрактом.
+    """
+    data_models = system_specs.get("data_models", [])
+    if not data_models:
+        return []
+    # Имена моделей из A2
+    model_names: set[str] = set()
+    for dm in data_models:
+        name = dm.get("name", "") if isinstance(dm, dict) else ""
+        if name:
+            model_names.add(name)
+    if not model_names:
+        return []
+    # Ищем покрытие в file_contracts A5
+    defined_names: set[str] = set()
+    for fname, items in contract.get("file_contracts", {}).items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_name = item.get("name", "")
+            sig = item.get("signature", "")
+            # Совпадение по name или по "class ModelName" в signature
+            if item_name in model_names:
+                defined_names.add(item_name)
+            for mn in model_names:
+                if f"class {mn}" in sig:
+                    defined_names.add(mn)
+    missing = sorted(model_names - defined_names)
+    if missing:
+        logger.warning(f"⚠️  A5: data models из A2 не покрыты контрактом: {', '.join(missing)}")
+    return missing
+
+
+def _inject_missing_data_models(
+    contract: dict,
+    system_specs: dict,
+    files: list[str],
+    logger: logging.Logger,
+) -> dict:
+    """Добавляет в A5 контракт класс для каждой data_model из A2, которая не покрыта.
+
+    Выбирает файл: первый файл != main.py (или main.py если он единственный).
+    """
+    missing = _validate_data_model_coverage(contract, system_specs, logger)
+    if not missing:
+        return contract
+
+    fc = contract.setdefault("file_contracts", {})
+
+    # Выбираем целевой файл для data models
+    target_file = files[0]  # fallback
+    for f in files:
+        if f != "main.py" and not f.startswith("test_"):
+            target_file = f
+            break
+
+    data_models = {
+        dm.get("name", ""): dm
+        for dm in system_specs.get("data_models", [])
+        if isinstance(dm, dict) and dm.get("name")
+    }
+
+    for model_name in missing:
+        dm = data_models.get(model_name, {})
+        fields = dm.get("fields", [])
+        # Формируем описание полей для description
+        field_desc = ""
+        if fields:
+            field_names = []
+            for f in fields:
+                if isinstance(f, dict):
+                    field_names.extend(f.keys())
+                elif isinstance(f, str):
+                    field_names.append(f.split(":")[0].strip())
+            if field_names:
+                field_desc = f" Поля: {', '.join(field_names)}."
+
+        entry = {
+            "name": model_name,
+            "signature": f"class {model_name}",
+            "description": f"Data model из A2.{field_desc}",
+            "required": True,
+            "called_by": [],
+        }
+        fc.setdefault(target_file, []).append(entry)
+        logger.info(f"  📋 A5: добавлен класс {model_name} в контракт файла {target_file} (из data_models A2)")
+
+    return contract
+
+
+def _validate_global_imports(
+    contract: dict,
+    arch_resp: dict,
+    project_files: list[str],
+    logger: logging.Logger,
+) -> dict:
+    """Удаляет из global_imports A5 импорты несуществующих пакетов.
+
+    Проверяет: stdlib, файлы проекта, dependencies из архитектуры.
+    """
+    gi = contract.get("global_imports", {})
+    if not gi:
+        return contract
+
+    # Допустимые имена: stdlib
+    stdlib = sys.stdlib_module_names if hasattr(sys, "stdlib_module_names") else set()
+    # Модули проекта (без расширения)
+    project_modules = {Path(f).stem for f in project_files}
+    # pip-пакеты из dependencies архитектуры
+    deps = arch_resp.get("dependencies", [])
+    pip_names: set[str] = set()
+    for dep in deps:
+        if isinstance(dep, str):
+            pkg = re.split(r"[=<>~!\[]", dep)[0].strip().lower()
+            pip_names.add(pkg)
+            pip_names.add(pkg.replace("-", "_"))
+
+    cleaned_gi: dict[str, list[str]] = {}
+    for fname, imports in gi.items():
+        if not isinstance(imports, list):
+            cleaned_gi[fname] = imports
+            continue
+        valid_imports: list[str] = []
+        for imp_line in imports:
+            if not isinstance(imp_line, str):
+                valid_imports.append(imp_line)
+                continue
+            # Извлекаем базовый модуль: from X import Y → X; import X → X
+            m = re.match(r"(?:from\s+(\S+)\s+import|import\s+(\S+))", imp_line.strip())
+            if not m:
+                valid_imports.append(imp_line)
+                continue
+            base_module = (m.group(1) or m.group(2)).split(".")[0]
+            base_lower = base_module.lower()
+            base_normalized = base_lower.replace("-", "_")
+
+            # Проверяем допустимость
+            if base_module in stdlib:
+                valid_imports.append(imp_line)  # stdlib — оставляем (не критично)
+                continue
+            if base_module in project_modules:
+                valid_imports.append(imp_line)
+                continue
+            if base_lower in pip_names or base_normalized in pip_names:
+                valid_imports.append(imp_line)
+                continue
+            # Невалидный import — удаляем
+            logger.warning(
+                f"  ⚠️  A5 global_imports: удалён '{imp_line}' для {fname} "
+                f"('{base_module}' не найден в stdlib, dependencies или файлах проекта)"
+            )
+        cleaned_gi[fname] = valid_imports
+
+    contract["global_imports"] = cleaned_gi
+    return contract
 
 
 async def _validate_and_patch_contract(
@@ -236,6 +408,10 @@ async def phase_generate_api_contract(
         contract = await _validate_and_patch_contract(
             logger, project_path, state, cache, stats, contract, files_list, randomize
         )
+        # Детерминистская валидация: data models из A2 покрыты классами в A5
+        contract = _inject_missing_data_models(contract, sa_resp, files_list, logger)
+        # Детерминистская валидация: global_imports ссылаются на реальные пакеты
+        contract = _validate_global_imports(contract, arch_resp, files_list, logger)
         save_artifact(project_path, "A5", contract)
         logger.info("✅ A5 (API контракт) готов.")
         return contract

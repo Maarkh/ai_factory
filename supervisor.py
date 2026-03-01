@@ -73,6 +73,7 @@ async def ask_supervisor(
         "last_phase":           state.get("last_phase", "initial"),
         "phase_fail_counts":    phase_fails,
         "phase_total_fails":    state.get("phase_total_fails", {}),
+        "spec_revisions_count": len(state.get("spec_history", [])),
     }
 
     ctx = (
@@ -82,6 +83,31 @@ async def ask_supervisor(
     )
     try:
         result = await ask_agent(logger, "supervisor", ctx, cache, 0, randomize, language)
+
+        # Детерминистская защита от scope creep: максимум 3 revise_spec
+        MAX_REVISE_SPEC = 3
+        next_phase = result.get("next_phase", "")
+        spec_count = len(state.get("spec_history", []))
+        if next_phase == "revise_spec" and spec_count >= MAX_REVISE_SPEC:
+            logger.warning(
+                f"⚠️  Supervisor предложил revise_spec, но лимит ({spec_count}/{MAX_REVISE_SPEC}) исчерпан. "
+                "Принудительно продолжаем без ревизии."
+            )
+            # Сбрасываем consecutive-счётчики чтобы не зацикливаться
+            state.setdefault("phase_fail_counts", {}).clear()
+            if approved < total:
+                result = {"next_phase": "develop",           "reason": "fallback: revise_spec лимит исчерпан"}
+            elif not state.get("e2e_passed"):
+                result = {"next_phase": "e2e_review",        "reason": "fallback: revise_spec лимит исчерпан"}
+            elif not state.get("integration_passed"):
+                result = {"next_phase": "integration_test",  "reason": "fallback: revise_spec лимит исчерпан"}
+            elif not state.get("tests_passed"):
+                result = {"next_phase": "unit_tests",        "reason": "fallback: revise_spec лимит исчерпан"}
+            elif not state.get("document_generated"):
+                result = {"next_phase": "document",          "reason": "fallback: revise_spec лимит исчерпан"}
+            else:
+                result = {"next_phase": "success",           "reason": "fallback: revise_spec лимит исчерпан"}
+
         return result
     except (LLMError, ValueError) as e:
         logger.exception(f"Supervisor упал: {e}")

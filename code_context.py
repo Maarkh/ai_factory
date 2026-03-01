@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -148,3 +149,182 @@ def _find_failing_file(stderr: str, stdout: str, files: list[str]) -> str:
         if src in files:
             return src
     return files[0] if files else "main.py"
+
+
+# ─────────────────────────────────────────────
+# Детерминистская валидация импортов
+# ─────────────────────────────────────────────
+
+# Маппинг pip-пакет → import-имя (для пакетов, где они различаются)
+_PIP_TO_IMPORT: dict[str, str] = {
+    "opencv-python":            "cv2",
+    "opencv-python-headless":   "cv2",
+    "opencv-contrib-python":    "cv2",
+    "opencv-contrib-python-headless": "cv2",
+    "pillow":                   "PIL",
+    "scikit-learn":             "sklearn",
+    "scikit-image":             "skimage",
+    "python-dateutil":          "dateutil",
+    "pyyaml":                   "yaml",
+    "beautifulsoup4":           "bs4",
+    "python-dotenv":            "dotenv",
+    "attrs":                    "attr",
+    "python-jose":              "jose",
+    "python-multipart":         "multipart",
+    "msgpack-python":           "msgpack",
+    "ruamel.yaml":              "ruamel",
+}
+
+
+def _parse_requirements(path: Path) -> set[str]:
+    """Парсит requirements.txt и возвращает множество допустимых import-имён."""
+    if not path.exists():
+        return set()
+    result: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Убираем маркеры окружения: requests ; python_version >= "3.6"
+        line = line.split(";")[0].strip()
+        # Извлекаем имя пакета (до ==, >=, <=, ~=, !=, [extras])
+        pkg = re.split(r"[=<>~!\[]", line)[0].strip()
+        if not pkg:
+            continue
+        pkg_lower = pkg.lower()
+        # Нормализация: pip нормализует дефисы в подчёркивания
+        pkg_normalized = pkg_lower.replace("-", "_")
+        result.add(pkg_normalized)
+        # Маппинг pip→import для известных расхождений
+        if pkg_lower in _PIP_TO_IMPORT:
+            result.add(_PIP_TO_IMPORT[pkg_lower].lower())
+        # Также добавляем оригинальное имя (без нормализации)
+        result.add(pkg_lower)
+    return result
+
+
+def _get_stdlib_modules() -> frozenset[str]:
+    """Возвращает множество имён стандартной библиотеки Python."""
+    if hasattr(sys, "stdlib_module_names"):
+        return sys.stdlib_module_names  # Python 3.10+
+    # Fallback для Python < 3.10 — основные модули
+    return frozenset({
+        "abc", "argparse", "ast", "asyncio", "atexit", "base64", "bisect",
+        "builtins", "calendar", "cmath", "codecs", "collections", "concurrent",
+        "configparser", "contextlib", "copy", "csv", "ctypes", "dataclasses",
+        "datetime", "decimal", "difflib", "dis", "email", "encodings", "enum",
+        "errno", "faulthandler", "fcntl", "filecmp", "fileinput", "fnmatch",
+        "fractions", "ftplib", "functools", "gc", "getpass", "gettext", "glob",
+        "gzip", "hashlib", "heapq", "hmac", "html", "http", "idlelib",
+        "importlib", "inspect", "io", "ipaddress", "itertools", "json",
+        "keyword", "lib2to3", "linecache", "locale", "logging", "lzma",
+        "mailbox", "math", "mimetypes", "mmap", "multiprocessing", "netrc",
+        "numbers", "operator", "os", "pathlib", "pdb", "pickle", "pkgutil",
+        "platform", "plistlib", "poplib", "posixpath", "pprint", "profile",
+        "pstats", "py_compile", "pyclbr", "pydoc", "queue", "quopri",
+        "random", "re", "readline", "reprlib", "resource", "rlcompleter",
+        "runpy", "sched", "secrets", "select", "selectors", "shelve",
+        "shlex", "shutil", "signal", "site", "smtplib", "sndhdr", "socket",
+        "socketserver", "sqlite3", "ssl", "stat", "statistics", "string",
+        "struct", "subprocess", "sunau", "symtable", "sys", "sysconfig",
+        "syslog", "tabnanny", "tarfile", "tempfile", "termios", "test",
+        "textwrap", "threading", "time", "timeit", "tkinter", "token",
+        "tokenize", "tomllib", "trace", "traceback", "tracemalloc", "tty",
+        "turtle", "turtledemo", "types", "typing", "unicodedata", "unittest",
+        "urllib", "uuid", "venv", "warnings", "wave", "weakref", "webbrowser",
+        "wsgiref", "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib",
+        "_thread",
+    })
+
+
+def validate_imports(
+    code: str,
+    filename: str,
+    project_files: list[str],
+    requirements_path: Path | None = None,
+    language: str = "python",
+    src_path: Path | None = None,
+) -> list[str]:
+    """Детерминистская проверка импортов в сгенерированном коде.
+
+    Проверяет что каждый импортируемый модуль — это:
+    - файл проекта (project_files)
+    - модуль stdlib
+    - пакет из requirements.txt
+
+    Также проверяет циклические импорты (если src_path задан).
+
+    Возвращает список предупреждений (пустой если всё OK).
+    """
+    if language != "python":
+        return []  # Пока только Python
+
+    warnings: list[str] = []
+    stdlib = _get_stdlib_modules()
+    pip_packages = _parse_requirements(requirements_path) if requirements_path else set()
+
+    # Множество имён проектных модулей (без расширения)
+    project_modules = {Path(f).stem for f in project_files}
+
+    # Парсим импорты из кода
+    from_imports = re.findall(r"^\s*from\s+(\S+)\s+import", code, re.MULTILINE)
+    direct_imports = re.findall(r"^\s*import\s+(\S+)", code, re.MULTILINE)
+
+    seen: set[str] = set()
+    for imp in from_imports + direct_imports:
+        # Базовый модуль (до первой точки): from os.path → os
+        base = imp.split(".")[0]
+        if base in seen:
+            continue
+        seen.add(base)
+
+        # Пропускаем relative imports (from . import ...)
+        if base == "":
+            continue
+
+        # 1. Файл проекта?
+        if base in project_modules:
+            continue
+
+        # 2. Stdlib?
+        if base in stdlib:
+            continue
+
+        # 3. pip-пакет из requirements.txt?
+        base_lower = base.lower()
+        base_normalized = base_lower.replace("-", "_")
+        if base_lower in pip_packages or base_normalized in pip_packages:
+            continue
+
+        # 4. Общеизвестные встроенные модули (typing_extensions, etc.)
+        if base.startswith("_"):
+            continue
+
+        warnings.append(
+            f"import '{base}' в {filename}: не найден в stdlib, "
+            f"requirements.txt и файлах проекта ({', '.join(project_files)})"
+        )
+
+    # Проверка циклических импортов (только если src_path задан и файлы уже написаны)
+    if src_path:
+        current_stem = Path(filename).stem
+        for imp_module in {imp.split(".")[0] for imp in from_imports + direct_imports}:
+            if imp_module not in project_modules or imp_module == current_stem:
+                continue
+            # Проверяем: импортирует ли imp_module обратно текущий файл?
+            other_path = src_path / (imp_module + ".py")
+            if not other_path.exists():
+                continue
+            other_code = other_path.read_text(encoding="utf-8")
+            other_imports = (
+                re.findall(r"^\s*from\s+(\S+)\s+import", other_code, re.MULTILINE)
+                + re.findall(r"^\s*import\s+(\S+)", other_code, re.MULTILINE)
+            )
+            other_bases = {i.split(".")[0] for i in other_imports}
+            if current_stem in other_bases:
+                warnings.append(
+                    f"циклический импорт: {filename} ↔ {imp_module}.py "
+                    f"(оба файла импортируют друг друга)"
+                )
+
+    return warnings
