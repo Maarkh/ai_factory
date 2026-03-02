@@ -186,7 +186,7 @@ def _check_function_preservation(
 
 def _check_contract_compliance(code: str, file_contract: list) -> list[str]:
     """Детерминистская проверка: содержит ли код ВСЕ required функции/классы из A5 контракта.
-    Возвращает список отсутствующих элементов."""
+    Возвращает список отсутствующих элементов с сигнатурой для подсказки модели."""
     if not file_contract:
         return []
     missing = []
@@ -196,15 +196,13 @@ def _check_contract_compliance(code: str, file_contract: list) -> list[str]:
         sig = item.get("signature", "")
         name = item.get("name", "")
         if sig.startswith("class "):
-            # Проверяем наличие class ClassName
             class_name = sig.split("class ", 1)[1].split("(")[0].split(":")[0].strip()
             if not re.search(rf'^class\s+{re.escape(class_name)}\b', code, re.MULTILINE):
-                missing.append(f"class {class_name}")
+                missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь определение класса {class_name}")
         elif sig.startswith("def ") or sig.startswith("async def "):
-            # Проверяем наличие def func_name(
             func_name = name or sig.split("def ", 1)[1].split("(")[0].strip()
             if not re.search(rf'^\s*(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code, re.MULTILINE):
-                missing.append(f"def {func_name}()")
+                missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь эту функцию ИМЕННО с таким именем")
     return missing
 
 
@@ -486,6 +484,10 @@ async def phase_develop(
                 if patched:
                     file_contract  = _safe_contract(state).get("file_contracts", {}).get(current_file, [])
                     global_imports = _safe_contract(state).get("global_imports", {}).get(current_file, [])
+                    # Сброс попыток после патча A5 — дать developer шанс с новым контрактом
+                    file_attempts[current_file] = 0
+                    attempt = 0
+                    logger.info(f"🔄 A5 для {current_file} обновлён → счётчик попыток сброшен.")
 
         dev_ctx = (
             f"Задача:\n{state['task']}\n\n"
@@ -595,11 +597,19 @@ async def phase_develop(
             req_path if req_path.exists() else None, language, src_path,
         )
         if import_warnings:
+            # Подсказка: показать ожидаемые импорты из A5
+            expected_hint = ""
+            if global_imports:
+                expected_hint = (
+                    "\n\nОЖИДАЕМЫЕ ИМПОРТЫ из A5 контракта для этого файла:\n"
+                    + "\n".join(f"  {imp}" for imp in global_imports)
+                )
             import_feedback = (
                 "АВТОМАТИЧЕСКИЙ REJECT — невалидные импорты:\n"
                 + "\n".join(f"  - {w}" for w in import_warnings)
                 + "\n\nИсправь: используй только stdlib, pip-пакеты из requirements.txt "
                 "или модули проекта: " + ", ".join(state["files"])
+                + expected_hint
             )
             logger.warning(f"⛔ {current_file}: {len(import_warnings)} ошибок импорта → авто-REJECT")
             stats.record("developer", dev_model, False)
@@ -1294,6 +1304,11 @@ async def revise_spec(
             if fname in state.get("approved_files", []):
                 state["approved_files"].remove(fname)
             state["feedbacks"][fname] = "Спецификация обновлена, требуется переписать файл."
+            state["file_attempts"][fname] = 0
+
+        # Сброс file_attempts для ВСЕХ файлов проекта (не только affected)
+        # Иначе файлы, которые были exhausted до revise_spec, останутся на MAX попыток
+        for fname in state.get("files", []):
             state["file_attempts"][fname] = 0
 
         # Запоминаем текущий контракт для следующего сравнения

@@ -8,6 +8,19 @@ from pathlib import Path
 from config import MAX_CONTEXT_CHARS
 
 
+def _levenshtein_close(a: str, b: str) -> bool:
+    """Проверка: compound-имена похожи (общие сегменты по '_').
+
+    vehicle_processing vs video_processing → True (общий сегмент 'processing')
+    numpy vs video_processing → False
+    """
+    parts_a = set(a.split("_"))
+    parts_b = set(b.split("_"))
+    common = parts_a & parts_b
+    # Считаем похожим если есть хотя бы 1 общий значимый сегмент (>2 символов)
+    return any(len(p) > 2 for p in common)
+
+
 def extract_public_api(code: str) -> str:
     """Извлекает публичный API файла: импорты, классы, функции, публичные переменные."""
     api_lines: list[str] = []
@@ -395,9 +408,19 @@ def validate_imports(
         if base.startswith("_"):
             continue
 
+        # Подсказка: если phantom-имя похоже на один из файлов проекта
+        hint = ""
+        base_lower_nrm = base.lower().replace("-", "_")
+        for pm in project_modules:
+            # Точное совпадение с учётом типичных ошибок 7B-моделей
+            if (base_lower_nrm in pm or pm in base_lower_nrm
+                    or _levenshtein_close(base_lower_nrm, pm)):
+                hint = f". Возможно, вы имели в виду: from {pm} import ..."
+                break
         warnings.append(
             f"import '{base}' в {filename}: не найден в stdlib, "
             f"requirements.txt и файлах проекта ({', '.join(project_files)})"
+            f"{hint}"
         )
 
     # Проверка циклических импортов (только если src_path задан и файлы уже написаны)
