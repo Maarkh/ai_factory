@@ -899,8 +899,10 @@ async def revise_spec(
     A2 обновляется → автоматически пересчитывается A5 →
     сбрасываются только файлы, затронутые изменённым контрактом.
     """
-    # Ограничение: не более 10 пересмотров спецификации за проект
-    MAX_SPEC_REVISIONS = 10
+    # Ограничение: не более 3 пересмотров спецификации за проект
+    # (было 10, но приводило к scope creep — supervisor/e2e/develop
+    # вызывали revise_spec напрямую, раздувая спецификацию)
+    MAX_SPEC_REVISIONS = 3
     spec_count = len(state.get("spec_history", []))
     if spec_count >= MAX_SPEC_REVISIONS:
         logger.warning(

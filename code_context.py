@@ -274,13 +274,31 @@ def validate_imports(
     for imp in from_imports + direct_imports:
         # Базовый модуль (до первой точки): from os.path → os
         base = imp.split(".")[0]
+
+        # Relative imports: from .data_models → base="", imp=".data_models"
+        # Извлекаем реальное имя модуля
+        if base == "":
+            # from . import X → пропускаем (текущий пакет)
+            rel_module = imp.lstrip(".")
+            if not rel_module:
+                continue
+            # from .data_models import Y → rel_module = "data_models"
+            rel_base = rel_module.split(".")[0]
+            if rel_base in seen:
+                continue
+            seen.add(rel_base)
+            # Relative import ОБЯЗАН ссылаться на файл проекта
+            if rel_base not in project_modules:
+                warnings.append(
+                    f"relative import 'from {imp} import ...' в {filename}: "
+                    f"модуль '{rel_base}' не найден в файлах проекта ({', '.join(project_files)}). "
+                    f"Используй абсолютный import или определи класс/функцию в одном из существующих файлов"
+                )
+            continue
+
         if base in seen:
             continue
         seen.add(base)
-
-        # Пропускаем relative imports (from . import ...)
-        if base == "":
-            continue
 
         # 1. Файл проекта?
         if base in project_modules:
@@ -308,7 +326,17 @@ def validate_imports(
     # Проверка циклических импортов (только если src_path задан и файлы уже написаны)
     if src_path:
         current_stem = Path(filename).stem
-        for imp_module in {imp.split(".")[0] for imp in from_imports + direct_imports}:
+        # Извлекаем модули из всех импортов (включая relative)
+        all_import_bases: set[str] = set()
+        for imp in from_imports + direct_imports:
+            b = imp.split(".")[0]
+            if b == "":
+                rel = imp.lstrip(".").split(".")[0]
+                if rel:
+                    all_import_bases.add(rel)
+            else:
+                all_import_bases.add(b)
+        for imp_module in all_import_bases:
             if imp_module not in project_modules or imp_module == current_stem:
                 continue
             # Проверяем: импортирует ли imp_module обратно текущий файл?
@@ -321,10 +349,64 @@ def validate_imports(
                 + re.findall(r"^\s*import\s+(\S+)", other_code, re.MULTILINE)
             )
             other_bases = {i.split(".")[0] for i in other_imports}
-            if current_stem in other_bases:
+            # Проверяем и relative imports в другом файле
+            other_rel = {i.lstrip(".").split(".")[0] for i in other_imports if i.startswith(".")}
+            if current_stem in other_bases or current_stem in other_rel:
                 warnings.append(
                     f"циклический импорт: {filename} ↔ {imp_module}.py "
                     f"(оба файла импортируют друг друга)"
                 )
+
+    # Проверка self-referencing assignments: func = func (до определения)
+    self_refs = re.findall(r"^(\w+)\s*=\s*(\w+)\s*$", code, re.MULTILINE)
+    for lhs, rhs in self_refs:
+        if lhs == rhs:
+            warnings.append(
+                f"бессмысленное присвоение '{lhs} = {lhs}' в {filename}: "
+                f"переменная ссылается на саму себя (возможно, пропущен import)"
+            )
+
+    # Проверка undefined module references: name.attr где name не импортирован
+    # Ловит паттерны вроде: VehicleRecord = data_models.VehicleRecord
+    # или: result = some_module.function()
+    imported_names = set()
+    for imp in from_imports:
+        # from X import Y → X импортирован (как модуль)
+        base = imp.split(".")[0]
+        if base:
+            imported_names.add(base)
+        else:
+            # relative import: from .X import Y → X
+            rel = imp.lstrip(".").split(".")[0]
+            if rel:
+                imported_names.add(rel)
+    for imp in direct_imports:
+        # import X → X импортирован
+        base = imp.split(".")[0]
+        if base:
+            imported_names.add(base)
+    # Добавляем builtins и стандартные имена, которые не требуют import
+    imported_names.update({"self", "cls", "super", "type", "print", "len", "range",
+                           "str", "int", "float", "bool", "list", "dict", "set",
+                           "tuple", "None", "True", "False", "Exception"})
+    # Также добавляем все имена, определённые в файле (def X, class X, X = ...)
+    defined_names = set(re.findall(r"^(?:class|def)\s+(\w+)", code, re.MULTILINE))
+    defined_names.update(re.findall(r"^(\w+)\s*=", code, re.MULTILINE))
+    imported_names.update(defined_names)
+
+    # Ищем name.attr паттерны (не self.X, не cls.X)
+    module_refs = re.findall(r"\b([a-zA-Z_]\w*)\.(\w+)", code)
+    seen_refs: set[str] = set()
+    for ref_name, _ in module_refs:
+        if ref_name in imported_names or ref_name in seen_refs:
+            continue
+        if ref_name in stdlib or ref_name in pip_packages:
+            continue
+        seen_refs.add(ref_name)
+        warnings.append(
+            f"undefined reference '{ref_name}' в {filename}: "
+            f"используется как '{ref_name}.…' но не импортирован "
+            f"(добавь import или from ... import)"
+        )
 
     return warnings

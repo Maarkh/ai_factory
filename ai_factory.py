@@ -50,6 +50,20 @@ from supervisor import (
 )
 
 
+def _can_revise_spec(state: dict, logger) -> bool:
+    """Проверяет, не исчерпан ли лимит revise_spec (3 за проект)."""
+    MAX_REVISE = 3
+    count = len(state.get("spec_history", []))
+    if count >= MAX_REVISE:
+        logger.warning(
+            f"⚠️  revise_spec пропущен: лимит {count}/{MAX_REVISE} исчерпан. "
+            "Продолжаем с текущей спецификацией."
+        )
+        state.setdefault("phase_fail_counts", {}).clear()
+        return False
+    return True
+
+
 def _init_project_files(
     project_path: Path,
     project_name: str,
@@ -328,15 +342,16 @@ async def main() -> None:
             state["_spec_escalated_phases"] = []
         spec_escalated_phases = state["_spec_escalated_phases"]
         if total_fails >= MAX_PHASE_TOTAL_FAILS and next_phase not in spec_escalated_phases:
-            print(f"\n🛑 Фаза '{next_phase}' провалилась {total_fails} раз за проект. "
-                  f"Принудительный revise_spec.")
-            problem = (
-                f"Фаза '{next_phase}' провалилась {total_fails} раз. "
-                "Вероятно, фундаментальная проблема в спецификации."
-            )
             spec_escalated_phases.append(next_phase)
-            await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-            state["max_iters"] += 10
+            if _can_revise_spec(state, logger):
+                print(f"\n🛑 Фаза '{next_phase}' провалилась {total_fails} раз за проект. "
+                      f"Принудительный revise_spec.")
+                problem = (
+                    f"Фаза '{next_phase}' провалилась {total_fails} раз. "
+                    "Вероятно, фундаментальная проблема в спецификации."
+                )
+                await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                state["max_iters"] += 10
             save_state(project_path, state)
             continue
 
@@ -366,9 +381,10 @@ async def main() -> None:
                         for f in spec_blocked
                     )
                 )
-                print(f"📋 Проблема спецификации: {', '.join(spec_blocked)} → revise_spec")
-                await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                state["max_iters"] += 10
+                if _can_revise_spec(state, logger):
+                    print(f"📋 Проблема спецификации: {', '.join(spec_blocked)} → revise_spec")
+                    await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                    state["max_iters"] += 10
                 for f in spec_blocked:
                     state["file_attempts"][f] = 0
             elif exhausted:
@@ -380,9 +396,10 @@ async def main() -> None:
                         for f in exhausted
                     )
                 )
-                print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
-                await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                state["max_iters"] += 10
+                if _can_revise_spec(state, logger):
+                    print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
+                    await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                    state["max_iters"] += 10
                 for f in exhausted:
                     state["file_attempts"][f] = 0
             elif not made_progress:
@@ -399,9 +416,10 @@ async def main() -> None:
                             for f in unapproved
                         )
                     )
-                    print(f"⚠️  Разработка не продвигается {fails} итераций → revise_spec ({', '.join(unapproved)})")
-                    await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                    state["max_iters"] += 10
+                    if _can_revise_spec(state, logger):
+                        print(f"⚠️  Разработка не продвигается {fails} итераций → revise_spec ({', '.join(unapproved)})")
+                        await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                        state["max_iters"] += 10
                     for f in unapproved:
                         state["file_attempts"][f] = 0
 
@@ -416,7 +434,7 @@ async def main() -> None:
             elif not await phase_e2e_review(logger, project_path, state, cache, stats, e2e_attempt, randomize=randomize_models):
                 fails = _bump_phase_fail(state, "e2e_review")
                 e2e_attempt += 1
-                if fails >= 3:
+                if fails >= 3 and _can_revise_spec(state, logger):
                     print("⚠️  E2E падает 3 раза подряд → принудительный revise_spec.")
                     feedbacks = [
                         f"  {f}: {state['feedbacks'].get(f, '')[:300]}"
