@@ -122,10 +122,12 @@ def _validate_global_imports(
     arch_resp: dict,
     project_files: list[str],
     logger: logging.Logger,
+    requirements_path: Path | None = None,
 ) -> dict:
     """Удаляет из global_imports A5 импорты несуществующих пакетов.
 
-    Проверяет: stdlib, файлы проекта, dependencies из архитектуры.
+    Проверяет: stdlib, файлы проекта, dependencies из архитектуры,
+    а также requirements.txt (если передан).
     """
     gi = contract.get("global_imports", {})
     if not gi:
@@ -136,13 +138,17 @@ def _validate_global_imports(
     # Модули проекта (без расширения)
     project_modules = {Path(f).stem for f in project_files}
     # pip-пакеты из dependencies архитектуры
-    deps = arch_resp.get("dependencies", [])
+    deps = arch_resp.get("dependencies", []) if isinstance(arch_resp, dict) else []
     pip_names: set[str] = set()
     for dep in deps:
         if isinstance(dep, str):
             pkg = re.split(r"[=<>~!\[]", dep)[0].strip().lower()
             pip_names.add(pkg)
             pip_names.add(pkg.replace("-", "_"))
+    # Дополнительно: pip-пакеты из requirements.txt (всегда актуальный источник)
+    if requirements_path and requirements_path.exists():
+        from code_context import _parse_requirements
+        pip_names.update(_parse_requirements(requirements_path))
 
     cleaned_gi: dict[str, list[str]] = {}
     for fname, imports in gi.items():
@@ -181,6 +187,77 @@ def _validate_global_imports(
         cleaned_gi[fname] = valid_imports
 
     contract["global_imports"] = cleaned_gi
+    return contract
+
+
+def _inject_cross_file_imports(
+    contract: dict,
+    logger: logging.Logger,
+) -> dict:
+    """Детерминистски добавляет в global_imports межфайловые импорты.
+
+    Если класс определён в файле A (signature='class X'), а используется
+    в сигнатуре функции файла B (параметр/return type содержит 'X'),
+    то в global_imports файла B добавляется 'from A_stem import X'.
+    """
+    fc = contract.get("file_contracts", {})
+    gi = contract.setdefault("global_imports", {})
+
+    # 1. Собираем маппинг class_name → source_file (stem)
+    class_to_file: dict[str, str] = {}
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sig = item.get("signature", "")
+            if sig.strip().startswith("class "):
+                class_name = item.get("name", "")
+                if class_name:
+                    class_to_file[class_name] = fname
+
+    if not class_to_file:
+        return contract
+
+    # 2. Для каждого файла проверяем сигнатуры на ссылки к классам из других файлов
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        needed_imports: dict[str, str] = {}  # class_name → source_file
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sig = item.get("signature", "")
+            desc = item.get("description", "")
+            # Не проверяем сигнатуры class (они определяют, а не используют)
+            if sig.strip().startswith("class "):
+                continue
+            # Ищем ссылки на известные классы в сигнатуре
+            for class_name, source_file in class_to_file.items():
+                if source_file == fname:
+                    continue  # Класс определён в этом же файле
+                if class_name in sig:
+                    needed_imports[class_name] = source_file
+
+        if not needed_imports:
+            continue
+
+        # 3. Проверяем что import ещё не добавлен в global_imports
+        existing = gi.get(fname, [])
+        if not isinstance(existing, list):
+            existing = []
+        existing_str = " ".join(existing)
+
+        for class_name, source_file in needed_imports.items():
+            source_stem = Path(source_file).stem
+            import_line = f"from {source_stem} import {class_name}"
+            if class_name not in existing_str:
+                existing.append(import_line)
+                logger.info(f"  📋 A5 global_imports: добавлен '{import_line}' для {fname}")
+
+        gi[fname] = existing
+
     return contract
 
 
@@ -411,7 +488,13 @@ async def phase_generate_api_contract(
         # Детерминистская валидация: data models из A2 покрыты классами в A5
         contract = _inject_missing_data_models(contract, sa_resp, files_list, logger)
         # Детерминистская валидация: global_imports ссылаются на реальные пакеты
-        contract = _validate_global_imports(contract, arch_resp, files_list, logger)
+        req_path = project_path / "src" / "requirements.txt"
+        contract = _validate_global_imports(
+            contract, arch_resp, files_list, logger,
+            requirements_path=req_path if req_path.exists() else None,
+        )
+        # Детерминистская инъекция: межфайловые импорты (data models и т.п.)
+        contract = _inject_cross_file_imports(contract, logger)
         save_artifact(project_path, "A5", contract)
         logger.info("✅ A5 (API контракт) готов.")
         return contract
@@ -449,10 +532,22 @@ async def _refresh_api_contract(
         new_contract.setdefault("file_contracts", {})
         new_contract.setdefault("global_imports", {})
         # Валидация: все файлы должны иметь контракт
+        files_list = state.get("files", [])
         new_contract = await _validate_and_patch_contract(
             logger, project_path, state, cache, stats,
-            new_contract, state.get("files", []), randomize
+            new_contract, files_list, randomize
         )
+        # Детерминистские валидации (аналогично phase_generate_api_contract)
+        new_contract = _inject_missing_data_models(
+            new_contract, state.get("system_specs", {}), files_list, logger
+        )
+        req_path = project_path / "src" / "requirements.txt"
+        new_contract = _validate_global_imports(
+            new_contract, {},  # arch_resp недоступен после каскада
+            files_list, logger,
+            requirements_path=req_path if req_path.exists() else None,
+        )
+        new_contract = _inject_cross_file_imports(new_contract, logger)
         state["api_contract"] = new_contract
         save_artifact(project_path, "A5", new_contract)
         logger.info("✅ A5 обновлён каскадно.")

@@ -39,6 +39,7 @@ from phases import (
     phase_validate_architecture,
     phase_develop,
     phase_e2e_review,
+    phase_cross_file_check,
     phase_integration_test,
     phase_unit_tests,
     phase_document,
@@ -295,6 +296,7 @@ async def main() -> None:
                 arch_resp, sa_resp, randomize_models,
             )
             state["api_contract"] = api_contract
+            state["_prev_file_contracts"] = api_contract.get("file_contracts", {})
             if await phase_review_api_contract(
                 logger, project_path, state, cache, stats,
                 api_contract, arch_resp, sa_resp, randomize_models,
@@ -424,6 +426,12 @@ async def main() -> None:
                         state["file_attempts"][f] = 0
 
         elif next_phase == "e2e_review":
+            # Детерминистская кросс-файловая проверка ПЕРЕД LLM E2E
+            if not phase_cross_file_check(logger, project_path, state):
+                _bump_phase_fail(state, "e2e_review")
+                save_state(project_path, state)
+                continue  # Возврат в develop без траты E2E попыток
+
             total_e2e_fails = state.get("phase_total_fails", {}).get("e2e_review", 0)
             # Предохранитель: после 6+ суммарных E2E отказов — пропускаем к integration_test
             if total_e2e_fails >= 6:

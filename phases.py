@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import json
 import re
@@ -12,7 +13,7 @@ from stats import ModelStats
 from json_utils import _to_str, _safe_contract
 from lang_utils import LANG_DISPLAY, LANG_EXT, get_execution_command, get_test_command, get_docker_image
 from log_utils import get_model, log_runtime_error
-from code_context import get_global_context, get_full_context, build_dependency_order, _find_failing_file, validate_imports
+from code_context import get_global_context, get_full_context, build_dependency_order, _find_failing_file, validate_imports, validate_cross_file_names
 from state import _push_feedback, _get_feedback_ctx, update_dependencies, update_dockerfile, update_requirements
 from artifacts import update_artifact_a9, save_artifact
 from infra import run_in_docker, build_docker_image
@@ -61,6 +62,152 @@ def _check_class_duplication(code: str, global_context: str, file_contract: list
     ]
 
 
+def _check_stub_functions(code: str) -> list[str]:
+    """Детерминистская проверка: содержит ли код функции-заглушки.
+
+    Ловит: pass / ... / raise NotImplementedError как единственное тело функции,
+    а также pass внутри единственного try-блока.
+    Возвращает список предупреждений (пустой если заглушек нет).
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    warnings: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        fname = node.name
+        body = node.body
+        # Пропускаем docstring если есть (только строковые литералы, не Ellipsis)
+        effective = body
+        if (effective and isinstance(effective[0], ast.Expr)
+                and isinstance(effective[0].value, (ast.Constant, ast.Str))
+                and isinstance(getattr(effective[0].value, "value", None), str)):
+            effective = effective[1:]
+        if not effective:
+            warnings.append(f"функция '{fname}' пустая (только docstring)")
+            continue
+        # Проверяем паттерны заглушек
+        if _is_stub_body(effective):
+            warnings.append(
+                f"функция '{fname}' — заглушка (pass / ... / NotImplementedError). "
+                f"Напиши полную реализацию с бизнес-логикой"
+            )
+    return warnings
+
+
+def _is_stub_body(stmts: list) -> bool:
+    """Проверяет что список statements — это заглушка."""
+    if len(stmts) == 1:
+        s = stmts[0]
+        # pass
+        if isinstance(s, ast.Pass):
+            return True
+        # ... (Ellipsis)
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and s.value.value is ...:
+            return True
+        # raise NotImplementedError(...)
+        if isinstance(s, ast.Raise) and s.exc:
+            if isinstance(s.exc, ast.Call) and isinstance(s.exc.func, ast.Name):
+                if s.exc.func.id == "NotImplementedError":
+                    return True
+            if isinstance(s.exc, ast.Name) and s.exc.id == "NotImplementedError":
+                return True
+        # try: pass/print except: pass/print (заглушка обёрнутая в try)
+        if isinstance(s, ast.Try):
+            try_effective = [st for st in s.body if not isinstance(st, (ast.Pass, ast.Expr))]
+            if not try_effective:
+                return True
+    return False
+
+
+def _check_function_preservation(
+    new_code: str, old_code: str, feedback: str,
+    file_contract: list | None = None,
+) -> list[str]:
+    """Детерминистская проверка: не потерял ли новый код функции/классы из предыдущей версии.
+
+    Сравнивает top-level function/class names между old и new.
+    Если имя исчезло и НЕ упомянуто в feedback → авто-REJECT.
+    Приватные имена (_prefix) игнорируются.
+    Функции, которых нет в текущем A5 контракте, тоже игнорируются
+    (A5 мог измениться после revise_spec).
+    Возвращает список предупреждений (пустой если всё ОК).
+    """
+    if not old_code:
+        return []
+
+    def _extract_top_names(code: str) -> set[str]:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            names = set(re.findall(r'^class\s+(\w+)', code, re.MULTILINE))
+            names.update(re.findall(r'^(?:async\s+)?def\s+(\w+)', code, re.MULTILINE))
+            return names
+        names: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.ClassDef):
+                names.add(node.name)
+        return names
+
+    old_names = _extract_top_names(old_code)
+    new_names = _extract_top_names(new_code)
+    disappeared = old_names - new_names
+    if not disappeared:
+        return []
+
+    # Имена, ожидаемые текущим A5 контрактом
+    contract_names: set[str] = set()
+    if file_contract:
+        for item in file_contract:
+            contract_names.add(item.get("name", ""))
+
+    # Фильтруем: имена упомянутые в feedback + приватные + не в текущем A5
+    feedback_lower = feedback.lower() if feedback else ""
+    warnings: list[str] = []
+    for name in sorted(disappeared):
+        if name.startswith("_"):
+            continue
+        if name.lower() in feedback_lower:
+            continue
+        # Если функции нет в текущем A5 — значит A5 изменился, удаление допустимо
+        if contract_names and name not in contract_names:
+            continue
+        warnings.append(
+            f"функция/класс '{name}' из предыдущей версии УДАЛЕНА, "
+            f"но НЕ упоминается в фидбэке. Верни её обратно."
+        )
+    return warnings
+
+
+def _check_contract_compliance(code: str, file_contract: list) -> list[str]:
+    """Детерминистская проверка: содержит ли код ВСЕ required функции/классы из A5 контракта.
+    Возвращает список отсутствующих элементов."""
+    if not file_contract:
+        return []
+    missing = []
+    for item in file_contract:
+        if not item.get("required", False):
+            continue
+        sig = item.get("signature", "")
+        name = item.get("name", "")
+        if sig.startswith("class "):
+            # Проверяем наличие class ClassName
+            class_name = sig.split("class ", 1)[1].split("(")[0].split(":")[0].strip()
+            if not re.search(rf'^class\s+{re.escape(class_name)}\b', code, re.MULTILINE):
+                missing.append(f"class {class_name}")
+        elif sig.startswith("def ") or sig.startswith("async def "):
+            # Проверяем наличие def func_name(
+            func_name = name or sig.split("def ", 1)[1].split("(")[0].strip()
+            if not re.search(rf'^\s*(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code, re.MULTILINE):
+                missing.append(f"def {func_name}()")
+    return missing
+
+
 async def _review_file(
     logger: logging.Logger,
     cache: ThreadSafeCache,
@@ -70,12 +217,20 @@ async def _review_file(
     stats: ModelStats,
     randomize: bool = False,
     language: str = "python",
+    file_contract: list | None = None,
+    global_imports: list | None = None,
 ) -> tuple[str, str, bool]:
     """Возвращает (status, feedback, needs_spec_revision)."""
     rev_model = get_model("reviewer", attempt, randomize=randomize)
     logger.info(f"👀 [{rev_model}] Reviewer проверяет {current_file} ...")
     try:
-        result   = await ask_agent(logger, "reviewer", f"Файл: {current_file}\nКод:\n{code}",
+        rev_ctx = ""
+        if file_contract:
+            rev_ctx += f"API КОНТРАКТ (A5) для {current_file}:\n{json.dumps(file_contract, ensure_ascii=False, indent=2)}\n\n"
+        if global_imports:
+            rev_ctx += f"ОЖИДАЕМЫЕ ИМПОРТЫ (A5):\n{json.dumps(global_imports, ensure_ascii=False, indent=2)}\n\n"
+        rev_ctx += f"Файл: {current_file}\nКод:\n{code}"
+        result   = await ask_agent(logger, "reviewer", rev_ctx,
                                    cache, attempt, randomize, language)
         status   = result.get("status", "REJECT")
         feedback = _to_str(result.get("feedback", ""))
@@ -369,6 +524,12 @@ async def phase_develop(
             max_feedback_chars = MAX_CONTEXT_CHARS // 3
             if len(feedback_ctx) > max_feedback_chars:
                 feedback_ctx = feedback_ctx[:max_feedback_chars] + "\n[... обрезано ...]"
+            # Если есть и код и фидбэк — явная инструкция на точечное исправление
+            if existing_code:
+                dev_ctx += (
+                    "⚠️ ПРАВЬ ТОЧЕЧНО: текущий код уже предоставлен выше. "
+                    "Исправь ТОЛЬКО проблемы из фидбэка ниже, сохрани работающую структуру.\n\n"
+                )
             dev_ctx += feedback_ctx
 
         dev_model = get_model("developer", attempt, randomize=randomize)
@@ -393,6 +554,24 @@ async def phase_develop(
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue
+
+        # Детерминистская проверка: не потерял ли developer функции из предыдущей версии
+        if existing_code:
+            last_fb = state.get("feedbacks", {}).get(current_file, "")
+            pres_warnings = _check_function_preservation(code, existing_code, last_fb, file_contract)
+            if pres_warnings:
+                pres_feedback = (
+                    "АВТОМАТИЧЕСКИЙ REJECT — потеря функций из предыдущей версии:\n"
+                    + "\n".join(f"  - {w}" for w in pres_warnings)
+                    + "\n\n⚠️ НЕ ПЕРЕПИСЫВАЙ файл с нуля. Исправь ТОЛЬКО то, что указано "
+                    "в фидбэке. Сохрани ВСЮ существующую структуру."
+                )
+                logger.warning(f"⛔ {current_file}: {len(pres_warnings)} функций потеряно → авто-REJECT")
+                stats.record("developer", dev_model, False)
+                _push_feedback(state, current_file, pres_feedback)
+                file_attempts[current_file] = attempt + 1
+                cumulative_attempts[current_file] = total_attempts + 1
+                continue
 
         # Детерминистская проверка: не дублирует ли код классы из других файлов
         dup_warnings = _check_class_duplication(code, global_context, file_contract)
@@ -429,6 +608,56 @@ async def phase_develop(
             cumulative_attempts[current_file] = total_attempts + 1
             continue
 
+        # Детерминистская проверка: кросс-файловые имена (from X import Y → Y существует в X)
+        if language == "python":
+            xfile_warnings = validate_cross_file_names(
+                code, current_file, state["files"], src_path,
+                approved_files=state.get("approved_files", []),
+            )
+            if xfile_warnings:
+                xfile_feedback = (
+                    "АВТОМАТИЧЕСКИЙ REJECT — ошибки кросс-файловых имён:\n"
+                    + "\n".join(f"  - {w}" for w in xfile_warnings)
+                    + "\n\nПроверь что все импортируемые имена определены в целевых файлах."
+                )
+                logger.warning(f"⛔ {current_file}: {len(xfile_warnings)} ошибок имён → авто-REJECT")
+                stats.record("developer", dev_model, False)
+                _push_feedback(state, current_file, xfile_feedback)
+                file_attempts[current_file] = attempt + 1
+                cumulative_attempts[current_file] = total_attempts + 1
+                continue
+
+        # Детерминистская проверка: нет ли функций-заглушек (pass, ..., NotImplementedError)
+        stub_warnings = _check_stub_functions(code)
+        if stub_warnings:
+            stub_feedback = (
+                "АВТОМАТИЧЕСКИЙ REJECT — функции-заглушки:\n"
+                + "\n".join(f"  - {w}" for w in stub_warnings)
+                + "\n\nВесь код должен быть полностью рабочим. Заглушки (pass, ..., "
+                "raise NotImplementedError) ЗАПРЕЩЕНЫ."
+            )
+            logger.warning(f"⛔ {current_file}: {len(stub_warnings)} заглушек → авто-REJECT")
+            stats.record("developer", dev_model, False)
+            _push_feedback(state, current_file, stub_feedback)
+            file_attempts[current_file] = attempt + 1
+            cumulative_attempts[current_file] = total_attempts + 1
+            continue
+
+        # Детерминистская проверка: все required функции/классы из A5 контракта присутствуют
+        contract_missing = _check_contract_compliance(code, file_contract)
+        if contract_missing:
+            contract_feedback = (
+                "АВТОМАТИЧЕСКИЙ REJECT — отсутствуют required элементы из A5 контракта:\n"
+                + "\n".join(f"  - {m}" for m in contract_missing)
+                + "\n\nРеализуй ВСЕ функции/классы, указанные в API контракте A5."
+            )
+            logger.warning(f"⛔ {current_file}: отсутствуют {len(contract_missing)} элементов A5 → авто-REJECT")
+            stats.record("developer", dev_model, False)
+            _push_feedback(state, current_file, contract_feedback)
+            file_attempts[current_file] = attempt + 1
+            cumulative_attempts[current_file] = total_attempts + 1
+            continue
+
         file_path.write_text(code, encoding="utf-8")
 
         # Self-Reflect с проверкой A5
@@ -441,7 +670,8 @@ async def phase_develop(
 
         # Внешний ревью
         rev_status, rev_feedback, needs_spec = await _review_file(
-            logger, cache, current_file, code, attempt, stats, randomize, language
+            logger, cache, current_file, code, attempt, stats, randomize, language,
+            file_contract=file_contract, global_imports=global_imports,
         )
 
         if rev_status == "APPROVE":
@@ -508,32 +738,127 @@ async def phase_e2e_review(
 
         resp = result
         if resp.get("status") == "REJECT":
-            target   = resp.get("target_file", "").strip() or state["files"][0]
-            feedback = _to_str(resp.get("feedback", ""))
-            logger.warning(f"❌ E2E [{label}] REJECT на {target}: {feedback[:120]}")
+            # Парсим structured issues (новый формат) с fallback на старый
+            issues = resp.get("issues", [])
+            if issues and isinstance(issues, list):
+                for issue in issues:
+                    if not isinstance(issue, dict):
+                        continue
+                    target = issue.get("file", "").strip()
+                    if target not in state["files"]:
+                        target = state["files"][0]
+                    element  = issue.get("element", "")
+                    severity = issue.get("severity", "MAJOR")
+                    problem  = issue.get("problem", "")
+                    fix_text = issue.get("fix", "")
+                    structured_fb = f"[{severity}] {element}: {problem}\n  FIX: {fix_text}"
+                    rejections.append((agent_key, target, structured_fb))
+                logger.warning(f"❌ E2E [{label}] REJECT: {len(issues)} issues")
+            else:
+                # Fallback: старый формат target_file + feedback
+                target   = resp.get("target_file", "").strip() or state["files"][0]
+                feedback = _to_str(resp.get("feedback", ""))
+                logger.warning(f"❌ E2E [{label}] REJECT на {target}: {feedback[:120]}")
+                rejections.append((agent_key, target, feedback))
             stats.record(agent_key, model, False)
-            rejections.append((agent_key, target, feedback))
             result_ok = False
         else:
             stats.record(agent_key, model, True)
 
-    # E2E — интеграционная проверка: если провал, проблема кросс-файловая.
-    # Де-апрувим ВСЕ файлы и даём ВСЕМ единый фидбэк, чтобы developer
-    # переписал файлы согласованно, а не чинил один в изоляции.
+    # E2E — селективный сброс с per-file targeted feedback.
     if rejections:
         agents_map = dict(agents)
-        combined_fb = "\n\n".join(
-            f"[{agents_map.get(ak, ak)}] → {t}:\n{fb}"
-            for ak, t, fb in rejections
-        )
-        logger.warning(f"❌ E2E REJECT — сброс всех файлов для согласованной переработки.")
-        state["approved_files"] = []
-        for f in state["files"]:
-            state["feedbacks"][f] = f"E2E REJECT (кросс-файловая проблема):\n{combined_fb}"
+        # Группируем feedback по файлам
+        file_feedbacks: dict[str, list[str]] = {}
+        for ak, target, fb in rejections:
+            file_feedbacks.setdefault(target, []).append(
+                f"[{agents_map.get(ak, ak)}]:\n{fb}"
+            )
+        target_files = list(file_feedbacks.keys())
+
+        # Если targets пуст или покрывает > 50% файлов — полный сброс
+        if not target_files or len(target_files) > len(state["files"]) * 0.5:
+            combined_fb = "\n\n".join(
+                f"[{agents_map.get(ak, ak)}] → {t}:\n{fb}"
+                for ak, t, fb in rejections
+            )
+            logger.warning(f"❌ E2E REJECT — сброс ВСЕХ файлов (затронуто >{50 if target_files else 0}%).")
+            state["approved_files"] = []
+            for f in state["files"]:
+                state["feedbacks"][f] = f"E2E REJECT (кросс-файловая проблема):\n{combined_fb}"
+        else:
+            # Находим зависимые файлы (импортирующие target_files)
+            gi = _safe_contract(state).get("global_imports", {})
+            target_stems = {t.removesuffix(".py") for t in target_files}
+            dependent_files = set()
+            for f in state["files"]:
+                if f in target_files:
+                    continue
+                file_imports = gi.get(f, [])
+                imports_str = " ".join(file_imports) if isinstance(file_imports, list) else str(file_imports)
+                if any(stem in imports_str for stem in target_stems):
+                    dependent_files.add(f)
+            files_to_reset = set(target_files) | dependent_files
+            logger.warning(
+                f"❌ E2E REJECT — селективный сброс: {', '.join(sorted(files_to_reset))} "
+                f"(targets: {', '.join(target_files)}, зависимые: {', '.join(sorted(dependent_files)) or 'нет'})"
+            )
+            state["approved_files"] = [f for f in state.get("approved_files", []) if f not in files_to_reset]
+            for f in files_to_reset:
+                if f in file_feedbacks:
+                    state["feedbacks"][f] = (
+                        "E2E REJECT — проблемы в ЭТОМ файле:\n"
+                        + "\n\n".join(file_feedbacks[f])
+                    )
+                else:
+                    related = [t for t in target_files if t != f]
+                    state["feedbacks"][f] = (
+                        f"E2E REJECT (зависимый файл, затронут изменениями в: "
+                        f"{', '.join(related) if related else 'проект'})"
+                    )
 
     if result_ok:
         logger.info("✅ Parallel E2E-ревью пройдено!")
     return result_ok
+
+
+def phase_cross_file_check(
+    logger: logging.Logger,
+    project_path: Path,
+    state: dict,
+) -> bool:
+    """Детерминистская кросс-файловая проверка всего проекта перед E2E.
+
+    Если проблемы: снимает APPROVE с проблемных файлов, ставит feedback.
+    Возвращает True если всё ОК, False если есть проблемы.
+    """
+    language = state.get("language", "python")
+    if language != "python":
+        return True
+
+    src_path = project_path / SRC_DIR
+    from code_context import validate_project_consistency
+    issues = validate_project_consistency(src_path, state["files"])
+
+    if not issues:
+        logger.info("✅ Кросс-файловая проверка проекта пройдена.")
+        return True
+
+    total_issues = sum(len(w) for w in issues.values())
+    logger.warning(f"⛔ Кросс-файловая проверка: {total_issues} проблем в {len(issues)} файлах")
+
+    for filename, warnings in issues.items():
+        feedback = (
+            "АВТОМАТИЧЕСКИЙ REJECT — кросс-файловые ошибки (до E2E):\n"
+            + "\n".join(f"  - {w}" for w in warnings)
+        )
+        state["feedbacks"][filename] = feedback
+        approved = state.get("approved_files", [])
+        if filename in approved:
+            approved.remove(filename)
+            logger.warning(f"  ⛔ {filename}: {len(warnings)} проблем → снят APPROVE")
+
+    return False
 
 
 def _fix_docker_requirements(src_path: Path, logger: logging.Logger) -> None:

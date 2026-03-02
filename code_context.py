@@ -1,3 +1,4 @@
+import ast
 import os
 import re
 import sys
@@ -237,6 +238,82 @@ def _get_stdlib_modules() -> frozenset[str]:
     })
 
 
+def _get_top_level_names(code: str) -> set[str]:
+    """Извлекает только TOP-LEVEL определения из Python-кода через AST.
+
+    Обходит ТОЛЬКО tree.body (не вложенные узлы).
+    Собирает: FunctionDef.name, ClassDef.name, Assign targets, Import/ImportFrom aliases.
+    При SyntaxError — fallback на regex.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        names = set(re.findall(r"^class\s+(\w+)", code, re.MULTILINE))
+        names.update(re.findall(r"^def\s+(\w+)", code, re.MULTILINE))
+        names.update(re.findall(r"^async\s+def\s+(\w+)", code, re.MULTILINE))
+        names.update(re.findall(r"^(\w+)\s*=", code, re.MULTILINE))
+        return names
+
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+    return names
+
+
+def _get_all_bound_names(code: str) -> set[str]:
+    """Извлекает ВСЕ связанные имена из Python-кода через AST.
+
+    Покрывает: присвоения (на любом уровне вложенности), параметры функций,
+    имена классов/функций, for-loop переменные, with-as, except-as, import aliases.
+    При SyntaxError — fallback на regex.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Fallback: regex с захватом indented assignments
+        names = set(re.findall(r"^(?:class|def)\s+(\w+)", code, re.MULTILINE))
+        names.update(re.findall(r"^\s*(\w+)\s*=", code, re.MULTILINE))
+        return names
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+            for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+                names.add(arg.arg)
+            if node.args.vararg:
+                names.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                names.add(node.args.kwarg.arg)
+        elif isinstance(node, ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+    return names
+
+
 def validate_imports(
     code: str,
     filename: str,
@@ -389,10 +466,8 @@ def validate_imports(
     imported_names.update({"self", "cls", "super", "type", "print", "len", "range",
                            "str", "int", "float", "bool", "list", "dict", "set",
                            "tuple", "None", "True", "False", "Exception"})
-    # Также добавляем все имена, определённые в файле (def X, class X, X = ...)
-    defined_names = set(re.findall(r"^(?:class|def)\s+(\w+)", code, re.MULTILINE))
-    defined_names.update(re.findall(r"^(\w+)\s*=", code, re.MULTILINE))
-    imported_names.update(defined_names)
+    # Все имена, связанные в файле (def/class/присвоения/параметры на ЛЮБОМ уровне)
+    imported_names.update(_get_all_bound_names(code))
 
     # Ищем name.attr паттерны (не self.X, не cls.X)
     module_refs = re.findall(r"\b([a-zA-Z_]\w*)\.(\w+)", code)
@@ -410,3 +485,197 @@ def validate_imports(
         )
 
     return warnings
+
+
+def validate_cross_file_names(
+    code: str,
+    filename: str,
+    project_files: list[str],
+    src_path: Path,
+    approved_files: list[str] | None = None,
+) -> list[str]:
+    """Детерминистская проверка: для каждого `from X import Y` где X — файл проекта,
+    проверяет что Y действительно определён на top-level в X.
+
+    Пропускает файлы, которые ещё не существуют на диске.
+    Если approved_files задан — проверяет только импорты из АПРУВНУТЫХ файлов
+    (неапрувнутые файлы ещё нестабильны, их API может измениться).
+    Возвращает список предупреждений (пустой если всё ОК).
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    project_stems = {f.removesuffix(".py"): f for f in project_files}
+    warnings: list[str] = []
+    # Кэш прочитанных файлов: stem → set(top_level_names) | None (файл не существует)
+    _name_cache: dict[str, set[str] | None] = {}
+
+    def _get_names_for(stem: str) -> set[str] | None:
+        if stem in _name_cache:
+            return _name_cache[stem]
+        target_file = project_stems.get(stem)
+        if not target_file:
+            _name_cache[stem] = None
+            return None
+        target_path = src_path / target_file
+        if not target_path.exists():
+            _name_cache[stem] = None
+            return None
+        try:
+            target_code = target_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            _name_cache[stem] = None
+            return None
+        names = _get_top_level_names(target_code)
+        _name_cache[stem] = names
+        return names
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        module_stem = node.module.split(".")[0]
+        if module_stem not in project_stems:
+            continue
+        # Не проверяем свой же файл
+        if project_stems[module_stem] == filename:
+            continue
+        # Если задан approved_files — проверяем только импорты из апрувнутых файлов
+        target_fname = project_stems[module_stem]
+        if approved_files is not None and target_fname not in approved_files:
+            continue  # Файл ещё не апрувнут — его API нестабилен
+        target_names = _get_names_for(module_stem)
+        if target_names is None:
+            continue  # Файл ещё не написан — пропускаем
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            if alias.name not in target_names:
+                suggestions = sorted(target_names - {"__all__"})[:8]
+                warnings.append(
+                    f"from {module_stem} import {alias.name}: "
+                    f"'{alias.name}' не определён в {project_stems[module_stem]}. "
+                    f"Доступные имена: {', '.join(suggestions) if suggestions else '(пусто)'}"
+                )
+
+    return warnings
+
+
+# ── Builtins для фильтрации ────────────────────────────────────────────────────
+
+_PYTHON_BUILTINS = {
+    "True", "False", "None",
+    "int", "float", "str", "bool", "bytes", "bytearray",
+    "list", "dict", "set", "tuple", "frozenset",
+    "type", "object", "super", "property", "classmethod", "staticmethod",
+    "print", "len", "range", "enumerate", "zip", "map", "filter", "sorted",
+    "min", "max", "sum", "abs", "round", "pow", "divmod",
+    "isinstance", "issubclass", "hasattr", "getattr", "setattr", "delattr",
+    "id", "hash", "repr", "format", "chr", "ord",
+    "open", "input", "iter", "next", "reversed", "slice",
+    "any", "all", "callable", "dir", "vars", "globals", "locals",
+    "Exception", "BaseException", "ValueError", "TypeError", "KeyError",
+    "IndexError", "AttributeError", "ImportError", "ModuleNotFoundError",
+    "RuntimeError", "StopIteration", "FileNotFoundError", "IOError",
+    "OSError", "NotImplementedError", "NameError", "ZeroDivisionError",
+    "ConnectionError", "TimeoutError", "PermissionError", "UnicodeDecodeError",
+    "SystemExit", "KeyboardInterrupt", "GeneratorExit",
+    "Optional", "List", "Dict", "Set", "Tuple", "Any", "Union", "Callable",
+}
+
+
+def validate_project_consistency(
+    src_path: Path,
+    project_files: list[str],
+) -> dict[str, list[str]]:
+    """Детерминистская кросс-файловая проверка всего проекта.
+
+    Строит таблицу символов проекта, затем для каждого файла:
+    1. `from X import Y` → Y определён на top-level в X
+    2. Type annotations ссылаются на импортированные/определённые/builtin имена
+
+    Возвращает dict[filename → list[warnings]]. Пустой dict = всё ОК.
+    """
+    # 1. Строим таблицу символов проекта
+    project_stems = {f.removesuffix(".py"): f for f in project_files}
+    symbol_table: dict[str, set[str]] = {}  # stem → top-level names
+    file_codes: dict[str, str] = {}  # filename → code
+
+    for fname in project_files:
+        fpath = src_path / fname
+        if not fpath.exists():
+            continue
+        try:
+            code = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        file_codes[fname] = code
+        stem = fname.removesuffix(".py")
+        symbol_table[stem] = _get_top_level_names(code)
+
+    issues: dict[str, list[str]] = {}
+
+    # 2. Проверяем каждый файл
+    for fname, code in file_codes.items():
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+
+        file_warnings: list[str] = []
+        file_stem = fname.removesuffix(".py")
+
+        # 2a. Проверяем from X import Y
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            module_stem = node.module.split(".")[0]
+            if module_stem not in project_stems or module_stem == file_stem:
+                continue
+            if module_stem not in symbol_table:
+                continue  # Файл не существует
+            target_names = symbol_table[module_stem]
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if alias.name not in target_names:
+                    file_warnings.append(
+                        f"from {module_stem} import {alias.name}: "
+                        f"'{alias.name}' не определён в {project_stems[module_stem]}"
+                    )
+
+        # 2b. Проверяем type annotations на неимпортированные имена
+        imported_names = _get_all_bound_names(code)
+        annotation_names: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+                    if arg.annotation and isinstance(arg.annotation, ast.Name):
+                        annotation_names.add(arg.annotation.id)
+                if node.returns and isinstance(node.returns, ast.Name):
+                    annotation_names.add(node.returns.id)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.annotation, ast.Name):
+                annotation_names.add(node.annotation.id)
+
+        # Фильтруем: убираем определённые/импортированные/builtin
+        unresolved = annotation_names - imported_names - _PYTHON_BUILTINS
+        for name in sorted(unresolved):
+            # Ищем в таблице символов проекта
+            found_in = None
+            for stem, names in symbol_table.items():
+                if stem == file_stem:
+                    continue
+                if name in names:
+                    found_in = project_stems[stem]
+                    break
+            if found_in:
+                file_warnings.append(
+                    f"type annotation '{name}' не импортирован в {fname}. "
+                    f"Определён в {found_in} — добавь: from {found_in.removesuffix('.py')} import {name}"
+                )
+
+        if file_warnings:
+            issues[fname] = file_warnings
+
+    return issues
