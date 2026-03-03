@@ -827,6 +827,21 @@ async def phase_develop(
         else:
             stats.record("developer", dev_model, False)
             combined = "\n".join(filter(None, [_to_str(sr_feedback), _to_str(rev_feedback)]))
+            # Защита от пустого feedback при REJECT
+            if not combined:
+                combined = (
+                    f"Reviewer отклонил {current_file} без конкретных замечаний. "
+                    "Проверь: корректность импортов из других файлов проекта, "
+                    "соответствие API контракту A5, полноту реализации всех функций, "
+                    "типы данных параметров и возвращаемых значений."
+                )
+            # Уведомление: spec зафиксирована
+            if needs_spec and len(state.get("spec_history", [])) >= 3:
+                combined += (
+                    "\n\nСПЕЦИФИКАЦИЯ ЗАФИКСИРОВАНА (лимит ревизий исчерпан). "
+                    "НЕ жди изменений спецификации — реши проблему В РАМКАХ текущего API контракта. "
+                    "Адаптируй код под текущие интерфейсы файлов проекта."
+                )
             logger.warning(f"❌ {current_file} отклонён: {combined[:100]}")
             _push_feedback(state, current_file, combined)
             file_attempts[current_file] = attempt + 1

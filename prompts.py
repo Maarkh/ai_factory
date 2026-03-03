@@ -356,9 +356,12 @@ PROMPTS: dict[str, str] = {
 {NO_STUBS_RULE}
 {JSON_OUTPUT_RULE}
 
+ПРАВИЛО FEEDBACK: если status=REJECT, поле feedback ОБЯЗАТЕЛЬНО содержит конкретные замечания
+(файл, строка, проблема, как исправить). Пустой feedback при REJECT ЗАПРЕЩЁН.
+
 {{
   "status": "APPROVE" или "REJECT",
-  "feedback": "Конкретная инструкция что исправить с номерами строк (пусто если APPROVE)",
+  "feedback": "Конкретная инструкция что исправить с номерами строк (ОБЯЗАТЕЛЬНО при REJECT, пусто ТОЛЬКО при APPROVE)",
   "severity": "CRITICAL или MAJOR или MINOR (если REJECT)",
   "security_issues": ["список проблем безопасности"],
   "needs_spec_revision": false

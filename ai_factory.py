@@ -387,8 +387,18 @@ async def main() -> None:
                     print(f"📋 Проблема спецификации: {', '.join(spec_blocked)} → revise_spec")
                     await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                     state["max_iters"] += 10
-                for f in spec_blocked:
-                    state["file_attempts"][f] = 0
+                    for f in spec_blocked:
+                        state["file_attempts"][f] = 0
+                else:
+                    # Spec исчерпана — force-approve файлы с кодом
+                    src_path = project_path / SRC_DIR
+                    for f in spec_blocked:
+                        fpath = src_path / f
+                        if fpath.exists() and fpath.read_text(encoding="utf-8").strip():
+                            logger.warning(f"⚠️  {f}: spec исчерпана + spec_blocked → принудительный APPROVE")
+                            state.setdefault("approved_files", []).append(f)
+                            state["feedbacks"][f] = ""
+                            state["file_attempts"][f] = 0
             elif exhausted:
                 problem = (
                     f"Файлы не удалось написать за {MAX_FILE_ATTEMPTS} попыток: {', '.join(exhausted)}. "
@@ -402,8 +412,18 @@ async def main() -> None:
                     print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
                     await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                     state["max_iters"] += 10
-                for f in exhausted:
-                    state["file_attempts"][f] = 0
+                    for f in exhausted:
+                        state["file_attempts"][f] = 0
+                else:
+                    # Spec исчерпана — force-approve файлы с кодом
+                    src_path = project_path / SRC_DIR
+                    for f in exhausted:
+                        fpath = src_path / f
+                        if fpath.exists() and fpath.read_text(encoding="utf-8").strip():
+                            logger.warning(f"⚠️  {f}: spec исчерпана + exhausted → принудительный APPROVE")
+                            state.setdefault("approved_files", []).append(f)
+                            state["feedbacks"][f] = ""
+                            state["file_attempts"][f] = 0
             elif not made_progress:
                 fails = _bump_phase_fail(state, "develop")
                 if fails >= 3:
@@ -422,8 +442,18 @@ async def main() -> None:
                         print(f"⚠️  Разработка не продвигается {fails} итераций → revise_spec ({', '.join(unapproved)})")
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                         state["max_iters"] += 10
-                    for f in unapproved:
-                        state["file_attempts"][f] = 0
+                        for f in unapproved:
+                            state["file_attempts"][f] = 0
+                    else:
+                        # Spec исчерпана — force-approve файлы с кодом
+                        src_path = project_path / SRC_DIR
+                        for f in unapproved:
+                            fpath = src_path / f
+                            if fpath.exists() and fpath.read_text(encoding="utf-8").strip():
+                                logger.warning(f"⚠️  {f}: spec исчерпана + stalled → принудительный APPROVE")
+                                state.setdefault("approved_files", []).append(f)
+                                state["feedbacks"][f] = ""
+                                state["file_attempts"][f] = 0
 
         elif next_phase == "e2e_review":
             total_e2e_fails = state.get("phase_total_fails", {}).get("e2e_review", 0)
