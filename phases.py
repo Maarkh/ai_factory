@@ -559,7 +559,8 @@ async def phase_develop(
         total_attempts = cumulative_attempts.get(current_file, 0)
 
         # Предохранитель: файл не проходит ревью после множества попыток → принудительный approve
-        if total_attempts >= MAX_CUMULATIVE:
+        force_approve_mode = total_attempts >= MAX_CUMULATIVE
+        if force_approve_mode:
             file_path = src_path / current_file
             if file_path.exists() and file_path.read_text(encoding="utf-8").strip():
                 logger.warning(
@@ -572,6 +573,14 @@ async def phase_develop(
                 state["feedbacks"][current_file] = ""
                 file_attempts[current_file] = 0
                 continue
+            else:
+                # Файл не на диске — даём developer ещё попытку, approve после записи
+                logger.warning(
+                    f"⚠️  {current_file}: cumulative={total_attempts} но файла нет на диске "
+                    f"→ пишем код без проверок."
+                )
+                file_attempts[current_file] = 0
+                attempt = 0
 
         if attempt >= MAX_FILE_ATTEMPTS:
             logger.warning(
@@ -690,6 +699,21 @@ async def phase_develop(
             state["feedbacks"][current_file] = "Агент вернул пустой код."
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
+            continue
+
+        # Force-approve mode: файл не на диске после MAX_CUMULATIVE попыток →
+        # записываем что есть и approve без проверок
+        if force_approve_mode:
+            file_path.write_text(code, encoding="utf-8")
+            logger.warning(
+                f"⚠️  {current_file}: force-approve mode → код записан и одобрен без проверок."
+            )
+            stats.record("developer", dev_model, True)
+            approved = state.setdefault("approved_files", [])
+            if current_file not in approved:
+                approved.append(current_file)
+            state["feedbacks"][current_file] = ""
+            file_attempts[current_file] = 0
             continue
 
         # Детерминистская проверка: не потерял ли developer функции из предыдущей версии
