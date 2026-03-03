@@ -796,6 +796,7 @@ async def phase_e2e_review(
             state["approved_files"] = []
             for f in state["files"]:
                 state["feedbacks"][f] = f"E2E REJECT (кросс-файловая проблема):\n{combined_fb}"
+            files_to_reset = set(state["files"])
         else:
             # Находим зависимые файлы (импортирующие target_files)
             gi = _safe_contract(state).get("global_imports", {})
@@ -827,6 +828,16 @@ async def phase_e2e_review(
                         f"{', '.join(related) if related else 'проект'})"
                     )
 
+        # Сброс счётчиков для файлов, отброшенных E2E — дать developer
+        # реальный шанс исправить по конкретному E2E фидбэку
+        cumulative = state.get("cumulative_file_attempts", {})
+        for f in files_to_reset:
+            old_cum = cumulative.get(f, 0)
+            state["file_attempts"][f] = 0
+            cumulative[f] = 0
+            if old_cum > 0:
+                logger.info(f"  🔄 {f}: cumulative {old_cum} → 0 (E2E reset)")
+
     if result_ok:
         logger.info("✅ Parallel E2E-ревью пройдено!")
     return result_ok
@@ -857,7 +868,15 @@ def phase_cross_file_check(
     total_issues = sum(len(w) for w in issues.values())
     logger.warning(f"⛔ Кросс-файловая проверка: {total_issues} проблем в {len(issues)} файлах")
 
+    cumulative = state.get("cumulative_file_attempts", {})
+    has_actionable = False
     for filename, warnings in issues.items():
+        # Не снимать approve с файлов, исчерпавших cumulative лимит
+        # (иначе бесконечный цикл: принудительный approve → cross-file снимает → опять approve)
+        if cumulative.get(filename, 0) >= MAX_FILE_ATTEMPTS * 3:
+            logger.warning(f"  ⚠️  {filename}: {len(warnings)} кросс-файловых проблем, "
+                           f"но cumulative={cumulative[filename]} → оставляем APPROVE")
+            continue
         feedback = (
             "АВТОМАТИЧЕСКИЙ REJECT — кросс-файловые ошибки (до E2E):\n"
             + "\n".join(f"  - {w}" for w in warnings)
@@ -867,7 +886,11 @@ def phase_cross_file_check(
         if filename in approved:
             approved.remove(filename)
             logger.warning(f"  ⛔ {filename}: {len(warnings)} проблем → снят APPROVE")
+        has_actionable = True
 
+    if not has_actionable:
+        logger.warning("⚠️  Кросс-файловые проблемы есть, но все файлы на cumulative лимите → пропускаем к E2E.")
+        return True
     return False
 
 

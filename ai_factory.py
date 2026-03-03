@@ -426,12 +426,6 @@ async def main() -> None:
                         state["file_attempts"][f] = 0
 
         elif next_phase == "e2e_review":
-            # Детерминистская кросс-файловая проверка ПЕРЕД LLM E2E
-            if not phase_cross_file_check(logger, project_path, state):
-                _bump_phase_fail(state, "e2e_review")
-                save_state(project_path, state)
-                continue  # Возврат в develop без траты E2E попыток
-
             total_e2e_fails = state.get("phase_total_fails", {}).get("e2e_review", 0)
             # Предохранитель: после 6+ суммарных E2E отказов — пропускаем к integration_test
             if total_e2e_fails >= 6:
@@ -439,6 +433,10 @@ async def main() -> None:
                 state["e2e_passed"] = True
                 e2e_attempt = 0
                 _reset_phase_fail(state, "e2e_review")
+            elif not phase_cross_file_check(logger, project_path, state):
+                _bump_phase_fail(state, "e2e_review")
+                save_state(project_path, state)
+                continue
             elif not await phase_e2e_review(logger, project_path, state, cache, stats, e2e_attempt, randomize=randomize_models):
                 fails = _bump_phase_fail(state, "e2e_review")
                 e2e_attempt += 1

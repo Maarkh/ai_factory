@@ -18,6 +18,25 @@ from stats import ModelStats
 # Детерминистские валидации A5 контракта
 # ─────────────────────────────────────────────
 
+
+def _normalize_file_contracts(contract: dict) -> dict:
+    """Нормализация: модель может вернуть file_contracts как list вместо dict."""
+    raw_fc = contract.get("file_contracts", {})
+    if isinstance(raw_fc, list):
+        normalized: dict = {}
+        for item in raw_fc:
+            if isinstance(item, dict):
+                fname = item.get("file") or item.get("path") or item.get("name", "")
+                funcs = item.get("functions") or item.get("contracts") or item.get("items") or []
+                if fname:
+                    normalized[fname] = funcs
+        contract["file_contracts"] = normalized
+    raw_gi = contract.get("global_imports", {})
+    if isinstance(raw_gi, list):
+        contract["global_imports"] = {}
+    return contract
+
+
 def _validate_data_model_coverage(
     contract: dict,
     system_specs: dict,
@@ -277,6 +296,7 @@ async def _validate_and_patch_contract(
     Защита от неполной генерации contract_analyst.
     """
     language = state.get("language", "python")
+    contract = _normalize_file_contracts(contract)
     fc = contract.setdefault("file_contracts", {})
     gi = contract.setdefault("global_imports", {})
 
@@ -370,6 +390,7 @@ async def patch_contract_for_file(
 
     try:
         patch = await ask_agent(logger, "contract_analyst", ctx, cache, 0, randomize, language)
+        patch = _normalize_file_contracts(patch) if isinstance(patch, dict) else {}
         patch_fc = _parse_if_str(patch.get("file_contracts", {}), dict, {})
         patch_gi = _parse_if_str(patch.get("global_imports", {}), dict, {})
 
@@ -476,6 +497,8 @@ async def phase_generate_api_contract(
         # Гарантируем, что контракт — это dict с нужными ключами
         if not isinstance(contract, dict):
             contract = {}
+        # Нормализация: модель может вернуть file_contracts как list вместо dict
+        contract = _normalize_file_contracts(contract)
         contract.setdefault("file_contracts", {})
         contract.setdefault("global_imports", {})
         stats.record("contract_analyst", get_model("contract_analyst"), True)
@@ -529,6 +552,7 @@ async def _refresh_api_contract(
         new_contract = await ask_agent(logger, "contract_analyst", ctx, cache, 0, randomize, language)
         if not isinstance(new_contract, dict):
             new_contract = {}
+        new_contract = _normalize_file_contracts(new_contract)
         new_contract.setdefault("file_contracts", {})
         new_contract.setdefault("global_imports", {})
         # Валидация: все файлы должны иметь контракт
