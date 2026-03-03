@@ -83,8 +83,12 @@ async def ask_agent(
                 temperature=temperature,
                 response_format={"type": "json_object"},
             )
+            if not response.choices or response.choices[0].message.content is None:
+                raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json_object)")
             raw    = response.choices[0].message.content
             result = json.loads(raw)
+            if not isinstance(result, dict):
+                raise ValueError(f"Ожидался dict, получен {type(result).__name__}")
             log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
             if cache_key is not None:
                 cache[cache_key] = result
@@ -98,8 +102,12 @@ async def ask_agent(
                     messages=messages,
                     temperature=temperature,
                 )
+                if not response.choices or response.choices[0].message.content is None:
+                    raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
                 raw    = response.choices[0].message.content
                 result = _extract_json_from_text(raw)
+                if not isinstance(result, dict):
+                    raise ValueError(f"Ожидался dict, получен {type(result).__name__}")
                 log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
                 if cache_key is not None:
                     cache[cache_key] = result

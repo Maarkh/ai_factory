@@ -6,7 +6,9 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from config import MAX_FILE_ATTEMPTS, MAX_TEST_ATTEMPTS, MAX_CONTEXT_CHARS, MIN_COVERAGE, FACTORY_DIR, LOGS_DIR, SRC_DIR, RUN_TIMEOUT
+from config import MAX_FILE_ATTEMPTS, MAX_TEST_ATTEMPTS, MAX_CONTEXT_CHARS, MIN_COVERAGE, FACTORY_DIR, LOGS_DIR, SRC_DIR, RUN_TIMEOUT, MAX_SPEC_REVISIONS
+
+MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3  # После 15 суммарных попыток — принудительный APPROVE
 from exceptions import LLMError
 from llm import ask_agent
 from stats import ModelStats
@@ -22,7 +24,7 @@ from cache import ThreadSafeCache
 
 # Детекция замаскированных ошибок (rc=0 но traceback в stdout)
 _EXCEPTION_LINE_RE = re.compile(
-    r"^\s*(?:(?:\w+\.)*\w+)?(?:Error|Exception):\s+", re.MULTILINE
+    r"^\s*(?:(?:\w+\.)*\w+)?(?:Error|Exception):(?:\s+|\s*$)", re.MULTILINE
 )
 
 
@@ -123,7 +125,7 @@ def _check_stub_functions(code: str) -> list[str]:
         # Пропускаем docstring если есть (только строковые литералы, не Ellipsis)
         effective = body
         if (effective and isinstance(effective[0], ast.Expr)
-                and isinstance(effective[0].value, (ast.Constant, ast.Str))
+                and isinstance(effective[0].value, ast.Constant)
                 and isinstance(getattr(effective[0].value, "value", None), str)):
             effective = effective[1:]
         if not effective:
@@ -145,6 +147,21 @@ def _check_stub_functions(code: str) -> list[str]:
     return warnings
 
 
+def _is_trivial_stmt(node: ast.AST) -> bool:
+    """Проверяет, является ли statement тривиальным (pass, docstring, print)."""
+    if isinstance(node, ast.Pass):
+        return True
+    if isinstance(node, ast.Expr):
+        # Строковые литералы (docstrings)
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return True
+        # print(...) вызовы
+        if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
+            if node.value.func.id == "print":
+                return True
+    return False
+
+
 def _is_stub_body(stmts: list) -> bool:
     """Проверяет что список statements — это заглушка."""
     if len(stmts) == 1:
@@ -164,7 +181,7 @@ def _is_stub_body(stmts: list) -> bool:
                 return True
         # try: pass/print except: pass/print (заглушка обёрнутая в try)
         if isinstance(s, ast.Try):
-            try_effective = [st for st in s.body if not isinstance(st, (ast.Pass, ast.Expr))]
+            try_effective = [st for st in s.body if not _is_trivial_stmt(st)]
             if not try_effective:
                 return True
     return False
@@ -271,7 +288,9 @@ def _check_function_preservation(
     contract_names: set[str] = set()
     if file_contract:
         for item in file_contract:
-            contract_names.add(item.get("name", ""))
+            n = item.get("name", "")
+            if n:
+                contract_names.add(n)
 
     # Фильтруем: имена упомянутые в feedback + приватные + не в текущем A5
     feedback_lower = feedback.lower() if feedback else ""
@@ -279,7 +298,7 @@ def _check_function_preservation(
     for name in sorted(disappeared):
         if name.startswith("_"):
             continue
-        if name.lower() in feedback_lower:
+        if feedback_lower and re.search(rf'\b{re.escape(name.lower())}\b', feedback_lower):
             continue
         # Если функции нет в текущем A5 — значит A5 изменился, удаление допустимо
         if contract_names and name not in contract_names:
@@ -308,7 +327,7 @@ def _check_contract_compliance(code: str, file_contract: list) -> list[str]:
                 missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь определение класса {class_name}")
         elif sig.startswith("def ") or sig.startswith("async def "):
             func_name = name or sig.split("def ", 1)[1].split("(")[0].strip()
-            if not re.search(rf'^\s*(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code, re.MULTILINE):
+            if not re.search(rf'^(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code, re.MULTILINE):
                 missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь эту функцию ИМЕННО с таким именем")
     return missing
 
@@ -530,7 +549,6 @@ async def phase_develop(
     if not isinstance(state.get("cumulative_file_attempts"), dict):
         state["cumulative_file_attempts"] = {}
     cumulative_attempts: dict[str, int] = state["cumulative_file_attempts"]
-    MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3  # После 15 суммарных попыток — принудительный APPROVE
 
     for current_file in order:
         if current_file in state.get("approved_files", []):
@@ -548,7 +566,9 @@ async def phase_develop(
                     f"⚠️  {current_file} не прошёл ревью за {total_attempts} суммарных попыток "
                     f"→ принудительный APPROVE (код есть, проверим при интеграции)."
                 )
-                state.setdefault("approved_files", []).append(current_file)
+                approved = state.setdefault("approved_files", [])
+                if current_file not in approved:
+                    approved.append(current_file)
                 state["feedbacks"][current_file] = ""
                 file_attempts[current_file] = 0
                 continue
@@ -752,7 +772,6 @@ async def phase_develop(
         if language == "python":
             xfile_warnings = validate_cross_file_names(
                 code, current_file, state["files"], src_path,
-                approved_files=state.get("approved_files", []),
             )
             if xfile_warnings:
                 xfile_feedback = (
@@ -818,7 +837,9 @@ async def phase_develop(
         if rev_status == "APPROVE":
             stats.record("developer", dev_model, True)
             logger.info(f"✅ {current_file} одобрен.")
-            state.setdefault("approved_files", []).append(current_file)
+            approved = state.setdefault("approved_files", [])
+            if current_file not in approved:
+                approved.append(current_file)
             state["feedbacks"][current_file] = ""
             state.setdefault("feedback_history", {})[current_file] = []
             file_attempts[current_file] = 0
@@ -979,7 +1000,7 @@ async def phase_e2e_review(
         # Без этого: E2E reject → cumulative=0 → 15 итераций develop → force-approve
         # → E2E reject → cumulative=0 → ещё 15 итераций → ... (бесконечный цикл).
         e2e_resets = state.setdefault("e2e_cumulative_resets", {})
-        cumulative = state.get("cumulative_file_attempts", {})
+        cumulative = state.setdefault("cumulative_file_attempts", {})
         for f in files_to_reset:
             old_cum = cumulative.get(f, 0)
             resets_done = e2e_resets.get(f, 0)
@@ -1027,12 +1048,12 @@ def phase_cross_file_check(
     total_issues = sum(len(w) for w in issues.values())
     logger.warning(f"⛔ Кросс-файловая проверка: {total_issues} проблем в {len(issues)} файлах")
 
-    cumulative = state.get("cumulative_file_attempts", {})
+    cumulative = state.setdefault("cumulative_file_attempts", {})
     has_actionable = False
     for filename, warnings in issues.items():
         # Не снимать approve с файлов, исчерпавших cumulative лимит
         # (иначе бесконечный цикл: принудительный approve → cross-file снимает → опять approve)
-        if cumulative.get(filename, 0) >= MAX_FILE_ATTEMPTS * 3:
+        if cumulative.get(filename, 0) >= MAX_CUMULATIVE:
             logger.warning(f"  ⚠️  {filename}: {len(warnings)} кросс-файловых проблем, "
                            f"но cumulative={cumulative[filename]} → оставляем APPROVE")
             continue
@@ -1045,6 +1066,10 @@ def phase_cross_file_check(
         if filename in approved:
             approved.remove(filename)
             logger.warning(f"  ⛔ {filename}: {len(warnings)} проблем → снят APPROVE")
+        # Инкремент cumulative: без этого цикл develop→cross_file→develop
+        # не приближает файл к force-approve лимиту (cumulative не растёт при APPROVE в develop).
+        # Шаг 2 (не MAX_FILE_ATTEMPTS) — чтобы не съедать бюджет develop-попыток слишком быстро.
+        cumulative[filename] = cumulative.get(filename, 0) + 2
         has_actionable = True
 
     if not has_actionable:
@@ -1177,6 +1202,8 @@ async def phase_integration_test(
                 )
                 if failing_file in state.get("approved_files", []):
                     state["approved_files"].remove(failing_file)
+                cum = state.setdefault("cumulative_file_attempts", {})
+                cum[failing_file] = cum.get(failing_file, 0) + 3
                 return False
 
             logger.info("\n✅ Приложение завершилось успешно!")
@@ -1275,6 +1302,8 @@ async def phase_integration_test(
                     )
                     if failing_file in state.get("approved_files", []):
                         state["approved_files"].remove(failing_file)
+                    cum = state.setdefault("cumulative_file_attempts", {})
+                    cum[failing_file] = cum.get(failing_file, 0) + 3
                     return False
                 else:
                     logger.info(f"🔧 Добавляю пакет: {missing_pkg}")
@@ -1287,6 +1316,8 @@ async def phase_integration_test(
 
         if failing_file in state.get("approved_files", []):
             state["approved_files"].remove(failing_file)
+        cum = state.setdefault("cumulative_file_attempts", {})
+        cum[failing_file] = cum.get(failing_file, 0) + 3
         state["feedbacks"][failing_file] = f"ПРОГРАММА УПАЛА.\nTRACEBACK:\n{stderr}\nQA:\n{fix}"
         logger.info("🔄 Возврат к разработчику.")
         return False
@@ -1337,7 +1368,7 @@ def _classify_test_error(
             test_bug_score += 3
 
     # AssertionError: если traceback в app файлах → app_bug, иначе → test_bug
-    if "AssertionError" in combined or "AssertError" in combined:
+    if "AssertionError" in combined:
         if app_file_errors:
             app_bug_score += 2
         else:
@@ -1438,7 +1469,12 @@ async def phase_unit_tests(
         for tf in test_files:
             if code := tf.get("code", ""):
                 fname = tf.get("filename", f"test_generated.{LANG_EXT.get(language, 'py')}")
-                (tests_dir / fname).write_text(code, encoding="utf-8")
+                # Защита от path traversal (../../malicious.py)
+                resolved = (tests_dir / fname).resolve()
+                if not resolved.is_relative_to(tests_dir.resolve()):
+                    logger.warning(f"⚠️  Небезопасное имя теста: {fname} — пропускаю")
+                    continue
+                resolved.write_text(code, encoding="utf-8")
                 current_test_code[fname] = code
 
         logger.info("🚀 Запуск тестов в Docker ...")
@@ -1468,6 +1504,8 @@ async def phase_unit_tests(
                 )
                 if entry in state.get("approved_files", []):
                     state["approved_files"].remove(entry)
+                cum = state.setdefault("cumulative_file_attempts", {})
+                cum[entry] = cum.get(entry, 0) + 3
                 return False
 
             logger.info(f"✅ Тесты пройдены! Покрытие: {coverage}%")
@@ -1508,6 +1546,8 @@ async def phase_unit_tests(
             )
             if failing_app_file in state.get("approved_files", []):
                 state["approved_files"].remove(failing_app_file)
+            cum = state.setdefault("cumulative_file_attempts", {})
+            cum[failing_app_file] = cum.get(failing_app_file, 0) + 3
             return False
 
         # classification == "test_bug" → ошибка в самих тестах → повтор генерации
@@ -1531,6 +1571,8 @@ async def phase_unit_tests(
     )
     if failing_file in state.get("approved_files", []):
         state["approved_files"].remove(failing_file)
+    cum = state.setdefault("cumulative_file_attempts", {})
+    cum[failing_file] = cum.get(failing_file, 0) + 3
     return False
 
 
@@ -1581,7 +1623,6 @@ async def revise_spec(
     # Ограничение: не более 3 пересмотров спецификации за проект
     # (было 10, но приводило к scope creep — supervisor/e2e/develop
     # вызывали revise_spec напрямую, раздувая спецификацию)
-    MAX_SPEC_REVISIONS = 3
     spec_count = len(state.get("spec_history", []))
     if spec_count >= MAX_SPEC_REVISIONS:
         logger.warning(

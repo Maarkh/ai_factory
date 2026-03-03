@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from config import FACTORY_DIR
@@ -18,11 +20,25 @@ class ModelStats:
 
     def _load(self) -> dict:
         if self.path.exists():
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            try:
+                return json.loads(self.path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return {}
         return {}
 
     def _flush(self) -> None:
-        self.path.write_text(json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Атомарная запись: tmp → rename
+        content = json.dumps(self.data, indent=2, ensure_ascii=False)
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
+        try:
+            os.write(fd, content.encode("utf-8"))
+            os.fsync(fd)
+            os.close(fd)
+            os.replace(tmp, self.path)
+        except OSError:
+            os.close(fd)
+            os.unlink(tmp)
+            raise
         self._dirty = 0
 
     def record(self, agent: str, model: str, success: bool) -> None:

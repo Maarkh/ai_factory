@@ -3,7 +3,7 @@ import json
 import hashlib
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from config import FACTORY_DIR
 
@@ -17,7 +17,10 @@ class ThreadSafeCache:
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
-            return self._data.get(key, default)
+            val = self._data.get(key)
+            if val is None:
+                return default
+            return copy.deepcopy(val)
 
     def __contains__(self, key: str) -> bool:
         with self._lock:
@@ -29,7 +32,7 @@ class ThreadSafeCache:
 
     def __getitem__(self, key: str) -> Any:
         with self._lock:
-            return self._data[key]
+            return copy.deepcopy(self._data[key])
 
     def to_dict(self) -> dict:
         with self._lock:
@@ -46,7 +49,7 @@ def load_cache(project_path: Path) -> ThreadSafeCache:
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, OSError):
             import logging
             logging.getLogger(__name__).warning(f"⚠️  Повреждённый кэш {p}, начинаю с пустого.")
             data = {}

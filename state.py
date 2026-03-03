@@ -51,7 +51,10 @@ def load_state(project_path: Path) -> Optional[dict]:
     # Восстанавливаем _prev_file_contracts
     prev_path = project_path / FACTORY_DIR / "prev_contracts.json"
     if prev_path.exists():
-        state["_prev_file_contracts"] = json.loads(prev_path.read_text(encoding="utf-8"))
+        try:
+            state["_prev_file_contracts"] = json.loads(prev_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logger.warning("⚠️  Повреждён prev_contracts.json — пропускаю.")
     return state
 
 
@@ -63,7 +66,7 @@ def _push_feedback(state: dict, filename: str, feedback: str) -> None:
     history.append(feedback)
     if len(history) > MAX_FEEDBACK_HISTORY:
         state["feedback_history"][filename] = history[-MAX_FEEDBACK_HISTORY:]
-    state["feedbacks"][filename] = feedback
+    state.setdefault("feedbacks", {})[filename] = feedback
 
 
 def _get_feedback_ctx(state: dict, filename: str) -> str:
@@ -105,11 +108,11 @@ def generate_summary(project_path: Path, state: dict) -> None:
     run_cmd    = get_execution_command(language, entry)
     text = (
         f"# Проект: {project_path.name}\n\n"
-        f"## Задача\n{state['task']}\n\n"
+        f"## Задача\n{state.get('task', 'N/A')}\n\n"
         f"## Язык\n{LANG_DISPLAY.get(language, language.upper())}\n\n"
-        f"## Архитектура\n{state['architecture']}\n\n"
-        "## Файлы\n" + "\n".join(f"- {f}" for f in state["files"])
-        + f"\n\n## Итераций: {state['iteration'] - 1}\n\n"
+        f"## Архитектура\n{state.get('architecture', 'N/A')}\n\n"
+        "## Файлы\n" + "\n".join(f"- {f}" for f in state.get("files", []))
+        + f"\n\n## Итераций: {state.get('iteration', 1) - 1}\n\n"
         f"## Запуск\n```bash\n"
         f"docker run --rm -v $(pwd)/src:/app -w /app {docker_img} bash -c '{run_cmd}'\n```\n"
     )
@@ -123,7 +126,7 @@ def update_requirements(src_path: Path, orig: str, alt: str) -> None:
     if not req_path.exists():
         return
     lines     = req_path.read_text(encoding="utf-8").splitlines()
-    new_lines = [line if line.strip() != orig.strip() else alt for line in lines]
+    new_lines = [line if line.strip().lower() != orig.strip().lower() else alt for line in lines]
     req_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 

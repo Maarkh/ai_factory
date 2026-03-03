@@ -1,6 +1,5 @@
 import json
 import logging
-import signal
 import sys
 from pathlib import Path
 from typing import Optional
@@ -9,9 +8,12 @@ from cache import ThreadSafeCache
 from exceptions import LLMError, StateError
 from llm import ask_agent
 from state import save_state
+from config import MAX_SPEC_REVISIONS
 from log_utils import get_model
 
 logger = logging.getLogger(__name__)
+
+_shutdown_requested = False
 
 
 class PipelineContext:
@@ -43,9 +45,32 @@ _ctx = PipelineContext()
 
 
 def signal_handler(sig, frame) -> None:
+    global _shutdown_requested
+    _shutdown_requested = True
     print("\n⌛ Ctrl+C — сохраняем состояние...")
     _ctx.save_if_bound()
     sys.exit(0)
+
+
+def is_shutdown_requested() -> bool:
+    return _shutdown_requested
+
+
+def _fallback_phase(state: dict, reason: str) -> dict:
+    """Детерминистский выбор следующей фазы по текущему состоянию."""
+    approved = len(state.get("approved_files", []))
+    total = len(state.get("files", []))
+    if approved < total:
+        return {"next_phase": "develop",          "reason": reason}
+    if not state.get("e2e_passed"):
+        return {"next_phase": "e2e_review",       "reason": reason}
+    if not state.get("integration_passed"):
+        return {"next_phase": "integration_test", "reason": reason}
+    if not state.get("tests_passed"):
+        return {"next_phase": "unit_tests",       "reason": reason}
+    if not state.get("document_generated"):
+        return {"next_phase": "document",         "reason": reason}
+    return {"next_phase": "success",              "reason": reason}
 
 
 async def ask_supervisor(
@@ -85,43 +110,21 @@ async def ask_supervisor(
         result = await ask_agent(logger, "supervisor", ctx, cache, 0, randomize, language)
 
         # Детерминистская защита от scope creep: максимум 3 revise_spec
-        MAX_REVISE_SPEC = 3
         next_phase = result.get("next_phase", "")
         spec_count = len(state.get("spec_history", []))
-        if next_phase == "revise_spec" and spec_count >= MAX_REVISE_SPEC:
+        if next_phase == "revise_spec" and spec_count >= MAX_SPEC_REVISIONS:
             logger.warning(
-                f"⚠️  Supervisor предложил revise_spec, но лимит ({spec_count}/{MAX_REVISE_SPEC}) исчерпан. "
+                f"⚠️  Supervisor предложил revise_spec, но лимит ({spec_count}/{MAX_SPEC_REVISIONS}) исчерпан. "
                 "Принудительно продолжаем без ревизии."
             )
             # Сбрасываем consecutive-счётчики чтобы не зацикливаться
             state.setdefault("phase_fail_counts", {}).clear()
-            if approved < total:
-                result = {"next_phase": "develop",           "reason": "fallback: revise_spec лимит исчерпан"}
-            elif not state.get("e2e_passed"):
-                result = {"next_phase": "e2e_review",        "reason": "fallback: revise_spec лимит исчерпан"}
-            elif not state.get("integration_passed"):
-                result = {"next_phase": "integration_test",  "reason": "fallback: revise_spec лимит исчерпан"}
-            elif not state.get("tests_passed"):
-                result = {"next_phase": "unit_tests",        "reason": "fallback: revise_spec лимит исчерпан"}
-            elif not state.get("document_generated"):
-                result = {"next_phase": "document",          "reason": "fallback: revise_spec лимит исчерпан"}
-            else:
-                result = {"next_phase": "success",           "reason": "fallback: revise_spec лимит исчерпан"}
+            result = _fallback_phase(state, "fallback: revise_spec лимит исчерпан")
 
         return result
     except (LLMError, ValueError) as e:
         logger.exception(f"Supervisor упал: {e}")
-        if approved < total:
-            return {"next_phase": "develop",           "reason": "fallback: не все файлы одобрены"}
-        if not state.get("e2e_passed"):
-            return {"next_phase": "e2e_review",        "reason": "fallback: e2e не пройдено"}
-        if not state.get("integration_passed"):
-            return {"next_phase": "integration_test",  "reason": "fallback: интеграция не пройдена"}
-        if not state.get("tests_passed"):
-            return {"next_phase": "unit_tests",        "reason": "fallback: тесты не пройдены"}
-        if not state.get("document_generated"):
-            return {"next_phase": "document",          "reason": "fallback: документация не создана"}
-        return {"next_phase": "success",               "reason": "fallback: всё готово"}
+        return _fallback_phase(state, f"fallback: supervisor exception: {e}")
 
 
 def _bump_phase_fail(state: dict, phase: str) -> int:

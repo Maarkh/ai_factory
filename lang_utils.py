@@ -48,6 +48,8 @@ def get_test_command(language: str) -> str:
 
 def get_system_prompt(agent: str, language: str = "python") -> str:
     """Подставляет {lang} и {ext} в промпты."""
+    if agent not in PROMPTS:
+        raise ValueError(f"Неизвестный агент: '{agent}'. Доступны: {', '.join(sorted(PROMPTS))}")
     base = PROMPTS[agent]
     lang_name = LANG_DISPLAY.get(language, "Python")
     ext       = LANG_EXT.get(language, "py")

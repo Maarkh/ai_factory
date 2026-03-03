@@ -385,7 +385,7 @@ def validate_imports(
 
     # Парсим импорты из кода
     from_imports = re.findall(r"^\s*from\s+(\S+)\s+import", code, re.MULTILINE)
-    direct_imports = re.findall(r"^\s*import\s+(\S+)", code, re.MULTILINE)
+    direct_imports = [imp.rstrip(",") for imp in re.findall(r"^\s*import\s+(\S+)", code, re.MULTILINE)]
 
     seen: set[str] = set()
     for imp in from_imports + direct_imports:
@@ -450,42 +450,56 @@ def validate_imports(
             f"{hint}"
         )
 
-    # Проверка циклических импортов (только если src_path задан и файлы уже написаны)
+    # Проверка циклических импортов через граф (1-hop и N-hop)
     if src_path:
         current_stem = Path(filename).stem
-        # Извлекаем модули из всех импортов (включая relative)
-        all_import_bases: set[str] = set()
-        for imp in from_imports + direct_imports:
-            b = imp.split(".")[0]
-            if b == "":
-                rel = imp.lstrip(".").split(".")[0]
-                if rel:
-                    all_import_bases.add(rel)
-            else:
-                all_import_bases.add(b)
-        for imp_module in all_import_bases:
-            if imp_module not in project_modules or imp_module == current_stem:
+
+        def _get_project_imports(file_stem: str) -> set[str]:
+            """Извлекает проектные зависимости из файла."""
+            fp = src_path / (file_stem + ".py")
+            if not fp.exists():
+                return set()
+            try:
+                fc = fp.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return set()
+            fi = re.findall(r"^\s*from\s+(\S+)\s+import", fc, re.MULTILINE)
+            di = re.findall(r"^\s*import\s+(\S+)", fc, re.MULTILINE)
+            bases: set[str] = set()
+            for imp in fi + di:
+                b = imp.split(".")[0]
+                if b == "":
+                    rel = imp.lstrip(".").split(".")[0]
+                    if rel:
+                        bases.add(rel)
+                else:
+                    bases.add(b)
+            return bases & project_modules - {file_stem}
+
+        # Строим граф импортов для проектных файлов, доступных текущему файлу
+        my_deps = _get_project_imports(current_stem)
+        # DFS: ищем путь обратно к current_stem
+        visited: set[str] = set()
+        stack = [(dep, [current_stem, dep]) for dep in my_deps]
+        while stack:
+            node, path = stack.pop()
+            if node in visited:
                 continue
-            # Проверяем: импортирует ли imp_module обратно текущий файл?
-            other_path = src_path / (imp_module + ".py")
-            if not other_path.exists():
-                continue
-            other_code = other_path.read_text(encoding="utf-8")
-            other_imports = (
-                re.findall(r"^\s*from\s+(\S+)\s+import", other_code, re.MULTILINE)
-                + re.findall(r"^\s*import\s+(\S+)", other_code, re.MULTILINE)
-            )
-            other_bases = {i.split(".")[0] for i in other_imports}
-            # Проверяем и relative imports в другом файле
-            other_rel = {i.lstrip(".").split(".")[0] for i in other_imports if i.startswith(".")}
-            if current_stem in other_bases or current_stem in other_rel:
+            visited.add(node)
+            node_deps = _get_project_imports(node)
+            if current_stem in node_deps:
+                cycle_path = " → ".join(path + [current_stem])
                 warnings.append(
-                    f"циклический импорт: {filename} ↔ {imp_module}.py "
-                    f"(оба файла импортируют друг друга)"
+                    f"циклический импорт: {cycle_path} "
+                    f"(файлы импортируют друг друга по кругу)"
                 )
+                break  # Одного цикла достаточно
+            for nd in node_deps:
+                if nd not in visited:
+                    stack.append((nd, path + [nd]))
 
     # Проверка self-referencing assignments: func = func (до определения)
-    self_refs = re.findall(r"^(\w+)\s*=\s*(\w+)\s*$", code, re.MULTILINE)
+    self_refs = re.findall(r"^(\w+)\s*=\s*(\w+)\s*(?:#.*)?$", code, re.MULTILINE)
     for lhs, rhs in self_refs:
         if lhs == rhs:
             warnings.append(
@@ -519,20 +533,26 @@ def validate_imports(
     # Все имена, связанные в файле (def/class/присвоения/параметры на ЛЮБОМ уровне)
     imported_names.update(_get_all_bound_names(code))
 
-    # Ищем name.attr паттерны (не self.X, не cls.X)
-    module_refs = re.findall(r"\b([a-zA-Z_]\w*)\.(\w+)", code)
+    # Ищем name.attr паттерны через AST (не self.X, не cls.X)
+    # AST-based подход не ловит ложные срабатывания в строках и комментариях
     seen_refs: set[str] = set()
-    for ref_name, _ in module_refs:
-        if ref_name in imported_names or ref_name in seen_refs:
-            continue
-        if ref_name in stdlib or ref_name in pip_packages:
-            continue
-        seen_refs.add(ref_name)
-        warnings.append(
-            f"undefined reference '{ref_name}' в {filename}: "
-            f"используется как '{ref_name}.…' но не импортирован "
-            f"(добавь import или from ... import)"
-        )
+    try:
+        attr_tree = ast.parse(code)
+        for node in ast.walk(attr_tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                ref_name = node.value.id
+                if ref_name in imported_names or ref_name in seen_refs:
+                    continue
+                if ref_name in stdlib or ref_name in pip_packages:
+                    continue
+                seen_refs.add(ref_name)
+                warnings.append(
+                    f"undefined reference '{ref_name}' в {filename}: "
+                    f"используется как '{ref_name}.…' но не импортирован "
+                    f"(добавь import или from ... import)"
+                )
+    except SyntaxError:
+        pass  # Если код не парсится — пропускаем проверку
 
     return warnings
 
@@ -542,14 +562,11 @@ def validate_cross_file_names(
     filename: str,
     project_files: list[str],
     src_path: Path,
-    approved_files: list[str] | None = None,
 ) -> list[str]:
     """Детерминистская проверка: для каждого `from X import Y` где X — файл проекта,
     проверяет что Y действительно определён на top-level в X.
 
     Пропускает файлы, которые ещё не существуют на диске.
-    Если approved_files задан — проверяет только импорты из АПРУВНУТЫХ файлов
-    (неапрувнутые файлы ещё нестабильны, их API может измениться).
     Возвращает список предупреждений (пустой если всё ОК).
     """
     try:
@@ -591,10 +608,7 @@ def validate_cross_file_names(
         # Не проверяем свой же файл
         if project_stems[module_stem] == filename:
             continue
-        # Если задан approved_files — проверяем только импорты из апрувнутых файлов
         target_fname = project_stems[module_stem]
-        if approved_files is not None and target_fname not in approved_files:
-            continue  # Файл ещё не апрувнут — его API нестабилен
         cached = _get_for(module_stem)
         if cached is None:
             continue  # Файл ещё не написан — пропускаем
@@ -722,15 +736,22 @@ def validate_project_consistency(
         # 2b. Проверяем type annotations на неимпортированные имена
         imported_names = _get_all_bound_names(code)
         annotation_names: set[str] = set()
+
+        def _collect_annotation_names(ann_node):
+            """Рекурсивно собирает все ast.Name из аннотации (включая list[X], Optional[X], X|Y)."""
+            if ann_node is None:
+                return
+            for child in ast.walk(ann_node):
+                if isinstance(child, ast.Name):
+                    annotation_names.add(child.id)
+
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
-                    if arg.annotation and isinstance(arg.annotation, ast.Name):
-                        annotation_names.add(arg.annotation.id)
-                if node.returns and isinstance(node.returns, ast.Name):
-                    annotation_names.add(node.returns.id)
-            elif isinstance(node, ast.AnnAssign) and isinstance(node.annotation, ast.Name):
-                annotation_names.add(node.annotation.id)
+                    _collect_annotation_names(arg.annotation)
+                _collect_annotation_names(node.returns)
+            elif isinstance(node, ast.AnnAssign):
+                _collect_annotation_names(node.annotation)
 
         # Фильтруем: убираем определённые/импортированные/builtin
         unresolved = annotation_names - imported_names - _PYTHON_BUILTINS

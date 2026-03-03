@@ -256,7 +256,7 @@ def _inject_cross_file_imports(
             for class_name, source_file in class_to_file.items():
                 if source_file == fname:
                     continue  # Класс определён в этом же файле
-                if class_name in sig:
+                if re.search(rf'\b{re.escape(class_name)}\b', sig):
                     needed_imports[class_name] = source_file
 
         if not needed_imports:
@@ -266,13 +266,20 @@ def _inject_cross_file_imports(
         existing = gi.get(fname, [])
         if not isinstance(existing, list):
             existing = []
-        existing_str = " ".join(existing)
+
+        # Извлекаем уже импортированные имена из строк import
+        imported_names = set()
+        for imp in existing:
+            m = re.search(r'import\s+(\w+)', imp)
+            if m:
+                imported_names.add(m.group(1))
 
         for class_name, source_file in needed_imports.items():
             source_stem = Path(source_file).stem
             import_line = f"from {source_stem} import {class_name}"
-            if class_name not in existing_str:
+            if class_name not in imported_names:
                 existing.append(import_line)
+                imported_names.add(class_name)
                 logger.info(f"  📋 A5 global_imports: добавлен '{import_line}' для {fname}")
 
         gi[fname] = existing
@@ -327,8 +334,12 @@ async def _validate_and_patch_contract(
             patch_gi = _parse_if_str(patch.get("global_imports", {}), dict, {})
 
             # Берём контракт для нашего файла — или весь ответ если ключ не совпал
-            file_contract = patch_fc.get(fname) or next(iter(patch_fc.values()), [])
-            file_imports  = patch_gi.get(fname)  or next(iter(patch_gi.values()),  [])
+            file_contract = patch_fc.get(fname)
+            if file_contract is None:
+                file_contract = next(iter(patch_fc.values()), [])
+            file_imports = patch_gi.get(fname)
+            if file_imports is None:
+                file_imports = next(iter(patch_gi.values()), [])
 
             if file_contract:
                 fc[fname] = _parse_if_str(file_contract, list, [])

@@ -23,10 +23,11 @@ WAIT_TIMEOUT        = 30
 RUN_TIMEOUT         = 6_000
 MAX_CONTEXT_CHARS   = 60_000
 MIN_COVERAGE        = 40
-MAX_ABSOLUTE_ITERS  = 30000
+MAX_ABSOLUTE_ITERS  = 500
 MAX_FILE_ATTEMPTS   = 5
 MAX_TEST_ATTEMPTS   = 3      # Попытки регенерации тестов перед де-аппрувом кода
-MAX_PHASE_TOTAL_FAILS = 50   # Абсолютный потолок фейлов одной фазы за весь проект
+MAX_PHASE_TOTAL_FAILS = 30   # Абсолютный потолок фейлов одной фазы за весь проект
+MAX_SPEC_REVISIONS    = 3    # Максимум пересмотров спецификации за проект
 
 # Папки внутри project_path
 FACTORY_DIR   = ".factory"       # метаданные — скрыто от Git и Docker
