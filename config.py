@@ -25,6 +25,7 @@ MAX_CONTEXT_CHARS   = 60_000
 MIN_COVERAGE        = 40
 MAX_ABSOLUTE_ITERS  = 30000
 MAX_FILE_ATTEMPTS   = 5
+MAX_TEST_ATTEMPTS   = 3      # Попытки регенерации тестов перед де-аппрувом кода
 MAX_PHASE_TOTAL_FAILS = 50   # Абсолютный потолок фейлов одной фазы за весь проект
 
 # Папки внутри project_path

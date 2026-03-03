@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from config import MAX_FILE_ATTEMPTS, MAX_CONTEXT_CHARS, MIN_COVERAGE, FACTORY_DIR, LOGS_DIR, SRC_DIR, RUN_TIMEOUT
+from config import MAX_FILE_ATTEMPTS, MAX_TEST_ATTEMPTS, MAX_CONTEXT_CHARS, MIN_COVERAGE, FACTORY_DIR, LOGS_DIR, SRC_DIR, RUN_TIMEOUT
 from exceptions import LLMError
 from llm import ask_agent
 from stats import ModelStats
@@ -19,6 +19,11 @@ from artifacts import update_artifact_a9, save_artifact
 from infra import run_in_docker, build_docker_image
 from contract import _refresh_api_contract, phase_review_api_contract, patch_contract_for_file
 from cache import ThreadSafeCache
+
+# Детекция замаскированных ошибок (rc=0 но traceback в stdout)
+_EXCEPTION_LINE_RE = re.compile(
+    r"^\s*(?:(?:\w+\.)*\w+)?(?:Error|Exception):\s+", re.MULTILINE
+)
 
 
 def _check_class_duplication(code: str, global_context: str, file_contract: list | None = None) -> list[str]:
@@ -62,6 +67,41 @@ def _check_class_duplication(code: str, global_context: str, file_contract: list
     ]
 
 
+def _check_import_shadowing(code: str) -> list[str]:
+    """Детерминистская проверка: не определяет ли файл top-level функцию/класс
+    с тем же именем, что импортируется через from X import Y.
+    Пример ошибки: from video_processing import process_frame + def process_frame(...)
+    Возвращает список предупреждений."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    # Собираем имена, импортированные через from X import Y
+    imported_names: dict[str, str] = {}  # name → "from X import name"
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in (node.names or []):
+                real_name = alias.asname or alias.name
+                if real_name != "*":
+                    imported_names[real_name] = f"from {node.module} import {alias.name}"
+    if not imported_names:
+        return []
+    # Собираем top-level определения (def / class) — только прямые потомки модуля
+    defined_names: set[str] = set()
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined_names.add(node.name)
+    # Пересечение = shadowing
+    shadowed = defined_names & set(imported_names.keys())
+    if not shadowed:
+        return []
+    return [
+        f"'{name}' импортирован ({imported_names[name]}) И определён "
+        f"в этом файле — убери локальное определение или импорт"
+        for name in sorted(shadowed)
+    ]
+
+
 def _check_stub_functions(code: str) -> list[str]:
     """Детерминистская проверка: содержит ли код функции-заглушки.
 
@@ -95,6 +135,13 @@ def _check_stub_functions(code: str) -> list[str]:
                 f"функция '{fname}' — заглушка (pass / ... / NotImplementedError). "
                 f"Напиши полную реализацию с бизнес-логикой"
             )
+            continue
+        # Проверяем фиктивную реализацию (hardcoded return без использования параметров)
+        if _is_hardcoded_return_stub(node):
+            warnings.append(
+                f"функция '{fname}' — фиктивная реализация (возвращает захардкоженный литерал, "
+                f"не используя параметры). Напиши реальную логику, использующую входные данные"
+            )
     return warnings
 
 
@@ -121,6 +168,66 @@ def _is_stub_body(stmts: list) -> bool:
             if not try_effective:
                 return True
     return False
+
+
+def _is_hardcoded_return_stub(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Проверяет: функция с параметрами возвращает захардкоженный литерал,
+    не используя ни один параметр в теле. Это фиктивная реализация.
+
+    Пример: def recognize_plate(image: bytes) -> str: return 'ABC123'
+    НЕ флагует: def get_version() -> str: return "1.0" (нет параметров)
+    НЕ флагует: def process(x): return x.upper() (параметр используется)
+    """
+    # Собираем имена параметров (кроме self/cls)
+    param_names: set[str] = set()
+    for arg in func_node.args.args + func_node.args.posonlyargs + func_node.args.kwonlyargs:
+        if arg.arg not in ("self", "cls"):
+            param_names.add(arg.arg)
+    if func_node.args.vararg:
+        param_names.add(func_node.args.vararg.arg)
+    if func_node.args.kwarg:
+        param_names.add(func_node.args.kwarg.arg)
+
+    # Нет параметров (кроме self/cls) → getter/константа → не флагуем
+    if not param_names:
+        return False
+
+    # Пропускаем docstring
+    body = func_node.body
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+
+    if not body:
+        return False
+
+    # Ровно один statement — return <literal>
+    if len(body) != 1:
+        return False
+    stmt = body[0]
+    if not isinstance(stmt, ast.Return) or stmt.value is None:
+        return False
+
+    # Проверяем что возвращаемое значение — литерал
+    val = stmt.value
+    is_literal = False
+    if isinstance(val, ast.Constant):
+        is_literal = True
+    elif isinstance(val, (ast.List, ast.Dict, ast.Tuple)) and not getattr(val, "elts", None) and not getattr(val, "keys", None):
+        is_literal = True  # return [] / return {} / return ()
+    elif isinstance(val, (ast.List, ast.Tuple)) and all(isinstance(e, ast.Constant) for e in val.elts):
+        is_literal = True  # return ['ABC123'] / return [0, 0, 0]
+
+    if not is_literal:
+        return False
+
+    # Проверяем что ни один параметр не используется в теле функции
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Name) and node.id in param_names:
+            return False  # Параметр используется → возможно легитимная функция
+
+    return True
 
 
 def _check_function_preservation(
@@ -496,6 +603,14 @@ async def phase_develop(
             f"Файл для написания: `{current_file}`.\n\n"
         )
 
+        # Специальная инструкция для entry point — не раздувать бизнес-логикой
+        if current_file == state.get("entry_point"):
+            dev_ctx += (
+                "⚠️ ЭТОТ ФАЙЛ — ТОЧКА ВХОДА ПРИЛОЖЕНИЯ.\n"
+                "НЕ определяй здесь бизнес-классы — они в других файлах, ИМПОРТИРУЙ их.\n"
+                "Содержимое: импорты + инициализация + запуск + if __name__ == '__main__'.\n\n"
+            )
+
         # Добавляем A5 если он есть
         if file_contract:
             dev_ctx += (
@@ -590,6 +705,21 @@ async def phase_develop(
             cumulative_attempts[current_file] = total_attempts + 1
             continue
 
+        # Детерминистская проверка: import shadowing (from X import Y + def Y)
+        shadow_warnings = _check_import_shadowing(code)
+        if shadow_warnings:
+            shadow_feedback = (
+                "АВТОМАТИЧЕСКИЙ REJECT — конфликт имён (import + определение):\n"
+                + "\n".join(f"  - {w}" for w in shadow_warnings)
+                + "\n\nЕсли имя импортировано из другого файла — НЕ определяй его заново."
+            )
+            logger.warning(f"⛔ {current_file}: {len(shadow_warnings)} конфликтов имён → авто-REJECT")
+            stats.record("developer", dev_model, False)
+            _push_feedback(state, current_file, shadow_feedback)
+            file_attempts[current_file] = attempt + 1
+            cumulative_attempts[current_file] = total_attempts + 1
+            continue
+
         # Детерминистская проверка: валидность импортов (stdlib / pip / проект)
         req_path = src_path / "requirements.txt"
         import_warnings = validate_imports(
@@ -644,7 +774,8 @@ async def phase_develop(
                 "АВТОМАТИЧЕСКИЙ REJECT — функции-заглушки:\n"
                 + "\n".join(f"  - {w}" for w in stub_warnings)
                 + "\n\nВесь код должен быть полностью рабочим. Заглушки (pass, ..., "
-                "raise NotImplementedError) ЗАПРЕЩЕНЫ."
+                "raise NotImplementedError) и фиктивные реализации "
+                "(захардкоженные return без использования параметров) ЗАПРЕЩЕНЫ."
             )
             logger.warning(f"⛔ {current_file}: {len(stub_warnings)} заглушек → авто-REJECT")
             stats.record("developer", dev_model, False)
@@ -828,15 +959,28 @@ async def phase_e2e_review(
                         f"{', '.join(related) if related else 'проект'})"
                     )
 
-        # Сброс счётчиков для файлов, отброшенных E2E — дать developer
-        # реальный шанс исправить по конкретному E2E фидбэку
+        # Сброс счётчиков: первый E2E-сброс → частичный reset (дать 5 попыток),
+        # повторные → не сбрасывать (developer уже пробовал с E2E фидбэком).
+        # Без этого: E2E reject → cumulative=0 → 15 итераций develop → force-approve
+        # → E2E reject → cumulative=0 → ещё 15 итераций → ... (бесконечный цикл).
+        e2e_resets = state.setdefault("e2e_cumulative_resets", {})
         cumulative = state.get("cumulative_file_attempts", {})
         for f in files_to_reset:
             old_cum = cumulative.get(f, 0)
+            resets_done = e2e_resets.get(f, 0)
             state["file_attempts"][f] = 0
-            cumulative[f] = 0
-            if old_cum > 0:
-                logger.info(f"  🔄 {f}: cumulative {old_cum} → 0 (E2E reset)")
+            if resets_done < 1 and old_cum > 0:
+                # Первый E2E-сброс: дать developer MAX_FILE_ATTEMPTS попыток
+                new_cum = max(0, old_cum - MAX_FILE_ATTEMPTS)
+                cumulative[f] = new_cum
+                e2e_resets[f] = resets_done + 1
+                logger.info(f"  🔄 {f}: cumulative {old_cum} → {new_cum} "
+                            f"(E2E reset #{resets_done + 1}, дано {old_cum - new_cum} попыток)")
+            elif old_cum > 0:
+                # Повторный E2E-сброс: developer уже пробовал → не сбрасываем cumulative
+                # → force-approve сработает мгновенно → E2E safety valve наберётся быстро
+                logger.info(f"  🔒 {f}: cumulative={old_cum}, E2E уже сбрасывал → "
+                            f"оставляем (force-approve мгновенно)")
 
     if result_ok:
         logger.info("✅ Parallel E2E-ревью пройдено!")
@@ -999,6 +1143,27 @@ async def phase_integration_test(
         logger.info(f"\n--- STDERR ---\n{stderr[:2000]}")
 
         if rc == 0:
+            # Проверяем: rc=0 но в stdout/stderr есть traceback → программа
+            # поймала exception через try/except и вышла с кодом 0, маскируя ошибку
+            combined_output = stdout + "\n" + stderr
+            has_traceback = "Traceback (most recent call last)" in combined_output
+            has_exception_line = bool(_EXCEPTION_LINE_RE.search(combined_output))
+            if has_traceback and has_exception_line:
+                logger.warning(
+                    "⚠️  rc=0 но обнаружен traceback в выводе! "
+                    "Программа поймала исключение через try/except. Считаем как провал."
+                )
+                log_runtime_error(project_path, combined_output)
+                failing_file = _find_failing_file(stderr, stdout, state["files"])
+                state["feedbacks"][failing_file] = (
+                    "ПРОГРАММА ЗАМАСКИРОВАЛА ОШИБКУ (rc=0, но traceback в выводе):\n"
+                    f"{combined_output[-2000:]}\n\n"
+                    "Исправь причину exception — не ловить его через try/except, а устранить."
+                )
+                if failing_file in state.get("approved_files", []):
+                    state["approved_files"].remove(failing_file)
+                return False
+
             logger.info("\n✅ Приложение завершилось успешно!")
             state["env_fixes"] = {}
             return True
@@ -1114,6 +1279,69 @@ async def phase_integration_test(
     return False
 
 
+def _classify_test_error(
+    stderr: str, stdout: str, project_files: list[str],
+) -> tuple[str, str]:
+    """Классифицирует ошибку unit-тестов: 'test_bug' или 'app_bug'.
+
+    test_bug — проблема в самих тестах (неправильный mock, import, assert).
+    app_bug — проблема в коде приложения (функция возвращает не то, отсутствует метод).
+
+    Возвращает (classification, failing_app_file_or_empty).
+    """
+    combined = stderr + "\n" + stdout
+
+    # Все файлы из traceback (в порядке появления)
+    all_traceback_files = re.findall(
+        r'File "[^"]*[/\\]([^"]+\.py)", line \d+', combined
+    )
+    test_file_errors = [f for f in all_traceback_files if f.startswith("test_")]
+    app_file_errors = [f for f in all_traceback_files
+                       if f in project_files and not f.startswith("test_")]
+
+    # Типичные ошибки тестов (проблема в тест-коде, не в приложении)
+    test_bug_indicators = [
+        "ModuleNotFoundError",
+        "ImportError: cannot import name",
+        "does not have the attribute",
+        "fixture",
+        "assert_called",
+        "TypeError: test_",
+    ]
+
+    test_bug_score = 0
+    app_bug_score = 0
+
+    if test_file_errors:
+        test_bug_score += len(test_file_errors) * 2
+    if app_file_errors:
+        app_bug_score += len(app_file_errors) * 2
+
+    for indicator in test_bug_indicators:
+        if indicator in combined:
+            test_bug_score += 3
+
+    # AssertionError: если traceback в app файлах → app_bug, иначе → test_bug
+    if "AssertionError" in combined or "AssertError" in combined:
+        if app_file_errors:
+            app_bug_score += 2
+        else:
+            test_bug_score += 1
+
+    # Ключевая эвристика: ПОСЛЕДНИЙ файл в traceback — причина ошибки.
+    # Если это app файл → app_bug (ошибка упала ВНУТРИ кода приложения).
+    if all_traceback_files:
+        last_file = all_traceback_files[-1]
+        if last_file in project_files and not last_file.startswith("test_"):
+            app_bug_score += 5  # Сильный сигнал: exception возник в коде приложения
+
+    failing_app_file = app_file_errors[-1] if app_file_errors else ""
+
+    if test_bug_score >= app_bug_score:
+        return "test_bug", ""
+    return "app_bug", failing_app_file
+
+
 async def phase_unit_tests(
     logger: logging.Logger,
     project_path: Path,
@@ -1135,48 +1363,107 @@ async def phase_unit_tests(
     # Передаём A7 (Test Plan) если есть
     test_plan = state.get("test_plan", {})
 
-    tg_model = get_model("test_generator", 0, randomize)
-    try:
-        test_resp  = await ask_agent(
-            logger, "test_generator",
-            f"Спецификации (A2):\n{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}"
-            f"\n\nAPI Контракт (A5):\n{json.dumps(_safe_contract(state), ensure_ascii=False, indent=2)}"
-            f"\n\nТест-план (A7):\n{json.dumps(test_plan, ensure_ascii=False, indent=2)}"
-            f"\n\nКод проекта:\n{all_code}",
-            cache, 0, randomize, language,
+    # Контекст для генерации (неизменная часть)
+    base_context = (
+        f"Спецификации (A2):\n{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}"
+        f"\n\nAPI Контракт (A5):\n{json.dumps(_safe_contract(state), ensure_ascii=False, indent=2)}"
+        f"\n\nТест-план (A7):\n{json.dumps(test_plan, ensure_ascii=False, indent=2)}"
+        f"\n\nКод проекта:\n{all_code}"
+    )
+
+    prev_test_code: dict[str, str] = {}  # filename → code (для feedback-а)
+    prev_error: str = ""
+    last_stderr: str = ""
+    last_stdout: str = ""
+
+    for test_attempt in range(MAX_TEST_ATTEMPTS):
+        tg_model = get_model("test_generator", test_attempt, randomize)
+        logger.info(
+            f"🧪 [{tg_model}] Генерация тестов "
+            f"(попытка {test_attempt + 1}/{MAX_TEST_ATTEMPTS}) ..."
         )
-        test_files = test_resp.get("test_files", [])
-        stats.record("test_generator", tg_model, True)
-    except (LLMError, ValueError) as e:
-        logger.warning(f"⚠️  Не удалось сгенерировать тесты: {e}. Пропускаю.")
-        stats.record("test_generator", tg_model, False)
-        return True
 
-    if not test_files:
-        return True
-
-    tests_dir = src_path / "tests"
-    tests_dir.mkdir(exist_ok=True)
-    if language == "python":
-        (tests_dir / "__init__.py").write_text("", encoding="utf-8")
-
-    for tf in test_files:
-        if code := tf.get("code", ""):
-            (tests_dir / tf.get("filename", f"test_generated.{LANG_EXT.get(language, 'py')}")).write_text(
-                code, encoding="utf-8"
+        # Формируем контекст: базовый + feedback от предыдущей попытки
+        gen_context = base_context
+        if prev_test_code and prev_error:
+            prev_tests_str = "\n\n".join(
+                f"=== {fname} ===\n{code}" for fname, code in prev_test_code.items()
+            )
+            gen_context += (
+                f"\n\n⚠️ ПРЕДЫДУЩИЕ ТЕСТЫ УПАЛИ. Исправь ТОЧЕЧНО — НЕ переписывай с нуля.\n"
+                f"\nПРЕДЫДУЩИЙ КОД ТЕСТОВ:\n{prev_tests_str}"
+                f"\n\nОШИБКА:\n{prev_error[-2000:]}"
+                f"\n\nИСПРАВЬ ТОЛЬКО упавшие тесты. Сохрани работающие."
             )
 
-    logger.info("🚀 Запуск тестов в Docker ...")
-    cmd = get_test_command(language)
-    rc, stdout, stderr = run_in_docker(src_path, cmd, RUN_TIMEOUT * 2, language)
+        try:
+            test_resp = await ask_agent(
+                logger, "test_generator", gen_context,
+                cache, test_attempt, randomize, language,
+            )
+            test_files = test_resp.get("test_files", [])
+            stats.record("test_generator", tg_model, True)
+        except (LLMError, ValueError) as e:
+            logger.warning(f"⚠️  Не удалось сгенерировать тесты: {e}.")
+            stats.record("test_generator", tg_model, False)
+            if test_attempt == MAX_TEST_ATTEMPTS - 1:
+                return True  # Исчерпали попытки генерации → пропускаем тесты
+            continue
 
-    # Логи покрытия — в .factory/logs/
-    logs_dir = project_path / FACTORY_DIR / LOGS_DIR
-    (logs_dir / "coverage.log").write_text(stdout + "\n" + stderr, encoding="utf-8")
+        if not test_files:
+            return True
 
-    if rc != 0:
-        logger.warning("❌ Тесты провалены!")
-        # Ошибка окружения Docker (missing .so, pip) — не вина кода, не снимаем approve
+        tests_dir = src_path / "tests"
+        tests_dir.mkdir(exist_ok=True)
+        if language == "python":
+            (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+
+        # Сохраняем тесты и запоминаем код для feedback-а
+        current_test_code: dict[str, str] = {}
+        for tf in test_files:
+            if code := tf.get("code", ""):
+                fname = tf.get("filename", f"test_generated.{LANG_EXT.get(language, 'py')}")
+                (tests_dir / fname).write_text(code, encoding="utf-8")
+                current_test_code[fname] = code
+
+        logger.info("🚀 Запуск тестов в Docker ...")
+        cmd = get_test_command(language)
+        rc, stdout, stderr = run_in_docker(src_path, cmd, RUN_TIMEOUT * 2, language)
+        last_stderr = stderr
+        last_stdout = stdout
+
+        # Логи покрытия — в .factory/logs/
+        logs_dir = project_path / FACTORY_DIR / LOGS_DIR
+        (logs_dir / "coverage.log").write_text(
+            f"ATTEMPT {test_attempt + 1}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}",
+            encoding="utf-8",
+        )
+
+        if rc == 0:
+            # Тесты прошли — проверяем покрытие
+            m = re.search(r"TOTAL\s+\d+\s+\d+\s+(\d+)%", stdout)
+            coverage = int(m.group(1)) if m else 100
+
+            if coverage < MIN_COVERAGE:
+                logger.warning(f"❌ Покрытие {coverage}% < {MIN_COVERAGE}%")
+                entry = state.get("entry_point", "main.py")
+                state["feedbacks"][entry] = (
+                    f"Покрытие {coverage}% < порога {MIN_COVERAGE}%. "
+                    "Добавь публичные функции с понятными сигнатурами."
+                )
+                if entry in state.get("approved_files", []):
+                    state["approved_files"].remove(entry)
+                return False
+
+            logger.info(f"✅ Тесты пройдены! Покрытие: {coverage}%")
+            return True
+
+        # ── Тесты упали ──
+        logger.warning(
+            f"❌ Тесты провалены (попытка {test_attempt + 1}/{MAX_TEST_ATTEMPTS})"
+        )
+
+        # Ошибка окружения Docker — не вина кода и не вина тестов
         if language == "python" and any(kw in stderr for kw in [
             "cannot open shared object file",
             "ImportError: lib",
@@ -1189,28 +1476,47 @@ async def phase_unit_tests(
                 f"ОШИБКА ОКРУЖЕНИЯ DOCKER (не кода):\n{stderr[-1000:]}"
             )
             return False
-        failing_file = _find_failing_file(stderr, stdout, state["files"])
-        state["feedbacks"][failing_file] = f"UNIT-ТЕСТЫ УПАЛИ:\n{stderr[-2000:]}\n\nВывод:\n{stdout[-1000:]}"
-        if failing_file in state.get("approved_files", []):
-            state["approved_files"].remove(failing_file)
-        return False
 
-    m        = re.search(r"TOTAL\s+\d+\s+\d+\s+(\d+)%", stdout)
-    coverage = int(m.group(1)) if m else 100
-
-    if coverage < MIN_COVERAGE:
-        logger.warning(f"❌ Покрытие {coverage}% < {MIN_COVERAGE}%")
-        entry = state.get("entry_point", "main.py")
-        state["feedbacks"][entry] = (
-            f"Покрытие {coverage}% < порога {MIN_COVERAGE}%. "
-            "Добавь публичные функции с понятными сигнатурами."
+        # Классифицируем: ошибка теста или ошибка приложения?
+        classification, failing_app_file = _classify_test_error(
+            stderr, stdout, state["files"]
         )
-        if entry in state.get("approved_files", []):
-            state["approved_files"].remove(entry)
-        return False
 
-    logger.info(f"✅ Тесты пройдены! Покрытие: {coverage}%")
-    return True
+        if classification == "app_bug" and failing_app_file:
+            # Ошибка в коде приложения → де-аппрувим файл, возвращаем в develop
+            logger.warning(
+                f"  🐛 Ошибка в коде приложения ({failing_app_file}), не в тестах."
+            )
+            state["feedbacks"][failing_app_file] = (
+                f"UNIT-ТЕСТЫ ОБНАРУЖИЛИ БАГ В КОДЕ:\n{stderr[-2000:]}"
+                f"\n\nВывод:\n{stdout[-1000:]}"
+            )
+            if failing_app_file in state.get("approved_files", []):
+                state["approved_files"].remove(failing_app_file)
+            return False
+
+        # classification == "test_bug" → ошибка в самих тестах → повтор генерации
+        logger.info(
+            f"  🔧 Ошибка в тестах (не в приложении) → повтор генерации "
+            f"({test_attempt + 1}/{MAX_TEST_ATTEMPTS})"
+        )
+        prev_test_code = current_test_code
+        prev_error = f"STDERR:\n{stderr[-1500:]}\nSTDOUT:\n{stdout[-500:]}"
+        # Продолжаем цикл
+
+    # Исчерпали все попытки генерации тестов
+    logger.warning(
+        f"⚠️  Тесты не прошли за {MAX_TEST_ATTEMPTS} попыток генерации. "
+        "Де-аппрувим по _find_failing_file."
+    )
+    failing_file = _find_failing_file(last_stderr, last_stdout, state["files"])
+    state["feedbacks"][failing_file] = (
+        f"UNIT-ТЕСТЫ НЕ ПРОЙДЕНЫ ПОСЛЕ {MAX_TEST_ATTEMPTS} ПОПЫТОК ГЕНЕРАЦИИ:\n"
+        f"{last_stderr[-2000:]}\n\nВывод:\n{last_stdout[-1000:]}"
+    )
+    if failing_file in state.get("approved_files", []):
+        state["approved_files"].remove(failing_file)
+    return False
 
 
 async def phase_document(
@@ -1333,6 +1639,9 @@ async def revise_spec(
         # Иначе файлы, которые были exhausted до revise_spec, останутся на MAX попыток
         for fname in state.get("files", []):
             state["file_attempts"][fname] = 0
+
+        # Сброс E2E reset-счётчика: спека изменилась → E2E проблемы могут быть другими
+        state["e2e_cumulative_resets"] = {}
 
         # Запоминаем текущий контракт для следующего сравнения
         state["_prev_file_contracts"] = new_contracts

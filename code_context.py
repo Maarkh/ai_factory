@@ -251,6 +251,33 @@ def _get_stdlib_modules() -> frozenset[str]:
     })
 
 
+def _find_name_in_classes(code: str, name: str) -> str | None:
+    """Ищет имя как метод/атрибут класса в коде. Возвращает имя класса или None.
+
+    Используется для улучшения фидбэка: если `from X import Y` невалиден,
+    но Y — метод класса Z в X, подсказываем `from X import Z`.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for item in node.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if item.name == name:
+                    return node.name
+            elif isinstance(item, ast.Assign):
+                for target in item.targets:
+                    if isinstance(target, ast.Name) and target.id == name:
+                        return node.name
+            elif isinstance(item, ast.AnnAssign):
+                if isinstance(item.target, ast.Name) and item.target.id == name:
+                    return node.name
+    return None
+
+
 def _get_top_level_names(code: str) -> set[str]:
     """Извлекает только TOP-LEVEL определения из Python-кода через AST.
 
@@ -532,28 +559,28 @@ def validate_cross_file_names(
 
     project_stems = {f.removesuffix(".py"): f for f in project_files}
     warnings: list[str] = []
-    # Кэш прочитанных файлов: stem → set(top_level_names) | None (файл не существует)
-    _name_cache: dict[str, set[str] | None] = {}
+    # Кэш прочитанных файлов: stem → (top_level_names, code) | None
+    _cache: dict[str, tuple[set[str], str] | None] = {}
 
-    def _get_names_for(stem: str) -> set[str] | None:
-        if stem in _name_cache:
-            return _name_cache[stem]
+    def _get_for(stem: str) -> tuple[set[str], str] | None:
+        if stem in _cache:
+            return _cache[stem]
         target_file = project_stems.get(stem)
         if not target_file:
-            _name_cache[stem] = None
+            _cache[stem] = None
             return None
         target_path = src_path / target_file
         if not target_path.exists():
-            _name_cache[stem] = None
+            _cache[stem] = None
             return None
         try:
             target_code = target_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
-            _name_cache[stem] = None
+            _cache[stem] = None
             return None
         names = _get_top_level_names(target_code)
-        _name_cache[stem] = names
-        return names
+        _cache[stem] = (names, target_code)
+        return (names, target_code)
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom) or not node.module:
@@ -568,19 +595,32 @@ def validate_cross_file_names(
         target_fname = project_stems[module_stem]
         if approved_files is not None and target_fname not in approved_files:
             continue  # Файл ещё не апрувнут — его API нестабилен
-        target_names = _get_names_for(module_stem)
-        if target_names is None:
+        cached = _get_for(module_stem)
+        if cached is None:
             continue  # Файл ещё не написан — пропускаем
+        target_names, target_code = cached
         for alias in node.names:
             if alias.name == "*":
                 continue
             if alias.name not in target_names:
-                suggestions = sorted(target_names - {"__all__"})[:8]
-                warnings.append(
-                    f"from {module_stem} import {alias.name}: "
-                    f"'{alias.name}' не определён в {project_stems[module_stem]}. "
-                    f"Доступные имена: {', '.join(suggestions) if suggestions else '(пусто)'}"
-                )
+                # Проверяем: может это метод класса в целевом файле?
+                owner_class = _find_name_in_classes(target_code, alias.name)
+                if owner_class:
+                    warnings.append(
+                        f"from {module_stem} import {alias.name}: "
+                        f"'{alias.name}' — это МЕТОД класса {owner_class} в "
+                        f"{project_stems[module_stem]}, а не top-level функция. "
+                        f"ИСПРАВЬ: `from {module_stem} import {owner_class}`, "
+                        f"затем вызывай `{owner_class}().{alias.name}(...)` или "
+                        f"через экземпляр"
+                    )
+                else:
+                    suggestions = sorted(target_names - {"__all__"})[:8]
+                    warnings.append(
+                        f"from {module_stem} import {alias.name}: "
+                        f"'{alias.name}' не определён в {project_stems[module_stem]}. "
+                        f"Доступные имена: {', '.join(suggestions) if suggestions else '(пусто)'}"
+                    )
 
     return warnings
 
@@ -659,14 +699,25 @@ def validate_project_consistency(
             if module_stem not in symbol_table:
                 continue  # Файл не существует
             target_names = symbol_table[module_stem]
+            target_fname = project_stems[module_stem]
             for alias in node.names:
                 if alias.name == "*":
                     continue
                 if alias.name not in target_names:
-                    file_warnings.append(
-                        f"from {module_stem} import {alias.name}: "
-                        f"'{alias.name}' не определён в {project_stems[module_stem]}"
-                    )
+                    # Проверяем: может это метод класса?
+                    target_code = file_codes.get(target_fname, "")
+                    owner_class = _find_name_in_classes(target_code, alias.name) if target_code else None
+                    if owner_class:
+                        file_warnings.append(
+                            f"from {module_stem} import {alias.name}: "
+                            f"'{alias.name}' — метод класса {owner_class} в "
+                            f"{target_fname}. ИСПРАВЬ: from {module_stem} import {owner_class}"
+                        )
+                    else:
+                        file_warnings.append(
+                            f"from {module_stem} import {alias.name}: "
+                            f"'{alias.name}' не определён в {target_fname}"
+                        )
 
         # 2b. Проверяем type annotations на неимпортированные имена
         imported_names = _get_all_bound_names(code)
