@@ -2,22 +2,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
-
-from config import FACTORY_DIR, ARTIFACTS_DIR
-
-ARTIFACT_LABELS = {
-    "A0": "user_intent",
-    "A1": "business_requirements",
-    "A2": "system_specification",
-    "A3": "architecture_map",
-    "A4": "file_structure",
-    "A5": "api_contract",
-    "A6": "db_schema",
-    "A7": "test_suite_plan",
-    "A8": "ops_manifest",
-    "A9": "implementation_logs",
-    "A10": "final_summary",
-}
+from config import FACTORY_DIR, ARTIFACTS_DIR, ARTIFACT_LABELS
 
 
 def save_artifact(

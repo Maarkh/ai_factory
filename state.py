@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from config import FACTORY_DIR, SRC_DIR
+from config import FACTORY_DIR, SRC_DIR, MAX_FEEDBACK_HISTORY
 from exceptions import StateError
 from artifacts import save_artifact
 from json_utils import _safe_contract
@@ -13,8 +13,6 @@ from lang_utils import get_docker_image, get_execution_command, LANG_DISPLAY
 from infra import run_command
 
 logger = logging.getLogger(__name__)
-
-MAX_FEEDBACK_HISTORY = 3
 
 
 def save_state(project_path: Path, state: dict) -> None:

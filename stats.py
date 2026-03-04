@@ -3,12 +3,14 @@ import os
 import tempfile
 from pathlib import Path
 
-from config import FACTORY_DIR
+from config import FACTORY_DIR, FLUSH_EVERY
 from lang_utils import LANG_DISPLAY
 
 
 class ModelStats:
-    FLUSH_EVERY = 20  # сбрасывать на диск каждые N записей
+    """Статистика использования моделей."""
+
+    FLUSH_EVERY = FLUSH_EVERY
 
     def __init__(self, path: Path) -> None:
         # Статистика — в .factory/

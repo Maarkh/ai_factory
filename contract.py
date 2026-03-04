@@ -19,6 +19,26 @@ from stats import ModelStats
 # ─────────────────────────────────────────────
 
 
+def _auto_add_requirement(requirements_path: Path, package_name: str, logger: logging.Logger) -> None:
+    """Авто-добавляет пакет в requirements.txt если его ещё нет."""
+    if not requirements_path or not requirements_path.exists():
+        return
+    try:
+        content = requirements_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    # Проверяем, не добавлен ли уже
+    pkg_lower = package_name.lower()
+    for line in content.splitlines():
+        line_pkg = re.split(r"[=<>~!\[;]", line.strip())[0].strip().lower()
+        if line_pkg.replace("-", "_") == pkg_lower.replace("-", "_"):
+            return  # Уже есть
+    # Добавляем
+    sep = "\n" if content.endswith("\n") else "\n"
+    requirements_path.write_text(content + sep + package_name + "\n", encoding="utf-8")
+    logger.info(f"  📦  Авто-добавлен '{package_name}' в requirements.txt")
+
+
 def _parse_import_line(imp_line: str) -> tuple[str, list[str]] | None:
     """Парсит строку импорта. Возвращает (source_stem, [imported_names]) или None.
 
@@ -254,6 +274,14 @@ def _validate_global_imports(
             if base_lower in pip_names or base_normalized in pip_names:
                 valid_imports.append(imp_line)
                 continue
+            # Пакет не найден в requirements.txt → авто-добавляем
+            # (LLM-сгенерированный A5 контракт — пакет скорее всего реальный)
+            if requirements_path and base_module.isidentifier():
+                _auto_add_requirement(requirements_path, base_module, logger)
+                pip_names.add(base_lower)
+                pip_names.add(base_normalized)
+                valid_imports.append(imp_line)
+                continue
             # Невалидный import — удаляем
             logger.warning(
                 f"  ⚠️  A5 global_imports: удалён '{imp_line}' для {fname} "
@@ -331,6 +359,70 @@ def _validate_import_consistency(
         cleaned_gi[fname] = valid
 
     contract["global_imports"] = cleaned_gi
+    return contract
+
+
+def _sanitize_implementation_hints(
+    contract: dict,
+    logger: logging.Logger,
+) -> dict:
+    """Убирает из implementation_hints ссылки на несуществующие имена.
+
+    Если hints файла A ссылаются на 'VideoStreamProcessor' но в file_contracts
+    файла video_stream_processor.py определён только 'process_frame' → заменяет
+    'VideoStreamProcessor' на 'process_frame' (или убирает если нет однозначной замены).
+    """
+    fc = contract.get("file_contracts", {})
+    if not fc:
+        return contract
+
+    # stem → set(defined names) из ВСЕХ file_contracts
+    all_defined: dict[str, set[str]] = {}
+    for fname, items in fc.items():
+        stem = Path(fname).stem
+        names: set[str] = set()
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    n = item.get("name", "")
+                    if n:
+                        names.add(n)
+        all_defined[stem] = names
+
+    # Все определённые имена (flat set)
+    all_names_flat: set[str] = set()
+    for names in all_defined.values():
+        all_names_flat.update(names)
+
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            hints = item.get("implementation_hints", "")
+            if not hints:
+                continue
+            # Ищем CamelCase имена в hints, которые похожи на имена из file_contracts
+            # но не существуют ни в одном file_contract
+            for word in re.findall(r"\b([A-Z][a-zA-Z0-9]+)\b", hints):
+                if word in all_names_flat:
+                    continue  # Это имя реально существует
+                # Проверяем: это имя похоже на stem файла?
+                # VideoStreamProcessor → video_stream_processor
+                snake = re.sub(r"(?<!^)(?=[A-Z])", "_", word).lower()
+                if snake in all_defined and all_defined[snake]:
+                    # Имя совпадает с файлом, но класс не определён
+                    available = sorted(all_defined[snake])
+                    old_hints = hints
+                    hints = hints.replace(word, available[0])
+                    if hints != old_hints:
+                        logger.info(
+                            f"  🔧 A5 hints: заменено '{word}' → '{available[0]}' в {fname} "
+                            f"('{word}' не определён, доступно: {', '.join(available)})"
+                        )
+            item["implementation_hints"] = hints
+
     return contract
 
 
@@ -667,6 +759,7 @@ async def _validate_and_patch_contract(
         requirements_path=req_path if req_path.exists() else None,
     )
     contract = _validate_import_consistency(contract, logger)
+    contract = _sanitize_implementation_hints(contract, logger)
     contract = _inject_cross_file_imports(contract, logger)
     contract = _detect_and_fix_circular_imports(contract, files, logger)
     return contract
@@ -739,6 +832,7 @@ async def patch_contract_for_file(
                 requirements_path=req_path if req_path.exists() else None,
             )
             contract = _validate_import_consistency(contract, logger)
+            contract = _sanitize_implementation_hints(contract, logger)
             contract = _inject_cross_file_imports(contract, logger)
             contract = _detect_and_fix_circular_imports(contract, files_list, logger)
             state["api_contract"] = contract
@@ -817,7 +911,7 @@ async def phase_generate_api_contract(
     randomize: bool = False,
 ) -> dict:
     """
-    Новая фаза v15.0: генерирует A5 (API & Contract Spec).
+    Генерирует A5 (API & Contract Spec).
     Developer получает явный контракт функций вместо «угадывания».
     """
     language = state.get("language", "python")
@@ -861,6 +955,8 @@ async def phase_generate_api_contract(
         )
         # Детерминистская валидация: cross-file imports ссылаются на реальные имена
         contract = _validate_import_consistency(contract, logger)
+        # Санитизация: implementation_hints не ссылаются на несуществующие имена
+        contract = _sanitize_implementation_hints(contract, logger)
         # Детерминистская инъекция: межфайловые импорты (data models и т.п.)
         contract = _inject_cross_file_imports(contract, logger)
         # Детерминистская проверка: циклические зависимости → вынос в models.py
@@ -884,7 +980,7 @@ async def _refresh_api_contract(
     randomize: bool = False,
 ) -> None:
     """
-    Каскад v15.0: после обновления A2 пересчитывает A5.
+    Каскад: после обновления A2 пересчитывает A5.
     Вызывается из revise_spec().
     """
     language = state.get("language", "python")
@@ -923,6 +1019,7 @@ async def _refresh_api_contract(
             requirements_path=req_path if req_path.exists() else None,
         )
         new_contract = _validate_import_consistency(new_contract, logger)
+        new_contract = _sanitize_implementation_hints(new_contract, logger)
         new_contract = _inject_cross_file_imports(new_contract, logger)
         new_contract = _detect_and_fix_circular_imports(new_contract, files_list, logger)
         # Sync: добавляем новые файлы, удаляем призраки

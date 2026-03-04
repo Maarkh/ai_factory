@@ -28,6 +28,8 @@ MAX_FILE_ATTEMPTS   = 15
 MAX_TEST_ATTEMPTS   = 6      # Попытки регенерации тестов перед де-аппрувом кода
 MAX_PHASE_TOTAL_FAILS = 90   # Абсолютный потолок фейлов одной фазы за весь проект
 MAX_SPEC_REVISIONS    = 9    # Максимум пересмотров спецификации за проект
+MAX_FEEDBACK_HISTORY = 3
+FLUSH_EVERY = 20  # сбрасывать на диск каждые N записей
 
 # Папки внутри project_path
 FACTORY_DIR   = ".factory"       # метаданные — скрыто от Git и Docker
@@ -35,3 +37,17 @@ SRC_DIR       = "src"            # исходный код — чистый ко
 ARTIFACTS_DIR = "artifacts"      # A0–A10 внутри .factory/
 LOGS_DIR      = "logs"           # логи взаимодействия агентов
 CACHEABLE_AGENTS = {"business_analyst", "system_analyst", "architect", "documenter"}
+
+ARTIFACT_LABELS = {
+    "A0": "user_intent",
+    "A1": "business_requirements",
+    "A2": "system_specification",
+    "A3": "architecture_map",
+    "A4": "file_structure",
+    "A5": "api_contract",
+    "A6": "db_schema",
+    "A7": "test_suite_plan",
+    "A8": "ops_manifest",
+    "A9": "implementation_logs",
+    "A10": "final_summary",
+}

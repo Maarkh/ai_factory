@@ -203,6 +203,20 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "websocket-client":         "websocket",
 }
 
+# Известные транзитивные зависимости: пакет из requirements.txt → {import-имена}
+# Если tensorflow в requirements.txt → numpy, keras, h5py тоже валидные импорты
+_KNOWN_TRANSITIVE_DEPS: dict[str, set[str]] = {
+    "tensorflow":    {"numpy", "keras", "h5py", "absl", "google"},
+    "opencv_python": {"numpy"},
+    "scipy":         {"numpy"},
+    "pandas":        {"numpy"},
+    "scikit_learn":  {"numpy", "scipy", "joblib"},
+    "torch":         {"numpy"},
+    "torchvision":   {"numpy", "torch"},
+    "matplotlib":    {"numpy"},
+    "seaborn":       {"numpy", "matplotlib"},
+}
+
 
 def _parse_requirements(path: Path) -> set[str]:
     """Парсит requirements.txt и возвращает множество допустимых import-имён."""
@@ -228,6 +242,9 @@ def _parse_requirements(path: Path) -> set[str]:
             result.add(_PIP_TO_IMPORT[pkg_lower].lower())
         # Также добавляем оригинальное имя (без нормализации)
         result.add(pkg_lower)
+        # Транзитивные зависимости (numpy для tensorflow/opencv и т.д.)
+        if pkg_normalized in _KNOWN_TRANSITIVE_DEPS:
+            result.update(_KNOWN_TRANSITIVE_DEPS[pkg_normalized])
     return result
 
 
