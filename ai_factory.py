@@ -64,8 +64,12 @@ def _force_approve_files(state: dict, project_path: Path, files: list[str], reas
             state["file_attempts"][f] = 0
 
 
-def _can_revise_spec(state: dict, logger) -> bool:
-    """Проверяет, не исчерпан ли лимит revise_spec (3 за проект)."""
+def _can_revise_spec(state: dict, logger, phase: str = "") -> bool:
+    """Проверяет, не исчерпан ли лимит revise_spec (3 за проект).
+
+    phase — имя фазы-инициатора. При отказе сбрасывается ТОЛЬКО её consecutive-счётчик,
+    а не все фазы (иначе supervisor теряет информацию о проблемах в других фазах).
+    """
     from config import MAX_SPEC_REVISIONS
     count = len(state.get("spec_history", []))
     if count >= MAX_SPEC_REVISIONS:
@@ -73,7 +77,11 @@ def _can_revise_spec(state: dict, logger) -> bool:
             f"⚠️  revise_spec пропущен: лимит {count}/{MAX_SPEC_REVISIONS} исчерпан. "
             "Продолжаем с текущей спецификацией."
         )
-        state.setdefault("phase_fail_counts", {}).clear()
+        counts = state.setdefault("phase_fail_counts", {})
+        if phase:
+            counts.pop(phase, None)
+        else:
+            counts.clear()
         return False
     return True
 
@@ -374,7 +382,7 @@ async def main() -> None:
         spec_escalated_phases = state["spec_escalated_phases"]
         if total_fails >= MAX_PHASE_TOTAL_FAILS and next_phase not in spec_escalated_phases:
             spec_escalated_phases.append(next_phase)
-            if _can_revise_spec(state, logger):
+            if _can_revise_spec(state, logger, next_phase):
                 print(f"\n🛑 Фаза '{next_phase}' провалилась {total_fails} раз за проект. "
                       f"Принудительный revise_spec.")
                 problem = (
@@ -384,6 +392,7 @@ async def main() -> None:
                 await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                 state["max_iters"] += 10
             save_state(project_path, state)
+            state["iteration"] += 1
             continue
 
         print(f"\n{'─' * 50}")
@@ -413,7 +422,7 @@ async def main() -> None:
                             for f in spec_blocked
                         )
                     )
-                    if _can_revise_spec(state, logger):
+                    if _can_revise_spec(state, logger, "develop"):
                         print(f"📋 Проблема спецификации: {', '.join(spec_blocked)} → revise_spec")
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                         state["max_iters"] += 10
@@ -430,7 +439,7 @@ async def main() -> None:
                             for f in exhausted
                         )
                     )
-                    if _can_revise_spec(state, logger):
+                    if _can_revise_spec(state, logger, "develop"):
                         print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                         state["max_iters"] += 10
@@ -452,7 +461,7 @@ async def main() -> None:
                                 for f in unapproved
                             )
                         )
-                        if _can_revise_spec(state, logger):
+                        if _can_revise_spec(state, logger, "develop"):
                             print(f"⚠️  Разработка не продвигается {fails} итераций → revise_spec ({', '.join(unapproved)})")
                             await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                             state["max_iters"] += 10
@@ -465,18 +474,20 @@ async def main() -> None:
                 total_e2e_fails = state.get("phase_total_fails", {}).get("e2e_review", 0)
                 # Предохранитель: после 6+ суммарных E2E отказов — пропускаем к integration_test
                 if total_e2e_fails >= 6:
-                    logger.warning("⚠️  E2E падал 6+ раз суммарно → принудительный APPROVE, переход к integration_test.")
+                    logger.warning("⚠️  E2E падал 6+ раз суммарно → ПРОПУСК (e2e_skipped=true), переход к integration_test.")
                     state["e2e_passed"] = True
+                    state["e2e_skipped"] = True
                     state["e2e_attempt"] = 0
                     _reset_phase_fail(state, "e2e_review")
                 elif not phase_cross_file_check(logger, project_path, state):
-                    _bump_phase_fail(state, "cross_file_check")
+                    _bump_phase_fail(state, "e2e_review")
                     save_state(project_path, state)
+                    state["iteration"] += 1
                     continue
                 elif not await phase_e2e_review(logger, project_path, state, cache, stats, state["e2e_attempt"], randomize=randomize_models):
                     fails = _bump_phase_fail(state, "e2e_review")
                     state["e2e_attempt"] += 1
-                    if fails >= 3 and _can_revise_spec(state, logger):
+                    if fails >= 3 and _can_revise_spec(state, logger, "e2e_review"):
                         print("⚠️  E2E падает 3 раза подряд → принудительный revise_spec.")
                         feedbacks = [
                             f"  {f}: {state['feedbacks'].get(f, '')[:300]}"
@@ -496,8 +507,9 @@ async def main() -> None:
             elif next_phase == "integration_test":
                 total_int_fails = state.get("phase_total_fails", {}).get("integration_test", 0)
                 if total_int_fails >= 8:
-                    logger.warning("⚠️  Integration test падал 8+ раз суммарно → пропускаем к unit_tests.")
+                    logger.warning("⚠️  Integration test падал 8+ раз суммарно → ПРОПУСК, переход к unit_tests.")
                     state["integration_passed"] = True
+                    state["integration_skipped"] = True
                     _reset_phase_fail(state, "integration_test")
                 elif not await phase_integration_test(logger, project_path, state, cache, stats, randomize=randomize_models):
                     _bump_phase_fail(state, "integration_test")
@@ -508,8 +520,9 @@ async def main() -> None:
             elif next_phase == "unit_tests":
                 total_ut_fails = state.get("phase_total_fails", {}).get("unit_tests", 0)
                 if total_ut_fails >= 6:
-                    logger.warning("⚠️  Unit tests падал 6+ раз суммарно → пропускаем к document.")
+                    logger.warning("⚠️  Unit tests падал 6+ раз суммарно → ПРОПУСК, переход к document.")
                     state["tests_passed"] = True
+                    state["tests_skipped"] = True
                     _reset_phase_fail(state, "unit_tests")
                 elif not await phase_unit_tests(logger, project_path, state, cache, stats, randomize=randomize_models):
                     _bump_phase_fail(state, "unit_tests")
@@ -522,7 +535,7 @@ async def main() -> None:
                 state["document_generated"] = True
 
             elif next_phase == "revise_spec":
-                if _can_revise_spec(state, logger):
+                if _can_revise_spec(state, logger, "revise_spec"):
                     problem = input_with_timeout(
                         "Опишите противоречие (или Enter для авто): ", 10,
                         "Авто-эскалация от Supervisor"
@@ -545,7 +558,17 @@ async def main() -> None:
                 print(f"🌍 Язык          : {LANG_DISPLAY.get(language, language)}")
                 print(f"🔢 Итераций      : {state['iteration']}")
                 print(f"📄 Файлов        : {len(state['files'])}")
-                print(f"🧪 Unit-тесты + покрытие ≥ {MIN_COVERAGE}%")
+                skipped = []
+                if state.get("e2e_skipped"):
+                    skipped.append("E2E")
+                if state.get("integration_skipped"):
+                    skipped.append("Integration")
+                if state.get("tests_skipped"):
+                    skipped.append("Unit tests")
+                if skipped:
+                    print(f"⚠️  ПРОПУЩЕНО    : {', '.join(skipped)}")
+                else:
+                    print(f"🧪 Unit-тесты + покрытие ≥ {MIN_COVERAGE}%")
                 print(f"🚀 Docker-ready")
                 print("\n📋 Артефакты проекта:")
                 art_dir = project_path / FACTORY_DIR / ARTIFACTS_DIR
@@ -585,7 +608,7 @@ async def main() -> None:
                         state["max_iters"] += 5
                         save_state(project_path, state)
                 elif act == "spec":
-                    if _can_revise_spec(state, logger):
+                    if _can_revise_spec(state, logger, "success"):
                         problem = input("Опишите противоречие: ").strip() or "Запрос заказчика"
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                         state["e2e_passed"] = state["integration_passed"] = \

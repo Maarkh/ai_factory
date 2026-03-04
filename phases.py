@@ -28,6 +28,94 @@ _EXCEPTION_LINE_RE = re.compile(
 )
 
 
+def _ensure_a5_imports(code: str, global_imports: list[str]) -> str:
+    """Гарантирует что все A5 global_imports присутствуют в коде.
+
+    Developer часто забывает импорты (import numpy as np, from typing import List и т.д.)
+    хотя A5 контракт их требует. Вместо REJECT → авто-добавляем.
+    """
+    if not global_imports or not code.strip():
+        return code
+    # Парсим существующие import-строки из кода
+    existing_imports: set[str] = set()
+    for line in code.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("import ") or stripped.startswith("from "):
+            # Нормализуем пробелы для сравнения
+            existing_imports.add(re.sub(r"\s+", " ", stripped))
+
+    missing: list[str] = []
+    for imp_line in global_imports:
+        if not isinstance(imp_line, str):
+            continue
+        normalized = re.sub(r"\s+", " ", imp_line.strip())
+        if not normalized:
+            continue
+        # Проверяем точное совпадение или что базовый модуль уже импортирован
+        if normalized in existing_imports:
+            continue
+        # "from typing import List" vs "from typing import List, Dict" → проверяем базу
+        m = re.match(r"from\s+(\S+)\s+import\s+(.+)", normalized)
+        if m:
+            source = m.group(1)
+            names = {n.strip().split()[0] for n in m.group(2).split(",") if n.strip()}
+            # Ищем существующий import из того же source
+            found_source = False
+            for ex in existing_imports:
+                ex_m = re.match(r"from\s+(\S+)\s+import\s+(.+)", ex)
+                if ex_m and ex_m.group(1) == source:
+                    found_source = True
+                    ex_names = {n.strip().split()[0] for n in ex_m.group(2).split(",") if n.strip()}
+                    # Есть ли недостающие имена?
+                    missing_names = names - ex_names
+                    if missing_names:
+                        # Объединяем в один import
+                        all_names = sorted(ex_names | names)
+                        new_line = f"from {source} import {', '.join(all_names)}"
+                        # Заменяем в коде
+                        code = code.replace(ex_m.group(0), new_line, 1)
+                        existing_imports.discard(ex)
+                        existing_imports.add(re.sub(r"\s+", " ", new_line))
+                    break
+            if not found_source:
+                missing.append(normalized)
+        else:
+            # "import X as Y" — проверяем по alias
+            m2 = re.match(r"import\s+(\S+)(?:\s+as\s+(\w+))?", normalized)
+            if m2:
+                module = m2.group(1)
+                alias = m2.group(2) or module.split(".")[0]
+                # Если alias уже используется как import
+                already = any(
+                    re.match(rf"import\s+{re.escape(module)}\b", ex)
+                    for ex in existing_imports
+                )
+                if not already:
+                    missing.append(normalized)
+            else:
+                missing.append(normalized)
+
+    if missing:
+        # Добавляем пропущенные imports в начало файла (после docstring/comments если есть)
+        lines = code.split("\n")
+        insert_pos = 0
+        # Пропускаем начальные комментарии, docstrings, shebang
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'''") or not stripped:
+                insert_pos = i + 1
+            elif stripped.startswith("import ") or stripped.startswith("from "):
+                insert_pos = i  # Вставляем перед первым import
+                break
+            else:
+                break
+        for imp in reversed(missing):
+            lines.insert(insert_pos, imp)
+        code = "\n".join(lines)
+
+    return code
+
+
 def _check_class_duplication(code: str, global_context: str, file_contract: list | None = None) -> list[str]:
     """Детерминистская проверка: не определяет ли код классы, которые уже есть в других файлах.
     file_contract — A5 контракт текущего файла; классы, ожидаемые по контракту, не считаются дублями.
@@ -625,6 +713,14 @@ async def phase_develop(
         if force_approve_mode:
             file_path = src_path / current_file
             if file_path.exists() and file_path.read_text(encoding="utf-8").strip():
+                # Перед force-approve: инжектируем A5 imports в код на диске
+                gi = _safe_contract(state).get("global_imports", {}).get(current_file, [])
+                if gi:
+                    existing = file_path.read_text(encoding="utf-8")
+                    patched = _ensure_a5_imports(existing, gi)
+                    if patched != existing:
+                        file_path.write_text(patched, encoding="utf-8")
+                        logger.info(f"  📎 {current_file}: A5 imports авто-инжектированы при force-approve")
                 logger.warning(
                     f"⚠️  {current_file} не прошёл ревью за {total_attempts} суммарных попыток "
                     f"→ принудительный APPROVE (код есть, проверим при интеграции)."
@@ -789,6 +885,10 @@ async def phase_develop(
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue
+
+        # Авто-инъекция A5 импортов — developer часто забывает import numpy, from typing и т.д.
+        if global_imports:
+            code = _ensure_a5_imports(code, global_imports)
 
         # Force-approve mode: файл не на диске после MAX_CUMULATIVE попыток →
         # записываем что есть и approve без проверок
@@ -1782,8 +1882,8 @@ async def revise_spec(
             f"⚠️  Лимит пересмотров спецификации ({MAX_SPEC_REVISIONS}) исчерпан. "
             "Продолжаем с текущей спецификацией."
         )
-        # Сбрасываем consecutive-счётчики чтобы supervisor перестал слать revise_spec
-        state["phase_fail_counts"] = {}
+        # Сбрасываем только revise_spec счётчик (другие фазы сохраняют свою информацию)
+        state.setdefault("phase_fail_counts", {}).pop("revise_spec", None)
         return
 
     logger.info("\n🔁 Пересмотр спецификации (каскад A2 → A5) ...")

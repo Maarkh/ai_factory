@@ -117,8 +117,8 @@ async def ask_supervisor(
                 f"⚠️  Supervisor предложил revise_spec, но лимит ({spec_count}/{MAX_SPEC_REVISIONS}) исчерпан. "
                 "Принудительно продолжаем без ревизии."
             )
-            # Сбрасываем consecutive-счётчики чтобы не зацикливаться
-            state.setdefault("phase_fail_counts", {}).clear()
+            # Сбрасываем только revise_spec счётчик (другие фазы сохраняют информацию)
+            state.setdefault("phase_fail_counts", {}).pop("revise_spec", None)
             result = _fallback_phase(state, "fallback: revise_spec лимит исчерпан")
 
         return result

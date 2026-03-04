@@ -677,6 +677,89 @@ def validate_cross_file_names(
                         f"Доступные имена: {', '.join(suggestions) if suggestions else '(пусто)'}"
                     )
 
+    # Дополнительно: проверяем что вызываемые методы на импортированных классах существуют
+    # Ловит: eg.generate_event() когда EventGenerator имеет только generate_events()
+    imported_classes: dict[str, tuple[str, set[str]]] = {}  # alias → (source_stem, class_methods)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        module_stem = node.module.split(".")[0]
+        if module_stem not in project_stems:
+            continue
+        cached = _get_for(module_stem)
+        if cached is None:
+            continue
+        _, target_code = cached
+        try:
+            target_tree = ast.parse(target_code)
+        except SyntaxError:
+            continue
+        for tnode in target_tree.body:
+            if isinstance(tnode, ast.ClassDef):
+                methods: set[str] = set()
+                for item in tnode.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods.add(item.name)
+                    elif isinstance(item, ast.Assign):
+                        for t in item.targets:
+                            if isinstance(t, ast.Name):
+                                methods.add(t.id)
+                for alias in node.names:
+                    if alias.name == tnode.name:
+                        local_name = alias.asname or alias.name
+                        imported_classes[local_name] = (module_stem, methods)
+
+    if imported_classes:
+        # variable = ClassName(...) → variable type is ClassName
+        instance_types: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name) and isinstance(node.value, ast.Call):
+                    if isinstance(node.value.func, ast.Name) and node.value.func.id in imported_classes:
+                        instance_types[target.id] = node.value.func.id
+                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                    if target.value.id == "self" and isinstance(node.value, ast.Call):
+                        if isinstance(node.value.func, ast.Name) and node.value.func.id in imported_classes:
+                            instance_types[f"self.{target.attr}"] = node.value.func.id
+
+        # Проверяем instance.method() вызовы
+        seen_method_warnings: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                var_name = node.value.id
+                method_name = node.attr
+                class_name = instance_types.get(var_name)
+                if not class_name or method_name.startswith("_"):
+                    continue
+                source_stem, cls_methods = imported_classes[class_name]
+                wkey = f"{var_name}.{method_name}"
+                if method_name not in cls_methods and wkey not in seen_method_warnings:
+                    seen_method_warnings.add(wkey)
+                    public = sorted(m for m in cls_methods if not m.startswith("_") and m != "__init__")
+                    warnings.append(
+                        f"{var_name}.{method_name}(): метод '{method_name}' не найден "
+                        f"в классе {class_name} из {project_stems[source_stem]}. "
+                        f"Доступные методы: {', '.join(public) if public else '(нет)'}"
+                    )
+            # self.x.method()
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute):
+                if isinstance(node.value.value, ast.Name) and node.value.value.id == "self":
+                    key = f"self.{node.value.attr}"
+                    class_name = instance_types.get(key)
+                    if not class_name or node.attr.startswith("_"):
+                        continue
+                    source_stem, cls_methods = imported_classes[class_name]
+                    wkey = f"{key}.{node.attr}"
+                    if node.attr not in cls_methods and wkey not in seen_method_warnings:
+                        seen_method_warnings.add(wkey)
+                        public = sorted(m for m in cls_methods if not m.startswith("_") and m != "__init__")
+                        warnings.append(
+                            f"self.{node.value.attr}.{node.attr}(): метод '{node.attr}' не найден "
+                            f"в классе {class_name} из {project_stems[source_stem]}. "
+                            f"Доступные методы: {', '.join(public) if public else '(нет)'}"
+                        )
+
     return warnings
 
 
