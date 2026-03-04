@@ -104,6 +104,65 @@ def _check_import_shadowing(code: str) -> list[str]:
     ]
 
 
+def _check_data_only_violations(
+    code: str,
+    current_file: str,
+    project_files: list[str],
+) -> list[str]:
+    """Детерминистская проверка: если файл — data-only (models.py / data_models.py),
+    запрещает:
+    1. Импорты из других файлов проекта (создают циклические зависимости)
+    2. Top-level функции с бизнес-логикой (только dunder-методы внутри классов)
+
+    Возвращает список предупреждений (пустой если всё ОК или файл не data-only).
+    """
+    stem = Path(current_file).stem
+    if stem not in ("models", "data_models"):
+        return []
+
+    warnings: list[str] = []
+    project_stems = {Path(f).stem for f in project_files if Path(f).stem != stem}
+
+    # 1. Проверяем project-file imports
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            base = node.module.split(".")[0]
+            if base in project_stems:
+                names = ", ".join(a.name for a in (node.names or []))
+                warnings.append(
+                    f"ЗАПРЕЩЕНО: 'from {node.module} import {names}' — "
+                    f"{current_file} это data-only файл, он НЕ ДОЛЖЕН импортировать "
+                    f"из других файлов проекта. Определи все классы ЗДЕСЬ, "
+                    f"а другие файлы будут импортировать ИЗ {current_file}"
+                )
+        elif isinstance(node, ast.Import):
+            for alias in (node.names or []):
+                base = alias.name.split(".")[0]
+                if base in project_stems:
+                    warnings.append(
+                        f"ЗАПРЕЩЕНО: 'import {alias.name}' — "
+                        f"{current_file} это data-only файл, он НЕ ДОЛЖЕН импортировать "
+                        f"из других файлов проекта"
+                    )
+
+    # 2. Проверяем top-level функции (не внутри классов)
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not node.name.startswith("_"):
+                warnings.append(
+                    f"ЗАПРЕЩЕНО: top-level функция '{node.name}()' в {current_file} — "
+                    f"этот файл содержит ТОЛЬКО data classes (dataclass/class определения). "
+                    f"Бизнес-логику вынеси в соответствующий модуль"
+                )
+
+    return warnings
+
+
 def _check_stub_functions(code: str) -> list[str]:
     """Детерминистская проверка: содержит ли код функции-заглушки.
 
@@ -640,6 +699,20 @@ async def phase_develop(
                 "Содержимое: импорты + инициализация + запуск + if __name__ == '__main__'.\n\n"
             )
 
+        # Специальная инструкция для data-only файлов (models.py, data_models.py)
+        if Path(current_file).stem in ("models", "data_models"):
+            dev_ctx += (
+                "⚠️ ЭТОТ ФАЙЛ — ХРАНИЛИЩЕ DATA CLASSES (data-only).\n"
+                "ОБЯЗАТЕЛЬНО:\n"
+                "  - Определи ЗДЕСЬ ВСЕ классы из контракта ниже (Vehicle, Event и т.д.)\n"
+                "  - Используй dataclass или обычный class с __init__\n"
+                "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
+                "  - Импортировать из ДРУГИХ ФАЙЛОВ ПРОЕКТА (from event_generator import X и т.п.)\n"
+                "  - Определять функции с бизнес-логикой (load_model, process_frame и т.п.)\n"
+                "  - Допускаются ТОЛЬКО: stdlib импорты (dataclasses, typing, enum, datetime)\n"
+                "Другие модули будут импортировать классы ОТСЮДА.\n\n"
+            )
+
         # Добавляем A5 если он есть
         if file_contract:
             dev_ctx += (
@@ -768,6 +841,24 @@ async def phase_develop(
             logger.warning(f"⛔ {current_file}: {len(shadow_warnings)} конфликтов имён → авто-REJECT")
             stats.record("developer", dev_model, False)
             _push_feedback(state, current_file, shadow_feedback)
+            file_attempts[current_file] = attempt + 1
+            cumulative_attempts[current_file] = total_attempts + 1
+            continue
+
+        # Детерминистская проверка: data-only файл (models.py) не должен импортировать из проекта
+        data_only_warnings = _check_data_only_violations(code, current_file, state["files"])
+        if data_only_warnings:
+            data_only_feedback = (
+                "АВТОМАТИЧЕСКИЙ REJECT — нарушение правил data-only файла:\n"
+                + "\n".join(f"  - {w}" for w in data_only_warnings)
+                + f"\n\n{current_file} — это файл для ХРАНЕНИЯ data classes (Vehicle, Event и т.д.).\n"
+                "Он НЕ ДОЛЖЕН импортировать из других файлов проекта.\n"
+                "Он НЕ ДОЛЖЕН содержать бизнес-логику (функции).\n"
+                "Другие файлы импортируют ОТСЮДА, а не наоборот."
+            )
+            logger.warning(f"⛔ {current_file}: data-only нарушения → авто-REJECT")
+            stats.record("developer", dev_model, False)
+            _push_feedback(state, current_file, data_only_feedback)
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue
