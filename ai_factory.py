@@ -309,6 +309,11 @@ async def main() -> None:
                 arch_resp, sa_resp, randomize_models,
             )
             state["api_contract"] = api_contract
+            # Sync: A5 pipeline мог создать models.py для shared data models
+            for f in api_contract.get("file_contracts", {}):
+                if f not in state["files"]:
+                    state["files"].append(f)
+                    state["feedbacks"][f] = ""
             state["_prev_file_contracts"] = api_contract.get("file_contracts", {})
             if await phase_review_api_contract(
                 logger, project_path, state, cache, stats,

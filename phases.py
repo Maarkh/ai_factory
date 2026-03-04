@@ -651,6 +651,14 @@ async def phase_develop(
                 f"ОЖИДАЕМЫЕ ИМПОРТЫ (A5):\n"
                 f"{json.dumps(global_imports, ensure_ascii=False, indent=2)}\n\n"
             )
+        req_path = src_path / "requirements.txt"
+        if req_path.exists():
+            req_content = req_path.read_text(encoding="utf-8").strip()
+            if req_content:
+                dev_ctx += (
+                    f"ДОСТУПНЫЕ PIP-ПАКЕТЫ (requirements.txt):\n{req_content}\n"
+                    f"⛔ Импорт пакетов НЕ из этого списка будет отклонён.\n\n"
+                )
         if global_context:
             dev_ctx += f"ГЛОБАЛЬНЫЙ КОНТЕКСТ (public API других файлов):\n{global_context}\n\n"
             # Извлекаем имена классов/функций из других файлов — запрет на переопределение
@@ -778,12 +786,18 @@ async def phase_develop(
                     "\n\nОЖИДАЕМЫЕ ИМПОРТЫ из A5 контракта для этого файла:\n"
                     + "\n".join(f"  {imp}" for imp in global_imports)
                 )
+            req_content_hint = ""
+            if req_path.exists():
+                rc = req_path.read_text(encoding="utf-8").strip()
+                if rc:
+                    req_content_hint = f"\n\nСодержимое requirements.txt (доступные пакеты):\n{rc}"
             import_feedback = (
                 "АВТОМАТИЧЕСКИЙ REJECT — невалидные импорты:\n"
                 + "\n".join(f"  - {w}" for w in import_warnings)
                 + "\n\nИсправь: используй только stdlib, pip-пакеты из requirements.txt "
                 "или модули проекта: " + ", ".join(state["files"])
                 + expected_hint
+                + req_content_hint
             )
             logger.warning(f"⛔ {current_file}: {len(import_warnings)} ошибок импорта → авто-REJECT")
             stats.record("developer", dev_model, False)

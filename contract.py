@@ -87,20 +87,29 @@ def _inject_missing_data_models(
 ) -> dict:
     """Добавляет в A5 контракт класс для каждой data_model из A2, которая не покрыта.
 
-    Выбирает файл: первый файл != main.py (или main.py если он единственный).
+    Создаёт models.py для shared data models (предотвращает циклические зависимости).
     """
     missing = _validate_data_model_coverage(contract, system_specs, logger)
     if not missing:
         return contract
 
     fc = contract.setdefault("file_contracts", {})
+    gi = contract.setdefault("global_imports", {})
 
-    # Выбираем целевой файл для data models
-    target_file = files[0]  # fallback
+    # Ищем существующий файл моделей или создаём новый
+    target_file = None
     for f in files:
-        if f != "main.py" and not f.startswith("test_"):
+        if Path(f).stem in ("models", "data_models"):
             target_file = f
             break
+    if target_file is None:
+        ext = Path(files[0]).suffix if files else ".py"
+        target_file = f"models{ext}"
+        if target_file not in files:
+            files.append(target_file)
+        fc.setdefault(target_file, [])
+        gi.setdefault(target_file, [])
+        logger.info(f"  📋 A5: создан файл {target_file} для shared data models")
 
     data_models = {
         dm.get("name", ""): dm
@@ -185,6 +194,26 @@ def _validate_global_imports(
                 valid_imports.append(imp_line)
                 continue
             base_module = (m.group(1) or m.group(2)).split(".")[0]
+
+            # Проверка: base_module должен быть валидным Python-идентификатором
+            # (ловит "from opencv-python import cv2" — дефис невалиден)
+            if not base_module.isidentifier():
+                from code_context import _PIP_TO_IMPORT
+                correct = _PIP_TO_IMPORT.get(base_module.lower())
+                if correct:
+                    corrected = f"import {correct}"
+                    logger.warning(
+                        f"  ⚠️  A5 global_imports: '{imp_line}' для {fname} — "
+                        f"'{base_module}' невалидный идентификатор → '{corrected}'"
+                    )
+                    valid_imports.append(corrected)
+                else:
+                    logger.warning(
+                        f"  ⚠️  A5 global_imports: удалён '{imp_line}' для {fname} — "
+                        f"'{base_module}' невалидный Python-идентификатор"
+                    )
+                continue
+
             base_lower = base_module.lower()
             base_normalized = base_lower.replace("-", "_")
 
@@ -204,6 +233,76 @@ def _validate_global_imports(
                 f"('{base_module}' не найден в stdlib, dependencies или файлах проекта)"
             )
         cleaned_gi[fname] = valid_imports
+
+    contract["global_imports"] = cleaned_gi
+    return contract
+
+
+def _validate_import_consistency(
+    contract: dict,
+    logger: logging.Logger,
+) -> dict:
+    """Проверяет что cross-file imports в global_imports ссылаются на имена из file_contracts.
+
+    Для каждого `from project_file import Name`:
+    - Если Name не найдено в file_contracts целевого файла → удалить import.
+    - Если у целевого файла нет контрактов вовсе → оставить (неполный A5).
+    """
+    fc = contract.get("file_contracts", {})
+    gi = contract.get("global_imports", {})
+    if not fc or not gi:
+        return contract
+
+    # stem → filename маппинг
+    file_stems: dict[str, str] = {Path(f).stem: f for f in fc}
+    # stem → set(defined names) из file_contracts
+    defined_names: dict[str, set[str]] = {}
+    for fname, items in fc.items():
+        stem = Path(fname).stem
+        names: set[str] = set()
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    n = item.get("name", "")
+                    if n:
+                        names.add(n)
+        defined_names[stem] = names
+
+    cleaned_gi: dict[str, list[str]] = {}
+    for fname, imports in gi.items():
+        if not isinstance(imports, list):
+            cleaned_gi[fname] = imports
+            continue
+        valid: list[str] = []
+        for imp_line in imports:
+            if not isinstance(imp_line, str):
+                valid.append(imp_line)
+                continue
+            m = re.match(r"from\s+(\w+)\s+import\s+(\w+)", imp_line.strip())
+            if not m:
+                valid.append(imp_line)
+                continue
+            source_stem = m.group(1)
+            imported_name = m.group(2)
+            # Только cross-file project imports
+            if source_stem not in file_stems:
+                valid.append(imp_line)
+                continue
+            # Если у целевого файла нет контрактов — оставляем (неполный A5)
+            if not defined_names.get(source_stem):
+                valid.append(imp_line)
+                continue
+            # Проверяем наличие имени
+            if imported_name in defined_names[source_stem]:
+                valid.append(imp_line)
+            else:
+                logger.warning(
+                    f"  ⚠️  A5 global_imports: удалён '{imp_line}' для {fname} — "
+                    f"'{imported_name}' не определён в file_contracts "
+                    f"{file_stems[source_stem]} "
+                    f"(доступны: {', '.join(sorted(defined_names[source_stem]))})"
+                )
+        cleaned_gi[fname] = valid
 
     contract["global_imports"] = cleaned_gi
     return contract
@@ -287,6 +386,162 @@ def _inject_cross_file_imports(
     return contract
 
 
+def _detect_and_fix_circular_imports(
+    contract: dict,
+    files: list[str],
+    logger: logging.Logger,
+) -> dict:
+    """Детерминистская проверка циклических зависимостей в A5 global_imports.
+
+    Строит граф из cross-file imports, находит циклы, переносит shared classes
+    в models.py для разрыва циклов.
+    """
+    fc = contract.get("file_contracts", {})
+    gi = contract.get("global_imports", {})
+    if not fc or not gi:
+        return contract
+
+    project_stems = {Path(f).stem for f in files}
+
+    # 1. Строим граф: stem → set(dependency stems)
+    graph: dict[str, set[str]] = {Path(f).stem: set() for f in files}
+    # (source_stem, imported_name) для каждого файла
+    import_details: dict[str, list[tuple[str, str]]] = {}
+
+    for fname, imports in gi.items():
+        if not isinstance(imports, list):
+            continue
+        stem = Path(fname).stem
+        graph.setdefault(stem, set())
+        import_details.setdefault(stem, [])
+        for imp_line in imports:
+            if not isinstance(imp_line, str):
+                continue
+            m = re.match(r"from\s+(\w+)\s+import\s+(\w+)", imp_line.strip())
+            if not m:
+                continue
+            src_stem = m.group(1)
+            name = m.group(2)
+            if src_stem in project_stems and src_stem != stem:
+                graph[stem].add(src_stem)
+                import_details[stem].append((src_stem, name))
+
+    # 2. Поиск циклов через DFS (color-based)
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {v: WHITE for v in graph}
+    cycles: list[list[str]] = []
+
+    def _dfs(u: str, path: list[str]) -> None:
+        color[u] = GRAY
+        for v in graph.get(u, set()):
+            if v not in color:
+                continue
+            if color[v] == GRAY:
+                idx = path.index(v) if v in path else -1
+                if idx >= 0:
+                    cycles.append(path[idx:] + [v])
+            elif color[v] == WHITE:
+                _dfs(v, path + [v])
+        color[u] = BLACK
+
+    for v in graph:
+        if color[v] == WHITE:
+            _dfs(v, [v])
+
+    if not cycles:
+        return contract
+
+    # 3. Собираем все stems участвующие в циклах
+    cycle_stems: set[str] = set()
+    for cycle in cycles:
+        cycle_stems.update(cycle)
+
+    logger.warning(
+        f"  ⚠️  A5: обнаружены циклические зависимости: "
+        f"{'; '.join(' → '.join(c) for c in cycles)}"
+    )
+
+    # 4. Находим classes, которые импортируются другим файлом цикла
+    classes_to_move: dict[str, str] = {}  # class_name → source_stem
+    for stem in cycle_stems:
+        fname = next((f for f in files if Path(f).stem == stem), None)
+        if not fname or fname not in fc:
+            continue
+        for other_stem in cycle_stems:
+            if other_stem == stem:
+                continue
+            for src_stem, name in import_details.get(other_stem, []):
+                if src_stem != stem:
+                    continue
+                # Проверяем что name — класс в file_contracts
+                for item in fc.get(fname, []):
+                    if isinstance(item, dict) and item.get("name") == name:
+                        sig = item.get("signature", "")
+                        if sig.strip().startswith("class "):
+                            classes_to_move[name] = stem
+
+    if not classes_to_move:
+        logger.info("  ℹ️  Циклы найдены, но нет переносимых классов (циклы через функции).")
+        return contract
+
+    # 5. Определяем/создаём models файл
+    ext = Path(files[0]).suffix if files else ".py"
+    models_file = f"models{ext}"
+    models_stem = "models"
+    for f in files:
+        if Path(f).stem in ("models", "data_models"):
+            models_file = f
+            models_stem = Path(f).stem
+            break
+    if models_file not in files:
+        files.append(models_file)
+    fc.setdefault(models_file, [])
+    gi.setdefault(models_file, [])
+
+    # 6. Переносим классы
+    moved = 0
+    for class_name, source_stem in classes_to_move.items():
+        source_file = next((f for f in files if Path(f).stem == source_stem), None)
+        if not source_file:
+            continue
+        # Перемещаем контракт класса
+        source_items = fc.get(source_file, [])
+        for i, item in enumerate(source_items):
+            if isinstance(item, dict) and item.get("name") == class_name:
+                fc[models_file].append(source_items.pop(i))
+                moved += 1
+                break
+        # Обновляем global_imports: from source_stem import Class → from models import Class
+        old_pattern = f"from {source_stem} import {class_name}"
+        new_import = f"from {models_stem} import {class_name}"
+        for fkey, imp_list in gi.items():
+            if not isinstance(imp_list, list):
+                continue
+            for idx, imp_line in enumerate(imp_list):
+                if isinstance(imp_line, str) and old_pattern in imp_line:
+                    gi[fkey][idx] = new_import
+
+    # 7. models.py — data-only: удаляем любые cross-file imports из него
+    models_imports = gi.get(models_file, [])
+    if isinstance(models_imports, list):
+        clean = [
+            imp for imp in models_imports
+            if not isinstance(imp, str)
+            or not re.match(r"from\s+(\w+)\s+import", imp.strip())
+            or re.match(r"from\s+(\w+)\s+import", imp.strip()).group(1) not in project_stems
+        ]
+        gi[models_file] = clean
+
+    logger.info(
+        f"  📋 A5: перенесено {moved} классов в {models_file} для разрыва циклов: "
+        f"{', '.join(classes_to_move.keys())}"
+    )
+
+    contract["file_contracts"] = fc
+    contract["global_imports"] = gi
+    return contract
+
+
 async def _validate_and_patch_contract(
     logger: logging.Logger,
     project_path: Path,
@@ -313,6 +568,9 @@ async def _validate_and_patch_contract(
 
     logger.warning(f"⚠️  A5 неполный — отсутствуют контракты для: {', '.join(missing)}")
 
+    req_path = project_path / "src" / "requirements.txt"
+    req_content = req_path.read_text(encoding="utf-8").strip() if req_path.exists() else "# пусто"
+
     for fname in missing:
         logger.info(f"   🔧 Запрашиваю контракт для {fname} ...")
         # Контекст: задача + архитектура + уже известные контракты других файлов
@@ -323,6 +581,7 @@ async def _validate_and_patch_contract(
             f"{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}\n\n"
             f"Архитектура:\n{json.dumps(state.get('architecture', {}), ensure_ascii=False, indent=2)}\n\n"
             f"Язык: {LANG_DISPLAY.get(language, language)}\n\n"
+            f"Доступные pip-пакеты (requirements.txt):\n{req_content}\n\n"
             f"Уже сгенерированные контракты других файлов:\n"
             f"{json.dumps(existing_contracts, ensure_ascii=False, indent=2)}\n\n"
             f"ЗАДАЧА: Сгенерируй API контракт ТОЛЬКО для файла `{fname}`.\n"
@@ -355,6 +614,12 @@ async def _validate_and_patch_contract(
 
     contract["file_contracts"] = fc
     contract["global_imports"]  = gi
+    # Post-validation: удаляем фантомные импорты, которые мог добавить LLM при патче
+    contract = _validate_global_imports(
+        contract, state.get("architecture", {}), files, logger,
+        requirements_path=req_path if req_path.exists() else None,
+    )
+    contract = _validate_import_consistency(contract, logger)
     return contract
 
 
@@ -383,6 +648,9 @@ async def patch_contract_for_file(
 
     logger.info(f"🔧 Патч A5 для {filename} на основе фидбэка ревьюера ...")
 
+    req_path = project_path / "src" / "requirements.txt"
+    req_content = req_path.read_text(encoding="utf-8").strip() if req_path.exists() else "# пусто"
+
     ctx = (
         f"Текущий API контракт (A5) для файла `{filename}`:\n"
         f"{json.dumps(current, ensure_ascii=False, indent=2)}\n\n"
@@ -391,6 +659,7 @@ async def patch_contract_for_file(
         f"Контракты ДРУГИХ файлов проекта (для called_by ссылок):\n"
         f"{json.dumps({k: v for k, v in fc.items() if k != filename}, ensure_ascii=False, indent=2)}\n\n"
         f"Язык: {LANG_DISPLAY.get(language, language)}\n\n"
+        f"Доступные pip-пакеты (requirements.txt):\n{req_content}\n\n"
         f"ЗАДАЧА: Исправь контракт A5 ТОЛЬКО для файла `{filename}`.\n"
         f"Проанализируй замечания ревьюера и код разработчика.\n"
         f"Если функция требует дополнительных параметров — добавь их в сигнатуру.\n"
@@ -413,6 +682,13 @@ async def patch_contract_for_file(
             gi[filename] = _parse_if_str(file_imports, list, [])
             contract["file_contracts"] = fc
             contract["global_imports"] = gi
+            # Post-validation: удаляем фантомные импорты после патча
+            contract = _validate_global_imports(
+                contract, state.get("architecture", {}),
+                state.get("files", []), logger,
+                requirements_path=req_path if req_path.exists() else None,
+            )
+            contract = _validate_import_consistency(contract, logger)
             state["api_contract"] = contract
             save_artifact(project_path, "A5", contract)
             stats.record("contract_analyst", get_model("contract_analyst"), True)
@@ -495,12 +771,16 @@ async def phase_generate_api_contract(
     language = state.get("language", "python")
     logger.info("📋 Contract Analyst генерирует A5 (API контракт) ...")
 
+    req_path = project_path / "src" / "requirements.txt"
+    req_content = req_path.read_text(encoding="utf-8").strip() if req_path.exists() else "# пусто"
+
     ctx = (
         f"Запрос: {state['task']}\n\n"
         f"Системная спецификация (A2):\n{json.dumps(sa_resp, ensure_ascii=False, indent=2)}\n\n"
         f"Архитектура (A3/A4):\n{json.dumps(arch_resp, ensure_ascii=False, indent=2)}\n\n"
         f"Язык: {LANG_DISPLAY.get(language, language)}\n\n"
-        f"Файлы: {arch_resp.get('files', [])}"
+        f"Файлы: {arch_resp.get('files', [])}\n\n"
+        f"Доступные pip-пакеты (requirements.txt):\n{req_content}"
     )
 
     try:
@@ -527,8 +807,12 @@ async def phase_generate_api_contract(
             contract, arch_resp, files_list, logger,
             requirements_path=req_path if req_path.exists() else None,
         )
+        # Детерминистская валидация: cross-file imports ссылаются на реальные имена
+        contract = _validate_import_consistency(contract, logger)
         # Детерминистская инъекция: межфайловые импорты (data models и т.п.)
         contract = _inject_cross_file_imports(contract, logger)
+        # Детерминистская проверка: циклические зависимости → вынос в models.py
+        contract = _detect_and_fix_circular_imports(contract, files_list, logger)
         save_artifact(project_path, "A5", contract)
         logger.info("✅ A5 (API контракт) готов.")
         return contract
@@ -553,11 +837,15 @@ async def _refresh_api_contract(
     """
     language = state.get("language", "python")
     logger.info("🔄 Каскадное обновление A5 после изменения A2 ...")
+    req_path = project_path / "src" / "requirements.txt"
+    req_content = req_path.read_text(encoding="utf-8").strip() if req_path.exists() else "# пусто"
+
     ctx = (
         f"Запрос: {state['task']}\n\n"
         f"Обновлённая спецификация (A2):\n{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}\n\n"
         f"Файлы: {state.get('files', [])}\n\n"
-        f"Язык: {LANG_DISPLAY.get(language, language)}"
+        f"Язык: {LANG_DISPLAY.get(language, language)}\n\n"
+        f"Доступные pip-пакеты (requirements.txt):\n{req_content}"
     )
     try:
         new_contract = await ask_agent(logger, "contract_analyst", ctx, cache, 0, randomize, language)
@@ -582,7 +870,12 @@ async def _refresh_api_contract(
             files_list, logger,
             requirements_path=req_path if req_path.exists() else None,
         )
+        new_contract = _validate_import_consistency(new_contract, logger)
         new_contract = _inject_cross_file_imports(new_contract, logger)
+        new_contract = _detect_and_fix_circular_imports(new_contract, files_list, logger)
+        # Sync: feedbacks для новых файлов (models.py и т.п.)
+        for f in files_list:
+            state.setdefault("feedbacks", {}).setdefault(f, "")
         state["api_contract"] = new_contract
         save_artifact(project_path, "A5", new_contract)
         logger.info("✅ A5 обновлён каскадно.")
