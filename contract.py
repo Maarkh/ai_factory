@@ -276,7 +276,9 @@ def _validate_global_imports(
                 continue
             # Пакет не найден в requirements.txt → авто-добавляем
             # (LLM-сгенерированный A5 контракт — пакет скорее всего реальный)
-            if requirements_path and base_module.isidentifier():
+            # НЕ добавляем если имя совпадает с файлом проекта (project_modules уже проверены выше)
+            if (requirements_path and base_module.isidentifier()
+                    and base_lower not in {pm.lower() for pm in project_modules}):
                 _auto_add_requirement(requirements_path, base_module, logger)
                 pip_names.add(base_lower)
                 pip_names.add(base_normalized)
@@ -422,6 +424,84 @@ def _sanitize_implementation_hints(
                             f"('{word}' не определён, доступно: {', '.join(available)})"
                         )
             item["implementation_hints"] = hints
+
+    return contract
+
+
+# Типы из typing → import line
+_TYPING_TYPES = {
+    "List": "List", "Dict": "Dict", "Tuple": "Tuple", "Set": "Set",
+    "Optional": "Optional", "Union": "Union", "Any": "Any",
+    "Callable": "Callable", "Iterator": "Iterator", "Generator": "Generator",
+    "Sequence": "Sequence", "Mapping": "Mapping", "Iterable": "Iterable",
+}
+# Prefix → import line (для np.ndarray, pd.DataFrame и т.д.)
+_PREFIX_IMPORTS = {
+    "np": "import numpy as np",
+    "pd": "import pandas as pd",
+    "tf": "import tensorflow as tf",
+    "plt": "import matplotlib.pyplot as plt",
+    "cv2": "import cv2",
+}
+
+
+def _inject_signature_type_imports(
+    contract: dict,
+    logger: logging.Logger,
+) -> dict:
+    """Авто-инжектирует import-строки для типов, используемых в сигнатурах A5.
+
+    Если сигнатура содержит 'np.ndarray' → добавляет 'import numpy as np'.
+    Если содержит 'List[...]' → добавляет 'from typing import List'.
+    """
+    fc = contract.get("file_contracts", {})
+    gi = contract.setdefault("global_imports", {})
+
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        file_imports = gi.setdefault(fname, [])
+        existing_text = " ".join(file_imports)
+        needed_typing: set[str] = set()
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sig = item.get("signature", "")
+            if not sig:
+                continue
+
+            # Проверяем typing types
+            for type_name in _TYPING_TYPES:
+                if re.search(rf"\b{type_name}\b", sig):
+                    needed_typing.add(type_name)
+
+            # Проверяем prefix-based imports (np.X, pd.X и т.д.)
+            for prefix, imp_line in _PREFIX_IMPORTS.items():
+                if f"{prefix}." in sig and imp_line not in existing_text:
+                    if imp_line not in file_imports:
+                        file_imports.append(imp_line)
+                        logger.info(f"  📎 A5: авто-добавлен '{imp_line}' для {fname} (из сигнатуры)")
+
+        # Собираем typing imports
+        if needed_typing:
+            # Проверяем что уже есть
+            existing_typing: set[str] = set()
+            for imp in file_imports:
+                m = re.match(r"from\s+typing\s+import\s+(.+)", imp)
+                if m:
+                    existing_typing.update(n.strip().split()[0] for n in m.group(1).split(","))
+            new_typing = needed_typing - existing_typing
+            if new_typing:
+                # Удаляем старую typing строку и создаём новую объединённую
+                all_typing = sorted(existing_typing | new_typing)
+                new_line = f"from typing import {', '.join(all_typing)}"
+                file_imports[:] = [
+                    imp for imp in file_imports
+                    if not re.match(r"from\s+typing\s+import", imp)
+                ]
+                file_imports.insert(0, new_line)
+                logger.info(f"  📎 A5: обновлён typing import для {fname}: {', '.join(new_typing)}")
 
     return contract
 
@@ -758,6 +838,7 @@ async def _validate_and_patch_contract(
         contract, state.get("architecture", {}), files, logger,
         requirements_path=req_path if req_path.exists() else None,
     )
+    contract = _inject_signature_type_imports(contract, logger)
     contract = _validate_import_consistency(contract, logger)
     contract = _sanitize_implementation_hints(contract, logger)
     contract = _inject_cross_file_imports(contract, logger)
@@ -831,6 +912,7 @@ async def patch_contract_for_file(
                 files_list, logger,
                 requirements_path=req_path if req_path.exists() else None,
             )
+            contract = _inject_signature_type_imports(contract, logger)
             contract = _validate_import_consistency(contract, logger)
             contract = _sanitize_implementation_hints(contract, logger)
             contract = _inject_cross_file_imports(contract, logger)
@@ -953,6 +1035,7 @@ async def phase_generate_api_contract(
             contract, arch_resp, files_list, logger,
             requirements_path=req_path if req_path.exists() else None,
         )
+        contract = _inject_signature_type_imports(contract, logger)
         # Детерминистская валидация: cross-file imports ссылаются на реальные имена
         contract = _validate_import_consistency(contract, logger)
         # Санитизация: implementation_hints не ссылаются на несуществующие имена
@@ -1018,6 +1101,7 @@ async def _refresh_api_contract(
             files_list, logger,
             requirements_path=req_path if req_path.exists() else None,
         )
+        new_contract = _inject_signature_type_imports(new_contract, logger)
         new_contract = _validate_import_consistency(new_contract, logger)
         new_contract = _sanitize_implementation_hints(new_contract, logger)
         new_contract = _inject_cross_file_imports(new_contract, logger)
