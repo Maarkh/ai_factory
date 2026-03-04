@@ -309,11 +309,22 @@ async def main() -> None:
                 arch_resp, sa_resp, randomize_models,
             )
             state["api_contract"] = api_contract
-            # Sync: A5 pipeline мог создать models.py для shared data models
-            for f in api_contract.get("file_contracts", {}):
+            # Sync: A5 pipeline мог создать/удалить файлы (models.py и т.п.)
+            a5_files = set(api_contract.get("file_contracts", {}).keys())
+            for f in a5_files:
                 if f not in state["files"]:
                     state["files"].append(f)
                     state["feedbacks"][f] = ""
+            # Удаляем файлы-призраки (есть в state, но нет в A5)
+            for f in list(state["files"]):
+                if f not in a5_files:
+                    logger.info(f"  🗑️  Удалён файл-призрак из state: {f} (нет в A5)")
+                    state["files"].remove(f)
+                    state["feedbacks"].pop(f, None)
+                    if f in state.get("approved_files", []):
+                        state["approved_files"].remove(f)
+                    state.get("file_attempts", {}).pop(f, None)
+                    state.get("cumulative_file_attempts", {}).pop(f, None)
             state["_prev_file_contracts"] = api_contract.get("file_contracts", {})
             if await phase_review_api_contract(
                 logger, project_path, state, cache, stats,
@@ -381,215 +392,220 @@ async def main() -> None:
         save_state(project_path, state)
 
         # ── Диспетчер фаз ────────────────────────────────────────────────────
-        if next_phase == "develop":
-            approved_before = set(state.get("approved_files", []))
-            exhausted, spec_blocked = await phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
-            approved_after = set(state.get("approved_files", []))
-            made_progress = len(approved_after) > len(approved_before)
+        try:
+            if next_phase == "develop":
+                approved_before = set(state.get("approved_files", []))
+                exhausted, spec_blocked = await phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
+                approved_after = set(state.get("approved_files", []))
+                made_progress = len(approved_after) > len(approved_before)
 
-            if made_progress:
-                _reset_phase_fail(state, "develop")
+                if made_progress:
+                    _reset_phase_fail(state, "develop")
 
-            # Немедленная эскалация: reviewer сказал что проблема в спецификации
-            if spec_blocked:
-                problem = (
-                    f"Reviewer определил проблемы уровня СПЕЦИФИКАЦИИ в файлах: {', '.join(spec_blocked)}. "
-                    "Разработчик НЕ может исправить это без изменения A2/A3/A5. "
-                    "Последние замечания: "
-                    + "; ".join(
-                        f"{f}: {state['feedbacks'].get(f, '')[:300]}"
-                        for f in spec_blocked
-                    )
-                )
-                if _can_revise_spec(state, logger):
-                    print(f"📋 Проблема спецификации: {', '.join(spec_blocked)} → revise_spec")
-                    await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                    state["max_iters"] += 10
-                    for f in spec_blocked:
-                        state["file_attempts"][f] = 0
-                else:
-                    _force_approve_files(state, project_path, spec_blocked, "spec исчерпана + spec_blocked", logger)
-            elif exhausted:
-                problem = (
-                    f"Файлы не удалось написать за {MAX_FILE_ATTEMPTS} попыток: {', '.join(exhausted)}. "
-                    "Последние замечания: "
-                    + "; ".join(
-                        f"{f}: {state['feedbacks'].get(f, '')[:200]}"
-                        for f in exhausted
-                    )
-                )
-                if _can_revise_spec(state, logger):
-                    print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
-                    await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                    state["max_iters"] += 10
-                    for f in exhausted:
-                        state["file_attempts"][f] = 0
-                else:
-                    _force_approve_files(state, project_path, exhausted, "spec исчерпана + exhausted", logger)
-            elif not made_progress:
-                fails = _bump_phase_fail(state, "develop")
-                if fails >= 3:
-                    unapproved = [f for f in state["files"]
-                                  if f not in state.get("approved_files", [])]
+                # Немедленная эскалация: reviewer сказал что проблема в спецификации
+                if spec_blocked:
                     problem = (
-                        f"Разработка застопорилась на {fails} итераций подряд. "
-                        f"Файлы без прогресса: {', '.join(unapproved)}. "
+                        f"Reviewer определил проблемы уровня СПЕЦИФИКАЦИИ в файлах: {', '.join(spec_blocked)}. "
+                        "Разработчик НЕ может исправить это без изменения A2/A3/A5. "
                         "Последние замечания: "
                         + "; ".join(
-                            f"{f}: {state['feedbacks'].get(f, '')[:200]}"
-                            for f in unapproved
+                            f"{f}: {state['feedbacks'].get(f, '')[:300]}"
+                            for f in spec_blocked
                         )
                     )
                     if _can_revise_spec(state, logger):
-                        print(f"⚠️  Разработка не продвигается {fails} итераций → revise_spec ({', '.join(unapproved)})")
+                        print(f"📋 Проблема спецификации: {', '.join(spec_blocked)} → revise_spec")
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                         state["max_iters"] += 10
-                        for f in unapproved:
+                        for f in spec_blocked:
                             state["file_attempts"][f] = 0
                     else:
-                        _force_approve_files(state, project_path, unapproved, "spec исчерпана + stalled", logger)
-
-        elif next_phase == "e2e_review":
-            total_e2e_fails = state.get("phase_total_fails", {}).get("e2e_review", 0)
-            # Предохранитель: после 6+ суммарных E2E отказов — пропускаем к integration_test
-            if total_e2e_fails >= 6:
-                logger.warning("⚠️  E2E падал 6+ раз суммарно → принудительный APPROVE, переход к integration_test.")
-                state["e2e_passed"] = True
-                state["e2e_attempt"] = 0
-                _reset_phase_fail(state, "e2e_review")
-            elif not phase_cross_file_check(logger, project_path, state):
-                _bump_phase_fail(state, "e2e_review")
-                save_state(project_path, state)
-                continue
-            elif not await phase_e2e_review(logger, project_path, state, cache, stats, state["e2e_attempt"], randomize=randomize_models):
-                fails = _bump_phase_fail(state, "e2e_review")
-                state["e2e_attempt"] += 1
-                if fails >= 3 and _can_revise_spec(state, logger):
-                    print("⚠️  E2E падает 3 раза подряд → принудительный revise_spec.")
-                    feedbacks = [
-                        f"  {f}: {state['feedbacks'].get(f, '')[:300]}"
-                        for f in state["files"] if state["feedbacks"].get(f, "")
-                    ]
+                        _force_approve_files(state, project_path, spec_blocked, "spec исчерпана + spec_blocked", logger)
+                elif exhausted:
                     problem = (
-                        f"E2E Review отклоняет проект {fails} раз подряд.\n"
-                        "Конкретные замечания ревьюеров:\n" + "\n".join(feedbacks)
+                        f"Файлы не удалось написать за {MAX_FILE_ATTEMPTS} попыток: {', '.join(exhausted)}. "
+                        "Последние замечания: "
+                        + "; ".join(
+                            f"{f}: {state['feedbacks'].get(f, '')[:200]}"
+                            for f in exhausted
+                        )
                     )
-                    await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                    state["max_iters"] += 5
-            else:
-                state["e2e_passed"] = True
-                state["e2e_attempt"] = 0
-                _reset_phase_fail(state, "e2e_review")
+                    if _can_revise_spec(state, logger):
+                        print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
+                        await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                        state["max_iters"] += 10
+                        for f in exhausted:
+                            state["file_attempts"][f] = 0
+                    else:
+                        _force_approve_files(state, project_path, exhausted, "spec исчерпана + exhausted", logger)
+                elif not made_progress:
+                    fails = _bump_phase_fail(state, "develop")
+                    if fails >= 3:
+                        unapproved = [f for f in state["files"]
+                                      if f not in state.get("approved_files", [])]
+                        problem = (
+                            f"Разработка застопорилась на {fails} итераций подряд. "
+                            f"Файлы без прогресса: {', '.join(unapproved)}. "
+                            "Последние замечания: "
+                            + "; ".join(
+                                f"{f}: {state['feedbacks'].get(f, '')[:200]}"
+                                for f in unapproved
+                            )
+                        )
+                        if _can_revise_spec(state, logger):
+                            print(f"⚠️  Разработка не продвигается {fails} итераций → revise_spec ({', '.join(unapproved)})")
+                            await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                            state["max_iters"] += 10
+                            for f in unapproved:
+                                state["file_attempts"][f] = 0
+                        else:
+                            _force_approve_files(state, project_path, unapproved, "spec исчерпана + stalled", logger)
 
-        elif next_phase == "integration_test":
-            total_int_fails = state.get("phase_total_fails", {}).get("integration_test", 0)
-            if total_int_fails >= 8:
-                logger.warning("⚠️  Integration test падал 8+ раз суммарно → пропускаем к unit_tests.")
-                state["integration_passed"] = True
-                _reset_phase_fail(state, "integration_test")
-            elif not await phase_integration_test(logger, project_path, state, cache, stats, randomize=randomize_models):
-                _bump_phase_fail(state, "integration_test")
-            else:
-                state["integration_passed"] = True
-                _reset_phase_fail(state, "integration_test")
-
-        elif next_phase == "unit_tests":
-            total_ut_fails = state.get("phase_total_fails", {}).get("unit_tests", 0)
-            if total_ut_fails >= 6:
-                logger.warning("⚠️  Unit tests падал 6+ раз суммарно → пропускаем к document.")
-                state["tests_passed"] = True
-                _reset_phase_fail(state, "unit_tests")
-            elif not await phase_unit_tests(logger, project_path, state, cache, stats, randomize=randomize_models):
-                _bump_phase_fail(state, "unit_tests")
-            else:
-                state["tests_passed"] = True
-                _reset_phase_fail(state, "unit_tests")
-
-        elif next_phase == "document":
-            await phase_document(logger, project_path, state, cache, randomize=randomize_models)
-            state["document_generated"] = True
-
-        elif next_phase == "revise_spec":
-            if _can_revise_spec(state, logger):
-                problem = input_with_timeout(
-                    "Опишите противоречие (или Enter для авто): ", 10,
-                    "Авто-эскалация от Supervisor"
-                ).strip() or "Авто-эскалация от Supervisor"
-                await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                state["max_iters"] += 10
-
-        elif next_phase == "success":
-            git_commit(project_path, f"Successful build: iteration {state['iteration']}")
-            print_iteration_table(state)
-            generate_summary(project_path, state)
-
-            # Сохраняем A10 (финальный summary уже сохранён в phase_document)
-            # Показываем финальную сводку
-            src_path = project_path / SRC_DIR
-            print("\n" + "═" * 80)
-            print(f"{'🎉 УСПЕХ! Проект готов (v15.0) 🎉':^80}")
-            print("═" * 80)
-            print(f"📂 Папка проекта : {project_path}")
-            print(f"📦 Исходный код  : {src_path}")
-            print(f"🗄️  Метаданные    : {project_path / FACTORY_DIR}")
-            print(f"🌍 Язык          : {LANG_DISPLAY.get(language, language)}")
-            print(f"🔢 Итераций      : {state['iteration']}")
-            print(f"📄 Файлов        : {len(state['files'])}")
-            print(f"🧪 Unit-тесты + покрытие ≥ {MIN_COVERAGE}%")
-            print(f"🚀 Docker-ready")
-            print("\n📋 Артефакты проекта:")
-            art_dir = project_path / FACTORY_DIR / ARTIFACTS_DIR
-            if art_dir.exists():
-                for art in sorted(art_dir.iterdir()):
-                    print(f"   {art.name}")
-            print("\n📋 Запуск:")
-            run_cmd = get_execution_command(language, state.get("entry_point", "main.py"))
-            print(f"   docker run --rm -v $(pwd)/src:/app -w /app {get_docker_image(language)} bash -c '{run_cmd}'")
-            print("═" * 80)
-            stats.print_report()
-
-            act = input_with_timeout(
-                f"\nЧто дальше?\n  Enter — принять\n  r — доработать файл\n  spec — пересмотреть спецификацию\n"
-                f"👉 [авто через {WAIT_TIMEOUT}с]: ",
-                WAIT_TIMEOUT, ""
-            ).lower()
-
-            if act == "r":
-                target   = input("Файл (main.py): ").strip() or state.get("entry_point", "main.py")
-                feedback = input(f"Правки для {target}: ").strip()
-                if not feedback:
-                    print("Пустые правки — пропускаю.")
-                else:
-                    if target not in state["files"]:
-                        state["files"].append(target)
-                        state["feedbacks"][target] = ""
-                    if target in state.get("approved_files", []):
-                        state["approved_files"].remove(target)
-                    state["feedbacks"][target] = f"Требование заказчика: {feedback}"
-                    state["file_attempts"][target] = 0
-                    state["e2e_passed"] = state["integration_passed"] = \
-                        state["tests_passed"] = state["document_generated"] = False
-                    state["max_iters"] += 5
+            elif next_phase == "e2e_review":
+                total_e2e_fails = state.get("phase_total_fails", {}).get("e2e_review", 0)
+                # Предохранитель: после 6+ суммарных E2E отказов — пропускаем к integration_test
+                if total_e2e_fails >= 6:
+                    logger.warning("⚠️  E2E падал 6+ раз суммарно → принудительный APPROVE, переход к integration_test.")
+                    state["e2e_passed"] = True
+                    state["e2e_attempt"] = 0
+                    _reset_phase_fail(state, "e2e_review")
+                elif not phase_cross_file_check(logger, project_path, state):
+                    _bump_phase_fail(state, "cross_file_check")
                     save_state(project_path, state)
-            elif act == "spec":
+                    continue
+                elif not await phase_e2e_review(logger, project_path, state, cache, stats, state["e2e_attempt"], randomize=randomize_models):
+                    fails = _bump_phase_fail(state, "e2e_review")
+                    state["e2e_attempt"] += 1
+                    if fails >= 3 and _can_revise_spec(state, logger):
+                        print("⚠️  E2E падает 3 раза подряд → принудительный revise_spec.")
+                        feedbacks = [
+                            f"  {f}: {state['feedbacks'].get(f, '')[:300]}"
+                            for f in state["files"] if state["feedbacks"].get(f, "")
+                        ]
+                        problem = (
+                            f"E2E Review отклоняет проект {fails} раз подряд.\n"
+                            "Конкретные замечания ревьюеров:\n" + "\n".join(feedbacks)
+                        )
+                        await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                        state["max_iters"] += 5
+                else:
+                    state["e2e_passed"] = True
+                    state["e2e_attempt"] = 0
+                    _reset_phase_fail(state, "e2e_review")
+
+            elif next_phase == "integration_test":
+                total_int_fails = state.get("phase_total_fails", {}).get("integration_test", 0)
+                if total_int_fails >= 8:
+                    logger.warning("⚠️  Integration test падал 8+ раз суммарно → пропускаем к unit_tests.")
+                    state["integration_passed"] = True
+                    _reset_phase_fail(state, "integration_test")
+                elif not await phase_integration_test(logger, project_path, state, cache, stats, randomize=randomize_models):
+                    _bump_phase_fail(state, "integration_test")
+                else:
+                    state["integration_passed"] = True
+                    _reset_phase_fail(state, "integration_test")
+
+            elif next_phase == "unit_tests":
+                total_ut_fails = state.get("phase_total_fails", {}).get("unit_tests", 0)
+                if total_ut_fails >= 6:
+                    logger.warning("⚠️  Unit tests падал 6+ раз суммарно → пропускаем к document.")
+                    state["tests_passed"] = True
+                    _reset_phase_fail(state, "unit_tests")
+                elif not await phase_unit_tests(logger, project_path, state, cache, stats, randomize=randomize_models):
+                    _bump_phase_fail(state, "unit_tests")
+                else:
+                    state["tests_passed"] = True
+                    _reset_phase_fail(state, "unit_tests")
+
+            elif next_phase == "document":
+                await phase_document(logger, project_path, state, cache, randomize=randomize_models)
+                state["document_generated"] = True
+
+            elif next_phase == "revise_spec":
                 if _can_revise_spec(state, logger):
-                    problem = input("Опишите противоречие: ").strip() or "Запрос заказчика"
+                    problem = input_with_timeout(
+                        "Опишите противоречие (или Enter для авто): ", 10,
+                        "Авто-эскалация от Supervisor"
+                    ).strip() or "Авто-эскалация от Supervisor"
                     await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                    state["e2e_passed"] = state["integration_passed"] = \
-                        state["tests_passed"] = state["document_generated"] = False
                     state["max_iters"] += 10
-                    save_state(project_path, state)
-                else:
-                    print("⚠️  Лимит ревизий спецификации исчерпан (3/3).")
-            else:
-                print("✅ Готово. Можно пить кофе ☕")
-                return
 
-        else:
-            logger.warning(f"Неизвестная фаза от Supervisor: '{next_phase}'. Fallback → develop.")
-            exhausted, spec_blocked = await phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
-            if spec_blocked or exhausted:
-                _force_approve_files(state, project_path, spec_blocked + exhausted, "unknown phase fallback", logger)
+            elif next_phase == "success":
+                git_commit(project_path, f"Successful build: iteration {state['iteration']}")
+                print_iteration_table(state)
+                generate_summary(project_path, state)
+
+                src_path = project_path / SRC_DIR
+                print("\n" + "═" * 80)
+                print(f"{'🎉 УСПЕХ! Проект готов (v15.0) 🎉':^80}")
+                print("═" * 80)
+                print(f"📂 Папка проекта : {project_path}")
+                print(f"📦 Исходный код  : {src_path}")
+                print(f"🗄️  Метаданные    : {project_path / FACTORY_DIR}")
+                print(f"🌍 Язык          : {LANG_DISPLAY.get(language, language)}")
+                print(f"🔢 Итераций      : {state['iteration']}")
+                print(f"📄 Файлов        : {len(state['files'])}")
+                print(f"🧪 Unit-тесты + покрытие ≥ {MIN_COVERAGE}%")
+                print(f"🚀 Docker-ready")
+                print("\n📋 Артефакты проекта:")
+                art_dir = project_path / FACTORY_DIR / ARTIFACTS_DIR
+                if art_dir.exists():
+                    for art in sorted(art_dir.iterdir()):
+                        print(f"   {art.name}")
+                print("\n📋 Запуск:")
+                run_cmd = get_execution_command(language, state.get("entry_point", "main.py"))
+                print(f"   docker run --rm -v $(pwd)/src:/app -w /app {get_docker_image(language)} bash -c '{run_cmd}'")
+                print("═" * 80)
+                stats.print_report()
+
+                act = input_with_timeout(
+                    f"\nЧто дальше?\n  Enter — принять\n  r — доработать файл\n  spec — пересмотреть спецификацию\n"
+                    f"👉 [авто через {WAIT_TIMEOUT}с]: ",
+                    WAIT_TIMEOUT, ""
+                ).lower()
+
+                if act == "r":
+                    target   = input("Файл (main.py): ").strip() or state.get("entry_point", "main.py")
+                    feedback = input(f"Правки для {target}: ").strip()
+                    if not feedback:
+                        print("Пустые правки — пропускаю.")
+                    else:
+                        if target not in state["files"]:
+                            state["files"].append(target)
+                            state["feedbacks"][target] = ""
+                        if target in state.get("approved_files", []):
+                            state["approved_files"].remove(target)
+                        state["feedbacks"][target] = f"Требование заказчика: {feedback}"
+                        state["file_attempts"][target] = 0
+                        state["e2e_passed"] = state["integration_passed"] = \
+                            state["tests_passed"] = state["document_generated"] = False
+                        # Сброс phase counters чтобы safety valves не блокировали re-test
+                        state["phase_total_fails"] = {}
+                        state["phase_fail_counts"] = {}
+                        state["max_iters"] += 5
+                        save_state(project_path, state)
+                elif act == "spec":
+                    if _can_revise_spec(state, logger):
+                        problem = input("Опишите противоречие: ").strip() or "Запрос заказчика"
+                        await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
+                        state["e2e_passed"] = state["integration_passed"] = \
+                            state["tests_passed"] = state["document_generated"] = False
+                        state["max_iters"] += 10
+                        save_state(project_path, state)
+                    else:
+                        print("⚠️  Лимит ревизий спецификации исчерпан (3/3).")
+                else:
+                    print("✅ Готово. Можно пить кофе ☕")
+                    return
+
+            else:
+                logger.warning(f"Неизвестная фаза от Supervisor: '{next_phase}'. Fallback → develop.")
+                exhausted, spec_blocked = await phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
+                if spec_blocked or exhausted:
+                    _force_approve_files(state, project_path, spec_blocked + exhausted, "unknown phase fallback", logger)
+        except Exception as _phase_exc:
+            logger.exception(f"💥 Необработанная ошибка в фазе '{next_phase}': {_phase_exc}")
+            save_state(project_path, state)
 
         save_cache(project_path, cache)
         state["iteration"] += 1

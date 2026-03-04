@@ -62,7 +62,10 @@ def get_global_context(
         fpath = src_path / fname
         if not fpath.exists():
             continue
-        api   = extract_public_api(fpath.read_text(encoding="utf-8"))
+        try:
+            api = extract_public_api(fpath.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
         chunk = f"\n--- {fname} PUBLIC API ---\n{api}\n"
         if total + len(chunk) > MAX_CONTEXT_CHARS:
             remaining = MAX_CONTEXT_CHARS - total
@@ -85,7 +88,10 @@ def get_full_context(
         fpath = src_path / fname
         if not fpath.exists():
             continue
-        code = fpath.read_text(encoding="utf-8")
+        try:
+            code = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
         chunk = f"\n--- {fname} ---\n{code}\n"
         if total + len(chunk) > MAX_CONTEXT_CHARS:
             remaining = MAX_CONTEXT_CHARS - total
@@ -187,6 +193,14 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "python-multipart":         "multipart",
     "msgpack-python":           "msgpack",
     "ruamel.yaml":              "ruamel",
+    "pyjwt":                    "jwt",
+    "python-telegram-bot":      "telegram",
+    "psycopg2-binary":          "psycopg2",
+    "google-api-python-client": "googleapiclient",
+    "python-magic":             "magic",
+    "python-pptx":              "pptx",
+    "python-docx":              "docx",
+    "websocket-client":         "websocket",
 }
 
 
@@ -313,6 +327,9 @@ def _get_top_level_names(code: str) -> set[str]:
             for alias in node.names:
                 if alias.name != "*":
                     names.add(alias.asname or alias.name)
+        # Python 3.12+: type X = ... (TypeAlias)
+        elif hasattr(ast, "TypeAlias") and isinstance(node, ast.TypeAlias):
+            names.add(node.name)
     return names
 
 
@@ -351,6 +368,9 @@ def _get_all_bound_names(code: str) -> set[str]:
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 names.add(alias.asname or alias.name)
+        # except SomeError as e → e
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
     return names
 
 
@@ -454,15 +474,19 @@ def validate_imports(
     if src_path:
         current_stem = Path(filename).stem
 
-        def _get_project_imports(file_stem: str) -> set[str]:
-            """Извлекает проектные зависимости из файла."""
-            fp = src_path / (file_stem + ".py")
-            if not fp.exists():
-                return set()
-            try:
-                fc = fp.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                return set()
+        def _get_project_imports(file_stem: str, override_code: str | None = None) -> set[str]:
+            """Извлекает проектные зависимости из файла.
+            override_code — использовать вместо чтения с диска (для текущего файла)."""
+            if override_code is not None:
+                fc = override_code
+            else:
+                fp = src_path / (file_stem + ".py")
+                if not fp.exists():
+                    return set()
+                try:
+                    fc = fp.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    return set()
             fi = re.findall(r"^\s*from\s+(\S+)\s+import", fc, re.MULTILINE)
             di = re.findall(r"^\s*import\s+(\S+)", fc, re.MULTILINE)
             bases: set[str] = set()
@@ -476,8 +500,8 @@ def validate_imports(
                     bases.add(b)
             return bases & project_modules - {file_stem}
 
-        # Строим граф импортов для проектных файлов, доступных текущему файлу
-        my_deps = _get_project_imports(current_stem)
+        # Строим граф импортов — для текущего файла используем code из параметра
+        my_deps = _get_project_imports(current_stem, override_code=code)
         # DFS: ищем путь обратно к current_stem
         visited: set[str] = set()
         stack = [(dep, [current_stem, dep]) for dep in my_deps]

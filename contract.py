@@ -19,6 +19,30 @@ from stats import ModelStats
 # ─────────────────────────────────────────────
 
 
+def _parse_import_line(imp_line: str) -> tuple[str, list[str]] | None:
+    """Парсит строку импорта. Возвращает (source_stem, [imported_names]) или None.
+
+    Поддерживает: 'from X import A', 'from X import A, B', 'from X import A as Z'.
+    """
+    if not isinstance(imp_line, str):
+        return None
+    m = re.match(r"from\s+(\w+)\s+import\s+(.+)", imp_line.strip())
+    if not m:
+        return None
+    source = m.group(1)
+    raw_names = m.group(2)
+    names = []
+    for part in raw_names.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        # 'A as Z' → берём 'A' (оригинальное имя)
+        name = part.split()[0].strip()
+        if name.isidentifier():
+            names.append(name)
+    return (source, names) if names else None
+
+
 def _normalize_file_contracts(contract: dict) -> dict:
     """Нормализация: модель может вернуть file_contracts как list вместо dict."""
     raw_fc = contract.get("file_contracts", {})
@@ -33,6 +57,9 @@ def _normalize_file_contracts(contract: dict) -> dict:
         contract["file_contracts"] = normalized
     raw_gi = contract.get("global_imports", {})
     if isinstance(raw_gi, list):
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            f"⚠️  A5 global_imports вернулся как list (ожидался dict) — сброс в {{}}")
         contract["global_imports"] = {}
     return contract
 
@@ -275,15 +302,11 @@ def _validate_import_consistency(
             continue
         valid: list[str] = []
         for imp_line in imports:
-            if not isinstance(imp_line, str):
+            parsed = _parse_import_line(imp_line)
+            if parsed is None:
                 valid.append(imp_line)
                 continue
-            m = re.match(r"from\s+(\w+)\s+import\s+(\w+)", imp_line.strip())
-            if not m:
-                valid.append(imp_line)
-                continue
-            source_stem = m.group(1)
-            imported_name = m.group(2)
+            source_stem, imported_names = parsed
             # Только cross-file project imports
             if source_stem not in file_stems:
                 valid.append(imp_line)
@@ -292,16 +315,19 @@ def _validate_import_consistency(
             if not defined_names.get(source_stem):
                 valid.append(imp_line)
                 continue
-            # Проверяем наличие имени
-            if imported_name in defined_names[source_stem]:
-                valid.append(imp_line)
-            else:
-                logger.warning(
-                    f"  ⚠️  A5 global_imports: удалён '{imp_line}' для {fname} — "
-                    f"'{imported_name}' не определён в file_contracts "
-                    f"{file_stems[source_stem]} "
-                    f"(доступны: {', '.join(sorted(defined_names[source_stem]))})"
-                )
+            # Проверяем наличие каждого имени
+            valid_names = [n for n in imported_names if n in defined_names[source_stem]]
+            invalid_names = [n for n in imported_names if n not in defined_names[source_stem]]
+            if invalid_names:
+                for inv_name in invalid_names:
+                    logger.warning(
+                        f"  ⚠️  A5 global_imports: удалён '{inv_name}' из '{imp_line}' для {fname} — "
+                        f"не определён в file_contracts {file_stems[source_stem]} "
+                        f"(доступны: {', '.join(sorted(defined_names[source_stem]))})"
+                    )
+            if valid_names:
+                valid.append(f"from {source_stem} import {', '.join(valid_names)}")
+            # Если все имена невалидны — строка не добавляется
         cleaned_gi[fname] = valid
 
     contract["global_imports"] = cleaned_gi
@@ -369,9 +395,14 @@ def _inject_cross_file_imports(
         # Извлекаем уже импортированные имена из строк import
         imported_names = set()
         for imp in existing:
-            m = re.search(r'import\s+(\w+)', imp)
-            if m:
-                imported_names.add(m.group(1))
+            parsed = _parse_import_line(imp)
+            if parsed:
+                imported_names.update(parsed[1])
+            else:
+                # Fallback для 'import X'
+                m = re.search(r'import\s+(\w+)', imp)
+                if m:
+                    imported_names.add(m.group(1))
 
         for class_name, source_file in needed_imports.items():
             source_stem = Path(source_file).stem
@@ -415,16 +446,14 @@ def _detect_and_fix_circular_imports(
         graph.setdefault(stem, set())
         import_details.setdefault(stem, [])
         for imp_line in imports:
-            if not isinstance(imp_line, str):
+            parsed = _parse_import_line(imp_line)
+            if not parsed:
                 continue
-            m = re.match(r"from\s+(\w+)\s+import\s+(\w+)", imp_line.strip())
-            if not m:
-                continue
-            src_stem = m.group(1)
-            name = m.group(2)
+            src_stem, names = parsed
             if src_stem in project_stems and src_stem != stem:
                 graph[stem].add(src_stem)
-                import_details[stem].append((src_stem, name))
+                for name in names:
+                    import_details[stem].append((src_stem, name))
 
     # 2. Поиск циклов через DFS (color-based)
     WHITE, GRAY, BLACK = 0, 1, 2
@@ -512,24 +541,42 @@ def _detect_and_fix_circular_imports(
                 moved += 1
                 break
         # Обновляем global_imports: from source_stem import Class → from models import Class
-        old_pattern = f"from {source_stem} import {class_name}"
         new_import = f"from {models_stem} import {class_name}"
         for fkey, imp_list in gi.items():
             if not isinstance(imp_list, list):
                 continue
             for idx, imp_line in enumerate(imp_list):
-                if isinstance(imp_line, str) and old_pattern in imp_line:
-                    gi[fkey][idx] = new_import
+                parsed = _parse_import_line(imp_line)
+                if not parsed:
+                    continue
+                imp_src, imp_names = parsed
+                if imp_src != source_stem or class_name not in imp_names:
+                    continue
+                # Убираем class_name из текущей строки
+                remaining = [n for n in imp_names if n != class_name]
+                if remaining:
+                    gi[fkey][idx] = f"from {imp_src} import {', '.join(remaining)}"
+                else:
+                    gi[fkey][idx] = ""  # Пометка для удаления
+                # Добавляем новый import из models
+                if new_import not in gi[fkey]:
+                    gi[fkey].append(new_import)
+                break
+            # Чистим пустые строки
+            gi[fkey] = [imp for imp in gi[fkey] if imp]
 
-    # 7. models.py — data-only: удаляем любые cross-file imports из него
+    # 7. models.py — data-only: удаляем только PROJECT-file imports (не stdlib/pip)
     models_imports = gi.get(models_file, [])
     if isinstance(models_imports, list):
-        clean = [
-            imp for imp in models_imports
-            if not isinstance(imp, str)
-            or not re.match(r"from\s+(\w+)\s+import", imp.strip())
-            or re.match(r"from\s+(\w+)\s+import", imp.strip()).group(1) not in project_stems
-        ]
+        # stems без самого models
+        other_project_stems = project_stems - {models_stem}
+        clean = []
+        for imp in models_imports:
+            parsed = _parse_import_line(imp)
+            if parsed and parsed[0] in other_project_stems:
+                logger.info(f"  🗑️  Удалён project import из {models_file}: {imp}")
+                continue
+            clean.append(imp)
         gi[models_file] = clean
 
     logger.info(
@@ -614,12 +661,14 @@ async def _validate_and_patch_contract(
 
     contract["file_contracts"] = fc
     contract["global_imports"]  = gi
-    # Post-validation: удаляем фантомные импорты, которые мог добавить LLM при патче
+    # Post-validation: полный набор валидаций
     contract = _validate_global_imports(
         contract, state.get("architecture", {}), files, logger,
         requirements_path=req_path if req_path.exists() else None,
     )
     contract = _validate_import_consistency(contract, logger)
+    contract = _inject_cross_file_imports(contract, logger)
+    contract = _detect_and_fix_circular_imports(contract, files, logger)
     return contract
 
 
@@ -682,13 +731,16 @@ async def patch_contract_for_file(
             gi[filename] = _parse_if_str(file_imports, list, [])
             contract["file_contracts"] = fc
             contract["global_imports"] = gi
-            # Post-validation: удаляем фантомные импорты после патча
+            # Post-validation: полный набор валидаций как в phase_generate_api_contract
+            files_list = state.get("files", [])
             contract = _validate_global_imports(
                 contract, state.get("architecture", {}),
-                state.get("files", []), logger,
+                files_list, logger,
                 requirements_path=req_path if req_path.exists() else None,
             )
             contract = _validate_import_consistency(contract, logger)
+            contract = _inject_cross_file_imports(contract, logger)
+            contract = _detect_and_fix_circular_imports(contract, files_list, logger)
             state["api_contract"] = contract
             save_artifact(project_path, "A5", contract)
             stats.record("contract_analyst", get_model("contract_analyst"), True)
@@ -866,16 +918,28 @@ async def _refresh_api_contract(
         )
         req_path = project_path / "src" / "requirements.txt"
         new_contract = _validate_global_imports(
-            new_contract, {},  # arch_resp недоступен после каскада
+            new_contract, state.get("architecture", {}),
             files_list, logger,
             requirements_path=req_path if req_path.exists() else None,
         )
         new_contract = _validate_import_consistency(new_contract, logger)
         new_contract = _inject_cross_file_imports(new_contract, logger)
         new_contract = _detect_and_fix_circular_imports(new_contract, files_list, logger)
-        # Sync: feedbacks для новых файлов (models.py и т.п.)
-        for f in files_list:
+        # Sync: добавляем новые файлы, удаляем призраки
+        a5_files = set(new_contract.get("file_contracts", {}).keys())
+        for f in a5_files:
+            if f not in files_list:
+                files_list.append(f)
             state.setdefault("feedbacks", {}).setdefault(f, "")
+        for f in list(files_list):
+            if f not in a5_files:
+                logger.info(f"  🗑️  Удалён файл-призрак: {f} (нет в новом A5)")
+                files_list.remove(f)
+                state.get("feedbacks", {}).pop(f, None)
+                if f in state.get("approved_files", []):
+                    state["approved_files"].remove(f)
+                state.get("file_attempts", {}).pop(f, None)
+                state.get("cumulative_file_attempts", {}).pop(f, None)
         state["api_contract"] = new_contract
         save_artifact(project_path, "A5", new_contract)
         logger.info("✅ A5 обновлён каскадно.")

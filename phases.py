@@ -343,13 +343,15 @@ def _check_function_preservation(
     if not disappeared:
         return []
 
-    # Имена, ожидаемые текущим A5 контрактом
+    # Имена, ожидаемые текущим A5 контрактом (может быть под ключами name/class/function)
     contract_names: set[str] = set()
     if file_contract:
         for item in file_contract:
-            n = item.get("name", "")
-            if n:
-                contract_names.add(n)
+            if isinstance(item, dict):
+                for key in ("name", "class", "function"):
+                    n = item.get(key, "")
+                    if n:
+                        contract_names.add(n)
 
     # Фильтруем: имена упомянутые в feedback + приватные + не в текущем A5
     feedback_lower = feedback.lower() if feedback else ""
@@ -386,7 +388,8 @@ def _check_contract_compliance(code: str, file_contract: list) -> list[str]:
                 missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь определение класса {class_name}")
         elif sig.startswith("def ") or sig.startswith("async def "):
             func_name = name or sig.split("def ", 1)[1].split("(")[0].strip()
-            if not re.search(rf'^(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code, re.MULTILINE):
+            # Ищем как top-level функцию (^def) так и метод класса (с отступом)
+            if not re.search(rf'(?:^|\n)\s*(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code):
                 missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь эту функцию ИМЕННО с таким именем")
     return missing
 
@@ -669,7 +672,10 @@ async def phase_develop(
         global_imports = _safe_contract(state).get("global_imports", {}).get(current_file, [])
 
         # Патч A5 после 3+ неудачных попыток — контракт может не соответствовать реальности
-        if attempt >= 3 and file_contract and existing_code:
+        # Лимит: не более 2 патч-ресетов на файл (чтобы не откладывать force-approve бесконечно)
+        a5_patch_counts: dict = state.setdefault("_a5_patch_counts", {})
+        patches_done = a5_patch_counts.get(current_file, 0)
+        if attempt >= 3 and file_contract and existing_code and patches_done < 2:
             last_feedback = state.get("feedbacks", {}).get(current_file, "")
             if last_feedback:
                 patched = await patch_contract_for_file(
@@ -677,12 +683,13 @@ async def phase_develop(
                     current_file, existing_code, last_feedback, randomize,
                 )
                 if patched:
+                    a5_patch_counts[current_file] = patches_done + 1
                     file_contract  = _safe_contract(state).get("file_contracts", {}).get(current_file, [])
                     global_imports = _safe_contract(state).get("global_imports", {}).get(current_file, [])
                     # Сброс попыток после патча A5 — дать developer шанс с новым контрактом
                     file_attempts[current_file] = 0
                     attempt = 0
-                    logger.info(f"🔄 A5 для {current_file} обновлён → счётчик попыток сброшен.")
+                    logger.info(f"🔄 A5 для {current_file} обновлён (патч {patches_done + 1}/2) → счётчик попыток сброшен.")
 
         dev_ctx = (
             f"Задача:\n{state['task']}\n\n"
@@ -708,8 +715,9 @@ async def phase_develop(
                 "  - Используй dataclass или обычный class с __init__\n"
                 "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
                 "  - Импортировать из ДРУГИХ ФАЙЛОВ ПРОЕКТА (from event_generator import X и т.п.)\n"
-                "  - Определять функции с бизнес-логикой (load_model, process_frame и т.п.)\n"
+                "  - Определять PUBLIC top-level функции (load_model, process_frame и т.п.)\n"
                 "  - Допускаются ТОЛЬКО: stdlib импорты (dataclasses, typing, enum, datetime)\n"
+                "  - Приватные хелперы (_validate_field и т.п.) допустимы\n"
                 "Другие модули будут импортировать классы ОТСЮДА.\n\n"
             )
 
@@ -955,7 +963,23 @@ async def phase_develop(
         )
         if sr_status == "NEEDS_IMPROVEMENT":
             # Перечитываем файл — self-reflect мог записать улучшенный код
-            code = file_path.read_text(encoding="utf-8")
+            new_code = file_path.read_text(encoding="utf-8")
+            # Повторяем ключевые проверки на улучшенном коде
+            _sr_ok = True
+            for _sr_check_name, _sr_warnings in [
+                ("data_only", _check_data_only_violations(new_code, current_file, state["files"])),
+                ("imports", validate_imports(new_code, current_file, state["files"],
+                                            req_path if req_path.exists() else None, language, src_path)),
+                ("stubs", _check_stub_functions(new_code)),
+                ("contract", _check_contract_compliance(new_code, file_contract)),
+            ]:
+                if _sr_warnings:
+                    logger.warning(f"  ⚠️  Self-reflect ввёл ошибки ({_sr_check_name}) → откат")
+                    file_path.write_text(code, encoding="utf-8")  # откат к оригиналу
+                    _sr_ok = False
+                    break
+            if _sr_ok:
+                code = new_code
 
         # Внешний ревью
         rev_status, rev_feedback, needs_spec = await _review_file(
