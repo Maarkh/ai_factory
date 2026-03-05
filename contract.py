@@ -34,8 +34,9 @@ def _auto_add_requirement(requirements_path: Path, package_name: str, logger: lo
         if line_pkg.replace("-", "_") == pkg_lower.replace("-", "_"):
             return  # Уже есть
     # Добавляем
-    sep = "\n" if content.endswith("\n") else "\n"
-    requirements_path.write_text(content + sep + package_name + "\n", encoding="utf-8")
+    if not content.endswith("\n"):
+        content += "\n"
+    requirements_path.write_text(content + package_name + "\n", encoding="utf-8")
     logger.info(f"  📦  Авто-добавлен '{package_name}' в requirements.txt")
 
 
@@ -46,7 +47,7 @@ def _parse_import_line(imp_line: str) -> tuple[str, list[str]] | None:
     """
     if not isinstance(imp_line, str):
         return None
-    m = re.match(r"from\s+(\w+)\s+import\s+(.+)", imp_line.strip())
+    m = re.match(r"from\s+([\w.]+)\s+import\s+(.+)", imp_line.strip())
     if not m:
         return None
     source = m.group(1)
@@ -855,9 +856,9 @@ async def _validate_and_patch_contract(
         requirements_path=req_path if req_path.exists() else None,
     )
     contract = _inject_signature_type_imports(contract, logger)
-    contract = _validate_import_consistency(contract, logger)
     contract = _sanitize_implementation_hints(contract, logger)
     contract = _inject_cross_file_imports(contract, logger)
+    contract = _validate_import_consistency(contract, logger)
     contract = _detect_and_fix_circular_imports(contract, files, logger)
     return contract
 
@@ -1052,12 +1053,13 @@ async def phase_generate_api_contract(
             requirements_path=req_path if req_path.exists() else None,
         )
         contract = _inject_signature_type_imports(contract, logger)
-        # Детерминистская валидация: cross-file imports ссылаются на реальные имена
-        contract = _validate_import_consistency(contract, logger)
         # Санитизация: implementation_hints не ссылаются на несуществующие имена
         contract = _sanitize_implementation_hints(contract, logger)
         # Детерминистская инъекция: межфайловые импорты (data models и т.п.)
         contract = _inject_cross_file_imports(contract, logger)
+        # Детерминистская валидация: cross-file imports ссылаются на реальные имена
+        # (ПОСЛЕ inject, чтобы проверить и свежедобавленные импорты)
+        contract = _validate_import_consistency(contract, logger)
         # Детерминистская проверка: циклические зависимости → вынос в models.py
         contract = _detect_and_fix_circular_imports(contract, files_list, logger)
         save_artifact(project_path, "A5", contract)
@@ -1118,9 +1120,9 @@ async def _refresh_api_contract(
             requirements_path=req_path if req_path.exists() else None,
         )
         new_contract = _inject_signature_type_imports(new_contract, logger)
-        new_contract = _validate_import_consistency(new_contract, logger)
         new_contract = _sanitize_implementation_hints(new_contract, logger)
         new_contract = _inject_cross_file_imports(new_contract, logger)
+        new_contract = _validate_import_consistency(new_contract, logger)
         new_contract = _detect_and_fix_circular_imports(new_contract, files_list, logger)
         # Sync: добавляем новые файлы, удаляем призраки
         a5_files = set(new_contract.get("file_contracts", {}).keys())

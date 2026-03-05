@@ -152,7 +152,7 @@ def _check_class_duplication(code: str, global_context: str, file_contract: list
         return []
     return [
         f"{name} уже определён в {name_to_file[name]} — "
-        f"используй `from {name_to_file[name].removesuffix('.py')} import {name}`"
+        f"используй импорт из {name_to_file[name]} вместо переопределения"
         for name in sorted(duplicates)
     ]
 
@@ -477,7 +477,7 @@ def _check_contract_compliance(code: str, file_contract: list) -> list[str]:
         elif sig.startswith("def ") or sig.startswith("async def "):
             func_name = name or sig.split("def ", 1)[1].split("(")[0].strip()
             # Ищем как top-level функцию (^def) так и метод класса (с отступом)
-            if not re.search(rf'(?:^|\n)\s*(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code):
+            if not re.search(rf'^\s*(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code, re.MULTILINE):
                 missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь эту функцию ИМЕННО с таким именем")
     return missing
 
@@ -799,22 +799,22 @@ async def phase_develop(
             dev_ctx += (
                 "⚠️ ЭТОТ ФАЙЛ — ТОЧКА ВХОДА ПРИЛОЖЕНИЯ.\n"
                 "НЕ определяй здесь бизнес-классы — они в других файлах, ИМПОРТИРУЙ их.\n"
-                "Содержимое: импорты + инициализация + запуск + if __name__ == '__main__'.\n\n"
+                "Содержимое: импорты + инициализация + запуск (идиоматичная точка входа для целевого языка).\n\n"
             )
 
         # Специальная инструкция для data-only файлов (models.py, data_models.py)
         if Path(current_file).stem in ("models", "data_models"):
             dev_ctx += (
-                "⚠️ ЭТОТ ФАЙЛ — ХРАНИЛИЩЕ DATA CLASSES (data-only).\n"
+                "⚠️ ЭТОТ ФАЙЛ — ХРАНИЛИЩЕ DATA STRUCTURES (data-only).\n"
                 "ОБЯЗАТЕЛЬНО:\n"
-                "  - Определи ЗДЕСЬ ВСЕ классы из контракта ниже (Vehicle, Event и т.д.)\n"
-                "  - Используй dataclass или обычный class с __init__\n"
+                "  - Определи ЗДЕСЬ ВСЕ классы/структуры из контракта ниже\n"
+                "  - Используй идиоматичные структуры данных для целевого языка\n"
                 "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
-                "  - Импортировать из ДРУГИХ ФАЙЛОВ ПРОЕКТА (from event_generator import X и т.п.)\n"
-                "  - Определять PUBLIC top-level функции (load_model, process_frame и т.п.)\n"
-                "  - Допускаются ТОЛЬКО: stdlib импорты (dataclasses, typing, enum, datetime)\n"
-                "  - Приватные хелперы (_validate_field и т.п.) допустимы\n"
-                "Другие модули будут импортировать классы ОТСЮДА.\n\n"
+                "  - Импортировать из ДРУГИХ ФАЙЛОВ ПРОЕКТА\n"
+                "  - Определять PUBLIC top-level функции\n"
+                "  - Допускаются ТОЛЬКО: stdlib импорты\n"
+                "  - Приватные хелперы допустимы\n"
+                "Другие модули будут импортировать структуры ОТСЮДА.\n\n"
             )
 
         # Добавляем A5 если он есть
@@ -959,7 +959,7 @@ async def phase_develop(
             data_only_feedback = (
                 "АВТОМАТИЧЕСКИЙ REJECT — нарушение правил data-only файла:\n"
                 + "\n".join(f"  - {w}" for w in data_only_warnings)
-                + f"\n\n{current_file} — это файл для ХРАНЕНИЯ data classes (Vehicle, Event и т.д.).\n"
+                + f"\n\n{current_file} — это файл для ХРАНЕНИЯ data structures.\n"
                 "Он НЕ ДОЛЖЕН импортировать из других файлов проекта.\n"
                 "Он НЕ ДОЛЖЕН содержать бизнес-логику (функции).\n"
                 "Другие файлы импортируют ОТСЮДА, а не наоборот."
@@ -1220,7 +1220,7 @@ async def phase_e2e_review(
         else:
             # Находим зависимые файлы (импортирующие target_files)
             gi = _safe_contract(state).get("global_imports", {})
-            target_stems = {t.removesuffix(".py") for t in target_files}
+            target_stems = {Path(t).stem for t in target_files}
             dependent_files = set()
             for f in state["files"]:
                 if f in target_files:
@@ -1421,7 +1421,7 @@ async def phase_integration_test(
         if env_fixes.get("system_packages"):
             cmd = "apt-get update -q && apt-get install -y " + " ".join(env_fixes["system_packages"]) + " && " + cmd
         if language == "python":
-            for orig, alt in env_fixes.get("pip_alternatives", {}).items():
+            for orig, alt in (env_fixes.get("package_alternatives") or env_fixes.get("pip_alternatives") or {}).items():
                 update_requirements(src_path, orig, alt)
 
         rc, stdout, stderr = run_in_docker(src_path, cmd, RUN_TIMEOUT, language)

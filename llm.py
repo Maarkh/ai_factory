@@ -87,8 +87,8 @@ async def ask_agent(
                 raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json_object)")
             raw    = response.choices[0].message.content
             result = json.loads(raw)
-            if not isinstance(result, dict):
-                raise ValueError(f"Ожидался dict, получен {type(result).__name__}")
+            if not isinstance(result, dict) or not result:
+                raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__} (len={len(result) if isinstance(result, dict) else 'N/A'})")
             log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
             if cache_key is not None:
                 cache[cache_key] = result
@@ -106,8 +106,8 @@ async def ask_agent(
                     raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
                 raw    = response.choices[0].message.content
                 result = _extract_json_from_text(raw)
-                if not isinstance(result, dict):
-                    raise ValueError(f"Ожидался dict, получен {type(result).__name__}")
+                if not isinstance(result, dict) or not result:
+                    raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__}")
                 log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
                 if cache_key is not None:
                     cache[cache_key] = result

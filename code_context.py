@@ -201,20 +201,40 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "python-pptx":              "pptx",
     "python-docx":              "docx",
     "websocket-client":         "websocket",
+    "pyserial":                 "serial",
+    "python-rapidjson":         "rapidjson",
+    "python-snappy":            "snappy",
+    "python-ldap":              "ldap",
+    "python-Levenshtein":       "Levenshtein",
+    "mysql-connector-python":   "mysql",
+    "mysqlclient":              "MySQLdb",
+    "cx-Oracle":                "cx_Oracle",
+    "grpcio":                   "grpc",
+    "grpcio-tools":             "grpc_tools",
+    "Twisted":                  "twisted",
+    "Pygments":                 "pygments",
+    "Faker":                    "faker",
+    "Cython":                   "cython",
 }
 
 # Известные транзитивные зависимости: пакет из requirements.txt → {import-имена}
 # Если tensorflow в requirements.txt → numpy, keras, h5py тоже валидные импорты
 _KNOWN_TRANSITIVE_DEPS: dict[str, set[str]] = {
-    "tensorflow":    {"numpy", "keras", "h5py", "absl", "google"},
-    "opencv_python": {"numpy"},
-    "scipy":         {"numpy"},
-    "pandas":        {"numpy"},
-    "scikit_learn":  {"numpy", "scipy", "joblib"},
-    "torch":         {"numpy"},
-    "torchvision":   {"numpy", "torch"},
-    "matplotlib":    {"numpy"},
-    "seaborn":       {"numpy", "matplotlib"},
+    "tensorflow":              {"numpy", "keras", "h5py", "absl", "google"},
+    "tensorflow_gpu":          {"numpy", "keras", "h5py", "absl", "google"},
+    "opencv_python":           {"numpy"},
+    "opencv_python_headless":  {"numpy"},
+    "opencv_contrib_python":   {"numpy"},
+    "opencv_contrib_python_headless": {"numpy"},
+    "scipy":                   {"numpy"},
+    "pandas":                  {"numpy"},
+    "scikit_learn":            {"numpy", "scipy", "joblib"},
+    "torch":                   {"numpy"},
+    "torchvision":             {"numpy", "torch"},
+    "matplotlib":              {"numpy"},
+    "seaborn":                 {"numpy", "matplotlib"},
+    "jax":                     {"numpy", "jaxlib"},
+    "xgboost":                 {"numpy", "scipy"},
 }
 
 
@@ -422,7 +442,13 @@ def validate_imports(
 
     # Парсим импорты из кода
     from_imports = re.findall(r"^\s*from\s+(\S+)\s+import", code, re.MULTILINE)
-    direct_imports = [imp.rstrip(",") for imp in re.findall(r"^\s*import\s+(\S+)", code, re.MULTILINE)]
+    # Ловим все модули из "import X" и "import X, Y, Z"
+    direct_imports = []
+    for imp_line in re.findall(r"^\s*import\s+(.+)$", code, re.MULTILINE):
+        for part in imp_line.split(","):
+            mod = part.strip().split()[0].split(".")[0] if part.strip() else ""
+            if mod:
+                direct_imports.append(mod)
 
     seen: set[str] = set()
     for imp in from_imports + direct_imports:
@@ -497,7 +523,11 @@ def validate_imports(
             if override_code is not None:
                 fc = override_code
             else:
-                fp = src_path / (file_stem + ".py")
+                stem_to_file = {Path(f).stem: f for f in project_files}
+                target_fname = stem_to_file.get(file_stem)
+                if not target_fname:
+                    return set()
+                fp = src_path / target_fname
                 if not fp.exists():
                     return set()
                 try:
@@ -615,7 +645,7 @@ def validate_cross_file_names(
     except SyntaxError:
         return []
 
-    project_stems = {f.removesuffix(".py"): f for f in project_files}
+    project_stems = {Path(f).stem: f for f in project_files}
     warnings: list[str] = []
     # Кэш прочитанных файлов: stem → (top_level_names, code) | None
     _cache: dict[str, tuple[set[str], str] | None] = {}
@@ -782,7 +812,6 @@ _PYTHON_BUILTINS = {
     "OSError", "NotImplementedError", "NameError", "ZeroDivisionError",
     "ConnectionError", "TimeoutError", "PermissionError", "UnicodeDecodeError",
     "SystemExit", "KeyboardInterrupt", "GeneratorExit",
-    "Optional", "List", "Dict", "Set", "Tuple", "Any", "Union", "Callable",
 }
 
 
@@ -799,7 +828,7 @@ def validate_project_consistency(
     Возвращает dict[filename → list[warnings]]. Пустой dict = всё ОК.
     """
     # 1. Строим таблицу символов проекта
-    project_stems = {f.removesuffix(".py"): f for f in project_files}
+    project_stems = {Path(f).stem: f for f in project_files}
     symbol_table: dict[str, set[str]] = {}  # stem → top-level names
     file_codes: dict[str, str] = {}  # filename → code
 
@@ -812,7 +841,7 @@ def validate_project_consistency(
         except (OSError, UnicodeDecodeError):
             continue
         file_codes[fname] = code
-        stem = fname.removesuffix(".py")
+        stem = Path(fname).stem
         symbol_table[stem] = _get_top_level_names(code)
 
     issues: dict[str, list[str]] = {}
@@ -825,7 +854,7 @@ def validate_project_consistency(
             continue
 
         file_warnings: list[str] = []
-        file_stem = fname.removesuffix(".py")
+        file_stem = Path(fname).stem
 
         # 2a. Проверяем from X import Y
         for node in ast.walk(tree):
@@ -891,7 +920,7 @@ def validate_project_consistency(
             if found_in:
                 file_warnings.append(
                     f"type annotation '{name}' не импортирован в {fname}. "
-                    f"Определён в {found_in} — добавь: from {found_in.removesuffix('.py')} import {name}"
+                    f"Определён в {found_in} — добавь импорт {name} из {Path(found_in).stem}"
                 )
 
         if file_warnings:
