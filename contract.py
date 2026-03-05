@@ -621,6 +621,139 @@ def _inject_cross_file_imports(
     return contract
 
 
+# Встроенные типы Python + частые неклассовые имена — не нужно определять
+_BUILTIN_TYPES = {
+    "int", "float", "str", "bool", "bytes", "None", "object", "type",
+    "list", "dict", "set", "tuple", "frozenset", "complex", "bytearray",
+    "memoryview", "range", "slice", "property", "classmethod", "staticmethod",
+    "Exception", "ValueError", "TypeError", "KeyError", "IndexError",
+    "RuntimeError", "IOError", "OSError", "FileNotFoundError",
+    "AttributeError", "ImportError", "StopIteration", "NotImplementedError",
+}
+
+
+def _validate_signature_types(
+    contract: dict,
+    files: list[str],
+    logger: logging.Logger,
+) -> dict:
+    """Проверяет что все типы (CamelCase) в сигнатурах A5 определены в file_contracts.
+
+    Если тип не определён нигде → создаёт запись class в models.py.
+    Также очищает called_by от ссылок на несуществующие классы.
+    """
+    fc = contract.get("file_contracts", {})
+    gi = contract.setdefault("global_imports", {})
+
+    # 1. Собираем все определённые классы: name → file
+    defined_classes: dict[str, str] = {}
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sig = item.get("signature", "")
+            if sig.strip().startswith("class "):
+                defined_classes[item.get("name", "")] = fname
+
+    # 2. Сканируем все сигнатуры на CamelCase типы
+    undefined_types: dict[str, set[str]] = {}  # type_name → set of files that use it
+    _skip = set(_TYPING_TYPES) | _BUILTIN_TYPES | set(defined_classes)
+    _skip |= set(_PREFIX_IMPORTS)  # np, pd, tf и т.д. — не типы
+
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sig = item.get("signature", "")
+            if sig.strip().startswith("class "):
+                continue
+            # Извлекаем CamelCase слова (начинаются с заглавной, ≥2 символа)
+            for m in re.finditer(r'\b([A-Z][a-zA-Z0-9]+)\b', sig):
+                type_name = m.group(1)
+                if type_name not in _skip:
+                    undefined_types.setdefault(type_name, set()).add(fname)
+
+    if not undefined_types:
+        return contract
+
+    # 3. Создаём undefined типы в models.py
+    ext = Path(files[0]).suffix if files else ".py"
+    models_file = None
+    for f in files:
+        if Path(f).stem in ("models", "data_models"):
+            models_file = f
+            break
+    if models_file is None:
+        models_file = f"models{ext}"
+        if models_file not in files:
+            files.append(models_file)
+        fc.setdefault(models_file, [])
+        gi.setdefault(models_file, [])
+        logger.info(f"  📋 A5: создан файл {models_file} для undefined типов из сигнатур")
+
+    existing_names = {
+        item.get("name", "")
+        for item in fc.get(models_file, [])
+        if isinstance(item, dict)
+    }
+
+    for type_name, used_in_files in undefined_types.items():
+        if type_name in existing_names:
+            continue
+        entry = {
+            "name": type_name,
+            "signature": f"class {type_name}",
+            "description": f"Data class для типа {type_name} (авто-создан — тип используется в сигнатурах, но не определён)",
+            "required": True,
+            "called_by": [],
+        }
+        fc.setdefault(models_file, []).append(entry)
+        existing_names.add(type_name)
+        logger.warning(
+            f"  ⚠️  A5: тип '{type_name}' используется в сигнатурах ({', '.join(sorted(used_in_files))}), "
+            f"но не определён → добавлен как класс в {models_file}"
+        )
+
+    # 4. Очищаем called_by от ссылок на несуществующие классы
+    all_names = set()
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                all_names.add(item.get("name", ""))
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            called_by = item.get("called_by", [])
+            if not isinstance(called_by, list):
+                continue
+            cleaned = []
+            for ref in called_by:
+                if not isinstance(ref, str):
+                    cleaned.append(ref)
+                    continue
+                # "ClassName.method" → проверяем ClassName
+                parts = ref.split(".")
+                if len(parts) >= 2 and parts[0] not in all_names:
+                    logger.warning(
+                        f"  ⚠️  A5: called_by '{ref}' для {item.get('name', '?')} в {fname} — "
+                        f"класс '{parts[0]}' не определён в контракте → удалён"
+                    )
+                    continue
+                cleaned.append(ref)
+            item["called_by"] = cleaned
+
+    return contract
+
+
 def _detect_and_fix_circular_imports(
     contract: dict,
     files: list[str],
@@ -873,6 +1006,7 @@ async def _validate_and_patch_contract(
     contract = _inject_signature_type_imports(contract, logger)
     contract = _sanitize_implementation_hints(contract, logger)
     contract = _inject_cross_file_imports(contract, logger)
+    contract = _validate_signature_types(contract, files, logger)
     contract = _validate_import_consistency(contract, logger)
     contract = _detect_and_fix_circular_imports(contract, files, logger)
     return contract
@@ -948,6 +1082,7 @@ async def patch_contract_for_file(
             contract = _validate_import_consistency(contract, logger)
             contract = _sanitize_implementation_hints(contract, logger)
             contract = _inject_cross_file_imports(contract, logger)
+            contract = _validate_signature_types(contract, files_list, logger)
             contract = _detect_and_fix_circular_imports(contract, files_list, logger)
             state["api_contract"] = contract
             save_artifact(project_path, "A5", contract)
@@ -1072,6 +1207,8 @@ async def phase_generate_api_contract(
         contract = _sanitize_implementation_hints(contract, logger)
         # Детерминистская инъекция: межфайловые импорты (data models и т.п.)
         contract = _inject_cross_file_imports(contract, logger)
+        # Проверка: все типы из сигнатур определены (иначе → models.py)
+        contract = _validate_signature_types(contract, files_list, logger)
         # Детерминистская валидация: cross-file imports ссылаются на реальные имена
         # (ПОСЛЕ inject, чтобы проверить и свежедобавленные импорты)
         contract = _validate_import_consistency(contract, logger)
@@ -1137,6 +1274,7 @@ async def _refresh_api_contract(
         new_contract = _inject_signature_type_imports(new_contract, logger)
         new_contract = _sanitize_implementation_hints(new_contract, logger)
         new_contract = _inject_cross_file_imports(new_contract, logger)
+        new_contract = _validate_signature_types(new_contract, files_list, logger)
         new_contract = _validate_import_consistency(new_contract, logger)
         new_contract = _detect_and_fix_circular_imports(new_contract, files_list, logger)
         # Sync: добавляем новые файлы, удаляем призраки
