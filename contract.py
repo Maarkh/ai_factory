@@ -106,6 +106,12 @@ def _validate_data_model_coverage(
     if not model_names:
         return []
     # Ищем покрытие в file_contracts A5
+    # CamelCase-версии имён моделей для нечувствительного к регистру сравнения
+    camel_to_original: dict[str, str] = {}
+    for mn in model_names:
+        camel = "".join(part.capitalize() for part in mn.split("_"))
+        camel_to_original[camel.lower()] = mn  # Camera→camera, Vehicle→vehicle
+
     defined_names: set[str] = set()
     for fname, items in contract.get("file_contracts", {}).items():
         if not isinstance(items, list):
@@ -115,11 +121,14 @@ def _validate_data_model_coverage(
                 continue
             item_name = item.get("name", "")
             sig = item.get("signature", "")
-            # Совпадение по name или по "class ModelName" в signature
+            # Совпадение по name (точное ИЛИ CamelCase) или по "class ..." в signature
             if item_name in model_names:
                 defined_names.add(item_name)
+            elif item_name.lower() in camel_to_original:
+                defined_names.add(camel_to_original[item_name.lower()])
             for mn in model_names:
-                if f"class {mn}" in sig:
+                camel = "".join(part.capitalize() for part in mn.split("_"))
+                if f"class {mn}" in sig or f"class {camel}" in sig:
                     defined_names.add(mn)
     missing = sorted(model_names - defined_names)
     if missing:
@@ -181,15 +190,17 @@ def _inject_missing_data_models(
             if field_names:
                 field_desc = f" Поля: {', '.join(field_names)}."
 
+        # CamelCase для имён классов: camera → Camera, license_plate → LicensePlate
+        class_name = "".join(part.capitalize() for part in model_name.split("_"))
         entry = {
-            "name": model_name,
-            "signature": f"class {model_name}",
+            "name": class_name,
+            "signature": f"class {class_name}",
             "description": f"Data model из A2.{field_desc}",
             "required": True,
             "called_by": [],
         }
         fc.setdefault(target_file, []).append(entry)
-        logger.info(f"  📋 A5: добавлен класс {model_name} в контракт файла {target_file} (из data_models A2)")
+        logger.info(f"  📋 A5: добавлен класс {class_name} в контракт файла {target_file} (из data_models A2: '{model_name}')")
 
     return contract
 
@@ -240,7 +251,11 @@ def _validate_global_imports(
             # Извлекаем базовый модуль: from X import Y → X; import X → X
             m = re.match(r"(?:from\s+(\S+)\s+import|import\s+(\S+))", imp_line.strip())
             if not m:
-                valid_imports.append(imp_line)
+                # Bare name без import/from — мусор от LLM, удаляем
+                logger.warning(
+                    f"  ⚠️  A5 global_imports: удалён '{imp_line}' для {fname} "
+                    f"(не является валидным import-выражением)"
+                )
                 continue
             base_module = (m.group(1) or m.group(2)).split(".")[0]
 
