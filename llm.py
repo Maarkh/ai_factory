@@ -6,7 +6,7 @@ from typing import Optional
 import openai
 from openai import AsyncOpenAI
 
-from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS
+from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_NUM_CTX
 from cache import ThreadSafeCache, _cache_key
 from exceptions import LLMError
 from log_utils import get_model, log_model_choice, log_interaction
@@ -83,6 +83,7 @@ async def ask_agent(
                 temperature=temperature,
                 max_tokens=LLM_MAX_TOKENS,
                 response_format={"type": "json_object"},
+                extra_body={"num_ctx": LLM_NUM_CTX},
             )
             if not response.choices or response.choices[0].message.content is None:
                 raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json_object)")
@@ -105,6 +106,7 @@ async def ask_agent(
                     messages=messages,
                     temperature=temperature,
                     max_tokens=LLM_MAX_TOKENS,
+                    extra_body={"num_ctx": LLM_NUM_CTX},
                 )
                 if not response.choices or response.choices[0].message.content is None:
                     raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
