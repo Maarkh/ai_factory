@@ -162,6 +162,7 @@ def _inject_missing_data_models(
         dm.get("name", ""): dm
         for dm in system_specs.get("data_models", [])
         if isinstance(dm, dict) and dm.get("name")
+        and dm["name"].isidentifier() and dm["name"].isascii()
     }
 
     for model_name in missing:
@@ -274,8 +275,23 @@ def _validate_global_imports(
             if base_lower in pip_names or base_normalized in pip_names:
                 valid_imports.append(imp_line)
                 continue
-            # Пакет не найден в requirements.txt → авто-добавляем
-            # (LLM-сгенерированный A5 контракт — пакет скорее всего реальный)
+            # Пакет не найден — определяем: это pip-пакет или фантомный project import?
+            # Признаки project import (а не pip): snake_case, нет дефисов,
+            # выглядит как "from some_module import ClassName"
+            looks_like_project = (
+                base_module.isidentifier()
+                and "_" in base_module
+                and base_module == base_module.lower()
+                and not any(c.isdigit() for c in base_module[:3])
+            )
+            if looks_like_project:
+                # Фантомный project import — файла нет в проекте → удаляем
+                logger.warning(
+                    f"  ⚠️  A5 global_imports: удалён '{imp_line}' для {fname} "
+                    f"('{base_module}' выглядит как модуль проекта, но файла нет)"
+                )
+                continue
+            # pip-пакет → авто-добавляем в requirements.txt
             # НЕ добавляем если имя совпадает с файлом проекта (project_modules уже проверены выше)
             if (requirements_path and base_module.isidentifier()
                     and base_lower not in {pm.lower() for pm in project_modules}):
