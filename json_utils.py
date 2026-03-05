@@ -62,6 +62,64 @@ def _repair_json(text: str) -> str:
     return text
 
 
+def _repair_truncated_json(text: str) -> dict | None:
+    """Пытается починить обрезанный JSON (модель исчерпала max_tokens).
+
+    Стратегия: закрыть незавершённую строку, затем закрыть все открытые скобки.
+    """
+    # Определяем, находимся ли мы внутри строки
+    in_string = False
+    escape_next = False
+    stack = []  # стек открытых скобок: '{' или '['
+
+    for ch in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in ('{', '['):
+            stack.append(ch)
+        elif ch == '}' and stack and stack[-1] == '{':
+            stack.pop()
+        elif ch == ']' and stack and stack[-1] == '[':
+            stack.pop()
+
+    if not stack:
+        return None  # скобки сбалансированы — не наш случай
+
+    # Собираем suffix для закрытия
+    suffix = ""
+    if in_string:
+        suffix += '"'
+    # Закрываем все открытые скобки в обратном порядке
+    for bracket in reversed(stack):
+        suffix += '}' if bracket == '{' else ']'
+
+    candidate = text + suffix
+    try:
+        result = json.loads(candidate)
+        if isinstance(result, dict):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        result = json.loads(_repair_json(candidate))
+        if isinstance(result, dict):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    return None
+
+
 def _extract_json_from_text(text: str) -> dict:
     """Надёжный парсер: учитывает строковые литералы с {} внутри и markdown-блоки."""
     text = text.strip()
@@ -115,6 +173,11 @@ def _extract_json_from_text(text: str) -> dict:
                 break
 
     if end == -1:
+        # Попытка починить обрезанный JSON (модель исчерпала max_tokens)
+        truncated = text[start:]
+        repaired = _repair_truncated_json(truncated)
+        if repaired is not None:
+            return repaired
         raise ValueError("Несбалансированные JSON-скобки")
 
     candidate = text[start:end]

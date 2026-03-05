@@ -6,7 +6,7 @@ from typing import Optional
 import openai
 from openai import AsyncOpenAI
 
-from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT
+from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS
 from cache import ThreadSafeCache, _cache_key
 from exceptions import LLMError
 from log_utils import get_model, log_model_choice, log_interaction
@@ -81,10 +81,13 @@ async def ask_agent(
                 model=model,
                 messages=messages,
                 temperature=temperature,
+                max_tokens=LLM_MAX_TOKENS,
                 response_format={"type": "json_object"},
             )
             if not response.choices or response.choices[0].message.content is None:
                 raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json_object)")
+            if response.choices[0].finish_reason == "length":
+                logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (finish_reason=length, max_tokens={LLM_MAX_TOKENS})")
             raw    = response.choices[0].message.content
             result = json.loads(raw)
             if not isinstance(result, dict) or not result:
@@ -101,9 +104,12 @@ async def ask_agent(
                     model=model,
                     messages=messages,
                     temperature=temperature,
+                    max_tokens=LLM_MAX_TOKENS,
                 )
                 if not response.choices or response.choices[0].message.content is None:
                     raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
+                if response.choices[0].finish_reason == "length":
+                    logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (finish_reason=length)")
                 raw    = response.choices[0].message.content
                 result = _extract_json_from_text(raw)
                 if not isinstance(result, dict) or not result:

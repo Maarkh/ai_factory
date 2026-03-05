@@ -13,6 +13,7 @@ BASE_DIR     = Path(os.getenv("PROJECT_BASE_DIR", "/media/mikhail/RAD/py_proj"))
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/")
 LLM_API_KEY  = os.getenv("LLM_API_KEY",  "ollama")
 LLM_TIMEOUT  = float(os.getenv("LLM_TIMEOUT", "120.0"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "16384"))
 LOG_LEVEL    = os.getenv("LOG_LEVEL", "INFO")
 
 # ─────────────────────────────────────────────
