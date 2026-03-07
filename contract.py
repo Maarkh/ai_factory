@@ -191,7 +191,11 @@ def _inject_missing_data_models(
                 field_desc = f" Поля: {', '.join(field_names)}."
 
         # CamelCase для имён классов: camera → Camera, license_plate → LicensePlate
-        class_name = "".join(part.capitalize() for part in model_name.split("_"))
+        # Если имя уже CamelCase (без подчёркиваний, с заглавной) — оставить как есть
+        if "_" not in model_name and model_name[0].isupper():
+            class_name = model_name
+        else:
+            class_name = "".join(part.capitalize() for part in model_name.split("_"))
         entry = {
             "name": class_name,
             "signature": f"class {class_name}",
@@ -538,6 +542,71 @@ def _inject_signature_type_imports(
     return contract
 
 
+def _inject_requirements_imports(
+    contract: dict,
+    requirements_path: Path | None,
+    logger: logging.Logger,
+) -> dict:
+    """Инжектирует imports пакетов из requirements.txt если они упоминаются в hints/description.
+
+    Если implementation_hints или description содержат имя пакета (cv2, numpy, requests и т.п.),
+    а global_imports не содержит соответствующий import — добавляет его.
+    """
+    if not requirements_path or not requirements_path.exists():
+        return contract
+    from code_context import _PIP_TO_IMPORT
+    fc = contract.get("file_contracts", {})
+    gi = contract.setdefault("global_imports", {})
+
+    # Собираем pip → import mapping из requirements.txt
+    pkg_to_import: dict[str, str] = {}  # import_name → import_line
+    try:
+        for line in requirements_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            pkg = re.split(r"[=<>~!\[]", line)[0].strip().lower()
+            pkg_norm = pkg.replace("-", "_")
+            # Ищем правильное имя импорта
+            import_name = _PIP_TO_IMPORT.get(pkg, _PIP_TO_IMPORT.get(pkg_norm, pkg_norm))
+            if import_name and import_name.isidentifier():
+                pkg_to_import[import_name] = f"import {import_name}"
+    except Exception:
+        return contract
+
+    if not pkg_to_import:
+        return contract
+
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        # Собираем текст hints + description для поиска
+        search_parts: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sig = item.get("signature", "")
+            if sig.strip().startswith("class "):
+                continue
+            search_parts.append(item.get("implementation_hints", ""))
+            search_parts.append(item.get("description", ""))
+            search_parts.append(sig)
+        if not search_parts:
+            continue
+        search_text = " ".join(search_parts).lower()
+
+        existing = gi.setdefault(fname, [])
+        existing_text = " ".join(existing).lower()
+
+        for import_name, import_line in pkg_to_import.items():
+            # Проверяем упоминание пакета в hints/description
+            if import_name.lower() in search_text and import_name.lower() not in existing_text:
+                existing.append(import_line)
+                logger.info(f"  📎 A5 global_imports: авто-добавлен '{import_line}' для {fname} (из requirements + hints)")
+
+    return contract
+
+
 def _inject_cross_file_imports(
     contract: dict,
     logger: logging.Logger,
@@ -551,6 +620,19 @@ def _inject_cross_file_imports(
     fc = contract.get("file_contracts", {})
     gi = contract.setdefault("global_imports", {})
 
+    # Слова из docstring и Python builtins — НЕ являются именами классов
+    _DOCSTRING_NOISE = {
+        "Args", "Returns", "Raises", "Yields", "Note", "Notes", "Example",
+        "Examples", "Attributes", "References", "See", "Also", "Warnings",
+        "Todo", "Param", "Params", "Return", "Keyword",
+    }
+    _PYTHON_KEYWORDS = {
+        "True", "False", "None", "and", "or", "not", "is", "in", "if", "else",
+        "elif", "for", "while", "break", "continue", "pass", "def", "class",
+        "return", "yield", "import", "from", "as", "with", "try", "except",
+        "finally", "raise", "del", "global", "nonlocal", "assert", "lambda",
+    }
+
     # 1. Собираем маппинг class_name → source_file (stem)
     class_to_file: dict[str, str] = {}
     for fname, items in fc.items():
@@ -562,7 +644,7 @@ def _inject_cross_file_imports(
             sig = item.get("signature", "")
             if sig.strip().startswith("class "):
                 class_name = item.get("name", "")
-                if class_name:
+                if class_name and class_name not in _DOCSTRING_NOISE and class_name not in _PYTHON_KEYWORDS:
                     class_to_file[class_name] = fname
 
     if not class_to_file:
@@ -581,11 +663,15 @@ def _inject_cross_file_imports(
             # Не проверяем сигнатуры class (они определяют, а не используют)
             if sig.strip().startswith("class "):
                 continue
-            # Ищем ссылки на известные классы в сигнатуре
+            # Очищаем сигнатуру от docstring — оставляем только первую строку (def ...)
+            sig_first_line = sig.split("\n")[0] if "\n" in sig else sig
+            # Ищем ссылки на известные классы в сигнатуре, описании и hints
+            hints = item.get("implementation_hints", "")
+            search_text = f"{sig_first_line} {desc} {hints}"
             for class_name, source_file in class_to_file.items():
                 if source_file == fname:
                     continue  # Класс определён в этом же файле
-                if re.search(rf'\b{re.escape(class_name)}\b', sig):
+                if re.search(rf'\b{re.escape(class_name)}\b', search_text):
                     needed_imports[class_name] = source_file
 
         if not needed_imports:
@@ -662,6 +748,14 @@ def _validate_signature_types(
     _skip = set(_TYPING_TYPES) | _BUILTIN_TYPES | set(defined_classes)
     _skip |= set(_PREFIX_IMPORTS)  # np, pd, tf и т.д. — не типы
 
+    # Слова из docstring-стиля — не являются типами
+    _docstring_noise = {
+        "Args", "Returns", "Raises", "Yields", "Note", "Notes", "Example",
+        "Examples", "Attributes", "References", "Warnings", "Todo",
+        "Param", "Params", "Return", "Keyword", "True", "False",
+    }
+    _skip |= _docstring_noise
+
     for fname, items in fc.items():
         if not isinstance(items, list):
             continue
@@ -671,8 +765,10 @@ def _validate_signature_types(
             sig = item.get("signature", "")
             if sig.strip().startswith("class "):
                 continue
+            # Используем только первую строку сигнатуры (def ...), не docstring
+            sig_line = sig.split("\n")[0] if "\n" in sig else sig
             # Извлекаем CamelCase слова (начинаются с заглавной, ≥2 символа)
-            for m in re.finditer(r'\b([A-Z][a-zA-Z0-9]+)\b', sig):
+            for m in re.finditer(r'\b([A-Z][a-zA-Z0-9]+)\b', sig_line):
                 type_name = m.group(1)
                 if type_name not in _skip:
                     undefined_types.setdefault(type_name, set()).add(fname)
@@ -1005,6 +1101,7 @@ async def _validate_and_patch_contract(
     )
     contract = _inject_signature_type_imports(contract, logger)
     contract = _sanitize_implementation_hints(contract, logger)
+    contract = _inject_requirements_imports(contract, req_path if req_path.exists() else None, logger)
     contract = _inject_cross_file_imports(contract, logger)
     contract = _validate_signature_types(contract, files, logger)
     contract = _validate_import_consistency(contract, logger)
@@ -1081,6 +1178,7 @@ async def patch_contract_for_file(
             contract = _inject_signature_type_imports(contract, logger)
             contract = _validate_import_consistency(contract, logger)
             contract = _sanitize_implementation_hints(contract, logger)
+            contract = _inject_requirements_imports(contract, req_path if req_path.exists() else None, logger)
             contract = _inject_cross_file_imports(contract, logger)
             contract = _validate_signature_types(contract, files_list, logger)
             contract = _detect_and_fix_circular_imports(contract, files_list, logger)
@@ -1205,6 +1303,8 @@ async def phase_generate_api_contract(
         contract = _inject_signature_type_imports(contract, logger)
         # Санитизация: implementation_hints не ссылаются на несуществующие имена
         contract = _sanitize_implementation_hints(contract, logger)
+        # Авто-инжект imports из requirements.txt на основе hints
+        contract = _inject_requirements_imports(contract, req_path if req_path.exists() else None, logger)
         # Детерминистская инъекция: межфайловые импорты (data models и т.п.)
         contract = _inject_cross_file_imports(contract, logger)
         # Проверка: все типы из сигнатур определены (иначе → models.py)
@@ -1273,6 +1373,7 @@ async def _refresh_api_contract(
         )
         new_contract = _inject_signature_type_imports(new_contract, logger)
         new_contract = _sanitize_implementation_hints(new_contract, logger)
+        new_contract = _inject_requirements_imports(new_contract, req_path if req_path.exists() else None, logger)
         new_contract = _inject_cross_file_imports(new_contract, logger)
         new_contract = _validate_signature_types(new_contract, files_list, logger)
         new_contract = _validate_import_consistency(new_contract, logger)

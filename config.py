@@ -14,7 +14,7 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/")
 LLM_API_KEY  = os.getenv("LLM_API_KEY",  "ollama")
 LLM_TIMEOUT  = float(os.getenv("LLM_TIMEOUT", "600.0"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "16384"))
-LLM_NUM_CTX    = int(os.getenv("LLM_NUM_CTX", "32768"))
+LLM_NUM_CTX    = int(os.getenv("LLM_NUM_CTX", "16384"))
 LOG_LEVEL    = os.getenv("LOG_LEVEL", "INFO")
 
 # ─────────────────────────────────────────────

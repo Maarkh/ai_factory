@@ -3,8 +3,7 @@ import json
 import logging
 from typing import Optional
 
-import openai
-from openai import AsyncOpenAI
+import httpx
 
 from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_NUM_CTX
 from cache import ThreadSafeCache, _cache_key
@@ -13,7 +12,18 @@ from log_utils import get_model, log_model_choice, log_interaction
 from json_utils import _extract_json_from_text
 from lang_utils import get_system_prompt
 
-CLIENT = AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, timeout=LLM_TIMEOUT)
+# Ollama native API base (без /v1/)
+_OLLAMA_BASE = LLM_BASE_URL.rstrip("/").removesuffix("/v1").removesuffix("/v1/")
+_CHAT_URL = f"{_OLLAMA_BASE}/api/chat"
+
+# Таймаут для httpx: read=120с — только между чанками при streaming,
+# НЕ общий таймаут генерации (stream=True решает эту проблему)
+_HTTPX_TIMEOUT = httpx.Timeout(
+    connect=30.0,
+    read=120.0,
+    write=30.0,
+    pool=30.0,
+)
 
 AGENT_TEMPERATURES: dict[str, float] = {
     "developer":        0.1,
@@ -38,6 +48,70 @@ AGENT_TEMPERATURES: dict[str, float] = {
     "a5_validator":     0.0,
 }
 
+# Ошибки, после которых имеет смысл retry (сеть, таймаут, формат)
+_RETRYABLE_ERRORS = (
+    httpx.HTTPStatusError,
+    httpx.TimeoutException,
+    json.JSONDecodeError,
+    ValueError,
+)
+
+
+async def _ollama_chat(
+    client: httpx.AsyncClient,
+    model: str,
+    messages: list[dict],
+    temperature: float,
+    max_tokens: int,
+    json_mode: bool = False,
+) -> tuple[str, str]:
+    """Вызывает Ollama native /api/chat со streaming.
+
+    Streaming решает проблему ReadTimeout: чанки приходят каждые ~1с,
+    таймаут 120с только между чанками (не общий таймаут генерации).
+    """
+    payload: dict = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "options": {
+            "num_ctx": LLM_NUM_CTX,
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+    if json_mode:
+        payload["format"] = "json"
+
+    content_parts: list[str] = []
+    done_reason = "stop"
+
+    async with client.stream("POST", _CHAT_URL, json=payload) as resp:
+        if resp.status_code >= 400:
+            body = await resp.aread()
+            raise httpx.HTTPStatusError(
+                f"Ollama {resp.status_code}: {body[:500].decode(errors='replace')}",
+                request=resp.request,
+                response=resp,
+            )
+        async for line in resp.aiter_lines():
+            if not line.strip():
+                continue
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # Каждый chunk: {"message": {"content": "..."}, "done": false}
+            msg = chunk.get("message", {})
+            if msg.get("content"):
+                content_parts.append(msg["content"])
+            if chunk.get("done"):
+                done_reason = chunk.get("done_reason", "stop")
+                break
+
+    content = "".join(content_parts)
+    return content, done_reason
+
 
 async def ask_agent(
     logger: logging.Logger,
@@ -48,9 +122,8 @@ async def ask_agent(
     randomize: bool = False,
     language: str = "python",
     max_retries: int = 3,
-    client: Optional[AsyncOpenAI] = None,
+    client: Optional[httpx.AsyncClient] = None,
 ) -> dict:
-    _client = client or CLIENT
     model = get_model(agent, attempt, randomize=randomize)
     log_model_choice(logger, agent, model, attempt)
 
@@ -69,59 +142,58 @@ async def ask_agent(
         {"role": "user",   "content": user_text},
     ]
 
+    _client = client or httpx.AsyncClient(timeout=_HTTPX_TIMEOUT)
+    _own_client = client is None
+
     last_exc: Exception = LLMError("Нет попыток")
-    for retry in range(max_retries):
-        if retry > 0:
-            delay = 2 ** retry
-            logger.info(f"[{agent}:{model}] Backoff {delay}с (retry={retry})")
-            await asyncio.sleep(delay)
-        raw: str | None = None
-        try:
-            response = await _client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=LLM_MAX_TOKENS,
-                response_format={"type": "json_object"},
-                extra_body={"num_ctx": LLM_NUM_CTX},
-            )
-            if not response.choices or response.choices[0].message.content is None:
-                raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json_object)")
-            if response.choices[0].finish_reason == "length":
-                logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (finish_reason=length, max_tokens={LLM_MAX_TOKENS})")
-            raw    = response.choices[0].message.content
-            result = json.loads(raw)
-            if not isinstance(result, dict) or not result:
-                raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__} (len={len(result) if isinstance(result, dict) else 'N/A'})")
-            log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
-            if cache_key is not None:
-                cache[cache_key] = result
-            return result
-        except (openai.APIError, json.JSONDecodeError, ValueError) as e:
-            last_exc = e
-            logger.warning(f"[{agent}:{model}] json_object failed: {e}, пробую plain text...")
+    try:
+        for retry in range(max_retries):
+            if retry > 0:
+                delay = 2 ** retry
+                logger.info(f"[{agent}:{model}] Backoff {delay}с (retry={retry})")
+                await asyncio.sleep(delay)
+            raw: str | None = None
             try:
-                response = await _client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=LLM_MAX_TOKENS,
-                    extra_body={"num_ctx": LLM_NUM_CTX},
+                raw, done_reason = await _ollama_chat(
+                    _client, model, messages, temperature, LLM_MAX_TOKENS, json_mode=True,
                 )
-                if not response.choices or response.choices[0].message.content is None:
-                    raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
-                if response.choices[0].finish_reason == "length":
-                    logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (finish_reason=length)")
-                raw    = response.choices[0].message.content
-                result = _extract_json_from_text(raw)
+                if not raw:
+                    raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json)")
+                if done_reason == "length":
+                    logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (done_reason=length, num_predict={LLM_MAX_TOKENS})")
+                result = json.loads(raw)
                 if not isinstance(result, dict) or not result:
-                    raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__}")
+                    raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__} (len={len(result) if isinstance(result, dict) else 'N/A'})")
                 log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
                 if cache_key is not None:
                     cache[cache_key] = result
                 return result
-            except (openai.APIError, json.JSONDecodeError, ValueError) as e2:
-                last_exc = e2
-                logger.warning(f"[{agent}:{model}] plain text fallback failed: {e2}")
+            except _RETRYABLE_ERRORS as e:
+                last_exc = e
+                if isinstance(e, httpx.TimeoutException):
+                    logger.warning(f"[{agent}:{model}] таймаут ({type(e).__name__}), retry {retry+1}/{max_retries}")
+                    continue  # retry без fallback на plain text
+                logger.warning(f"[{agent}:{model}] json_object failed: {e}, пробую plain text...")
+                try:
+                    raw, done_reason = await _ollama_chat(
+                        _client, model, messages, temperature, LLM_MAX_TOKENS, json_mode=False,
+                    )
+                    if not raw:
+                        raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
+                    if done_reason == "length":
+                        logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (done_reason=length)")
+                    result = _extract_json_from_text(raw)
+                    if not isinstance(result, dict) or not result:
+                        raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__}")
+                    log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
+                    if cache_key is not None:
+                        cache[cache_key] = result
+                    return result
+                except _RETRYABLE_ERRORS as e2:
+                    last_exc = e2
+                    logger.warning(f"[{agent}:{model}] plain text fallback failed: {e2}")
 
-    raise LLMError(f"[{agent}:{model}] все попытки исчерпаны") from last_exc
+        raise LLMError(f"[{agent}:{model}] все попытки исчерпаны") from last_exc
+    finally:
+        if _own_client:
+            await _client.aclose()

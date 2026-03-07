@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import difflib
 import json
 import re
 import logging
@@ -461,9 +462,15 @@ def _check_function_preservation(
 
 def _check_contract_compliance(code: str, file_contract: list) -> list[str]:
     """Детерминистская проверка: содержит ли код ВСЕ required функции/классы из A5 контракта.
-    Возвращает список отсутствующих элементов с сигнатурой для подсказки модели."""
+    Возвращает список отсутствующих элементов с сигнатурой для подсказки модели.
+    При fuzzy-match показывает: "Ты определил X, но ожидается Y — ПЕРЕИМЕНУЙ"."""
     if not file_contract:
         return []
+    # Извлекаем все определённые в коде имена функций и классов
+    code_func_names: list[str] = re.findall(r'^\s*(?:async\s+)?def\s+(\w+)\s*\(', code, re.MULTILINE)
+    code_class_names: list[str] = re.findall(r'^class\s+(\w+)\b', code, re.MULTILINE)
+    all_code_names = code_func_names + code_class_names
+
     missing = []
     for item in file_contract:
         if not item.get("required", False):
@@ -473,13 +480,28 @@ def _check_contract_compliance(code: str, file_contract: list) -> list[str]:
         if sig.startswith("class "):
             class_name = sig.split("class ", 1)[1].split("(")[0].split(":")[0].strip()
             if not re.search(rf'^class\s+{re.escape(class_name)}\b', code, re.MULTILINE):
-                missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь определение класса {class_name}")
+                hint = _fuzzy_name_hint(class_name, all_code_names)
+                missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь определение класса {class_name}{hint}")
         elif sig.startswith("def ") or sig.startswith("async def "):
             func_name = name or sig.split("def ", 1)[1].split("(")[0].strip()
             # Ищем как top-level функцию (^def) так и метод класса (с отступом)
             if not re.search(rf'^\s*(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code, re.MULTILINE):
-                missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь эту функцию ИМЕННО с таким именем")
+                hint = _fuzzy_name_hint(func_name, all_code_names)
+                missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь эту функцию ИМЕННО с таким именем{hint}")
     return missing
+
+
+def _fuzzy_name_hint(expected: str, code_names: list[str]) -> str:
+    """Если в коде есть похожее имя — вернуть подсказку для переименования."""
+    if not code_names:
+        return ""
+    matches = difflib.get_close_matches(expected, code_names, n=1, cutoff=0.5)
+    if matches and matches[0] != expected:
+        return (
+            f"\n    ⚠️ ПОХОЖЕЕ ИМЯ В КОДЕ: '{matches[0]}' — но ожидается '{expected}'. "
+            f"ПЕРЕИМЕНУЙ '{matches[0]}' → '{expected}'"
+        )
+    return ""
 
 
 async def _review_file(
@@ -884,6 +906,54 @@ async def phase_develop(
             state["feedbacks"][current_file] = "Агент вернул пустой код."
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
+            continue
+
+        # Проверка: если код — только imports + пустые строки (модель не написала тело функций),
+        # генерируем скелет из A5 контракта и повторяем запрос с ним как "existing_code"
+        code_lines = [ln for ln in code.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        non_import_lines = [ln for ln in code_lines
+                            if not ln.strip().startswith(("import ", "from "))
+                            and not ln.strip().startswith(("class ", "def "))]
+        has_functions = any(ln.strip().startswith(("def ", "class ", "async def ")) for ln in code_lines)
+        if not has_functions and file_contract and attempt < MAX_FILE_ATTEMPTS - 1:
+            logger.warning(
+                f"  ⚠️  {current_file}: developer вернул код без функций/классов — генерирую скелет из A5"
+            )
+            skeleton_parts = []
+            if global_imports:
+                for imp in global_imports:
+                    if isinstance(imp, str):
+                        skeleton_parts.append(imp)
+                skeleton_parts.append("")
+            for item in file_contract:
+                if not isinstance(item, dict):
+                    continue
+                sig = item.get("signature", "")
+                hints = item.get("implementation_hints", "")
+                desc = item.get("description", "")
+                if sig.strip().startswith("class "):
+                    skeleton_parts.append(f"{sig}:")
+                    skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
+                    skeleton_parts.append(f"    # TODO: {hints}")
+                    skeleton_parts.append(f"    pass")
+                    skeleton_parts.append("")
+                elif sig.strip().startswith(("def ", "async def ")):
+                    skeleton_parts.append(f"{sig}:")
+                    skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
+                    skeleton_parts.append(f"    # Алгоритм: {hints}")
+                    skeleton_parts.append(f"    pass")
+                    skeleton_parts.append("")
+            skeleton_code = "\n".join(skeleton_parts)
+            state["feedbacks"][current_file] = (
+                f"Ты вернул код БЕЗ функций/классов — только импорты.\n"
+                f"НИЖЕ — СКЕЛЕТ из A5 контракта. Заполни ВСЕ функции/классы реальным кодом.\n"
+                f"Убери pass и TODO, напиши ПОЛНУЮ рабочую реализацию по алгоритму в комментариях.\n"
+            )
+            # Записываем скелет как existing_code для следующей попытки
+            file_path.write_text(skeleton_code, encoding="utf-8")
+            file_attempts[current_file] = attempt + 1
+            cumulative_attempts[current_file] = total_attempts + 1
+            stats.record("developer", dev_model, False)
             continue
 
         # Авто-инъекция A5 импортов — developer часто забывает import numpy, from typing и т.д.
