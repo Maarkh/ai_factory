@@ -82,6 +82,30 @@ def _normalize_file_contracts(contract: dict) -> dict:
         _log.getLogger(__name__).warning(
             f"⚠️  A5 global_imports вернулся как list (ожидался dict) — сброс в {{}}")
         contract["global_imports"] = {}
+    # Удаляем записи с не-ASCII именами (LLM может вернуть русские имена из A2)
+    contract = _remove_non_ascii_entries(contract)
+    return contract
+
+
+def _remove_non_ascii_entries(contract: dict) -> dict:
+    """Удаляет из file_contracts записи с не-ASCII именами (например 'class Видео')."""
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    fc = contract.get("file_contracts", {})
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        cleaned = []
+        for item in items:
+            if not isinstance(item, dict):
+                cleaned.append(item)
+                continue
+            name = item.get("name", "")
+            if name and not name.isascii():
+                _logger.warning(f"  A5: удалена запись с не-ASCII именем '{name}' из {fname}")
+                continue
+            cleaned.append(item)
+        fc[fname] = cleaned
     return contract
 
 
@@ -755,6 +779,24 @@ def _validate_signature_types(
         "Param", "Params", "Return", "Keyword", "True", "False",
     }
     _skip |= _docstring_noise
+
+    # Типы, импортированные из pip-пакетов (не project files) — не нужно определять
+    project_stems = {Path(f).stem for f in files}
+    for _fname_gi, _imports_gi in gi.items():
+        if not isinstance(_imports_gi, list):
+            continue
+        for _imp in _imports_gi:
+            if not isinstance(_imp, str):
+                continue
+            parsed = _parse_import_line(_imp)
+            if parsed:
+                src_stem, names = parsed
+                if src_stem not in project_stems:
+                    _skip.update(names)  # e.g. Flask, Api, Resource from flask
+            else:
+                m = re.match(r"import\s+(\w+)(?:\s+as\s+(\w+))?", _imp)
+                if m:
+                    _skip.add(m.group(2) or m.group(1))
 
     for fname, items in fc.items():
         if not isinstance(items, list):

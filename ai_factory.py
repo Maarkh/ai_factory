@@ -549,15 +549,6 @@ async def main() -> None:
                 generate_summary(project_path, state)
 
                 src_path = project_path / SRC_DIR
-                print("\n" + "═" * 80)
-                print(f"{'🎉 УСПЕХ! Проект готов (v15.0) 🎉':^80}")
-                print("═" * 80)
-                print(f"📂 Папка проекта : {project_path}")
-                print(f"📦 Исходный код  : {src_path}")
-                print(f"🗄️  Метаданные    : {project_path / FACTORY_DIR}")
-                print(f"🌍 Язык          : {LANG_DISPLAY.get(language, language)}")
-                print(f"🔢 Итераций      : {state['iteration']}")
-                print(f"📄 Файлов        : {len(state['files'])}")
                 skipped = []
                 if state.get("e2e_skipped"):
                     skipped.append("E2E")
@@ -565,6 +556,21 @@ async def main() -> None:
                     skipped.append("Integration")
                 if state.get("tests_skipped"):
                     skipped.append("Unit tests")
+                all_skipped = len(skipped) >= 3
+                print("\n" + "═" * 80)
+                if all_skipped:
+                    print(f"{'⚠️  ЧАСТИЧНЫЙ УСПЕХ — ВСЕ ТЕСТЫ ПРОПУЩЕНЫ ⚠️':^80}")
+                elif skipped:
+                    print(f"{'⚠️  УСПЕХ С ОГОВОРКАМИ ⚠️':^80}")
+                else:
+                    print(f"{'🎉 УСПЕХ! Проект готов 🎉':^80}")
+                print("═" * 80)
+                print(f"📂 Папка проекта : {project_path}")
+                print(f"📦 Исходный код  : {src_path}")
+                print(f"🗄️  Метаданные    : {project_path / FACTORY_DIR}")
+                print(f"🌍 Язык          : {LANG_DISPLAY.get(language, language)}")
+                print(f"🔢 Итераций      : {state['iteration']}")
+                print(f"📄 Файлов        : {len(state['files'])}")
                 if skipped:
                     print(f"⚠️  ПРОПУЩЕНО    : {', '.join(skipped)}")
                 else:

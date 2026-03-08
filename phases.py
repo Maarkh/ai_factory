@@ -29,6 +29,16 @@ _EXCEPTION_LINE_RE = re.compile(
 )
 
 
+def _sanitize_llm_code(code: str) -> str:
+    """Очищает код от артефактов LLM: markdown fences, garbage tokens."""
+    # 1. Убираем markdown code fences (```python ... ```)
+    code = re.sub(r"^```[\w]*\s*\n?", "", code, flags=re.MULTILINE)
+    code = re.sub(r"^```\s*$", "", code, flags=re.MULTILINE)
+    # 2. Убираем garbage tokens deepseek-coder (и аналогичные спец-токены)
+    code = re.sub(r"<[｜|][\w▁]+[｜|]>", "", code)
+    return code.strip()
+
+
 def _ensure_a5_imports(code: str, global_imports: list[str]) -> str:
     """Гарантирует что все A5 global_imports присутствуют в коде.
 
@@ -572,7 +582,7 @@ async def do_self_reflect(
         result   = await ask_agent(logger, "self_reflect", ctx, cache, 0, randomize, language)
         status   = result.get("status", "OK")
         feedback = _to_str(result.get("feedback", ""))
-        improved = _to_str(result.get("improved_code", "")).strip()
+        improved = _sanitize_llm_code(_to_str(result.get("improved_code", "")))
 
         if status == "NEEDS_IMPROVEMENT" and improved:
             (src_path / current_file).write_text(improved, encoding="utf-8")
@@ -892,7 +902,7 @@ async def phase_develop(
 
         try:
             dev_resp = await ask_agent(logger, "developer", dev_ctx, cache, attempt, randomize, language)
-            code     = dev_resp.get("code", "").strip()
+            code     = _sanitize_llm_code(dev_resp.get("code", ""))
         except (LLMError, ValueError) as e:
             logger.exception(f"Developer упал: {e}")
             stats.record("developer", dev_model, False)
@@ -1790,7 +1800,7 @@ async def phase_unit_tests(
         # Сохраняем тесты и запоминаем код для feedback-а
         current_test_code: dict[str, str] = {}
         for tf in test_files:
-            if code := tf.get("code", ""):
+            if code := _sanitize_llm_code(tf.get("code", "")):
                 fname = tf.get("filename", f"test_generated.{LANG_EXT.get(language, 'py')}")
                 # Защита от path traversal (../../malicious.py)
                 resolved = (tests_dir / fname).resolve()
