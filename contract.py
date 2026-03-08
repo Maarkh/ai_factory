@@ -1148,6 +1148,7 @@ async def _validate_and_patch_contract(
     contract = _validate_signature_types(contract, files, logger)
     contract = _validate_import_consistency(contract, logger)
     contract = _detect_and_fix_circular_imports(contract, files, logger)
+    contract = _remove_non_ascii_entries(contract)
     return contract
 
 
@@ -1224,6 +1225,7 @@ async def patch_contract_for_file(
             contract = _inject_cross_file_imports(contract, logger)
             contract = _validate_signature_types(contract, files_list, logger)
             contract = _detect_and_fix_circular_imports(contract, files_list, logger)
+            contract = _remove_non_ascii_entries(contract)
             state["api_contract"] = contract
             save_artifact(project_path, "A5", contract)
             stats.record("contract_analyst", get_model("contract_analyst"), True)
@@ -1356,6 +1358,8 @@ async def phase_generate_api_contract(
         contract = _validate_import_consistency(contract, logger)
         # Детерминистская проверка: циклические зависимости → вынос в models.py
         contract = _detect_and_fix_circular_imports(contract, files_list, logger)
+        # Финальная очистка: убираем не-ASCII имена, которые могли появиться на любом этапе
+        contract = _remove_non_ascii_entries(contract)
         save_artifact(project_path, "A5", contract)
         logger.info("✅ A5 (API контракт) готов.")
         return contract
@@ -1420,6 +1424,7 @@ async def _refresh_api_contract(
         new_contract = _validate_signature_types(new_contract, files_list, logger)
         new_contract = _validate_import_consistency(new_contract, logger)
         new_contract = _detect_and_fix_circular_imports(new_contract, files_list, logger)
+        new_contract = _remove_non_ascii_entries(new_contract)
         # Sync: добавляем новые файлы, удаляем призраки
         a5_files = set(new_contract.get("file_contracts", {}).keys())
         for f in a5_files:

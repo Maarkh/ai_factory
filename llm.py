@@ -52,6 +52,7 @@ AGENT_TEMPERATURES: dict[str, float] = {
 _RETRYABLE_ERRORS = (
     httpx.HTTPStatusError,
     httpx.TimeoutException,
+    asyncio.TimeoutError,
     json.JSONDecodeError,
     ValueError,
 )
@@ -69,7 +70,22 @@ async def _ollama_chat(
 
     Streaming решает проблему ReadTimeout: чанки приходят каждые ~1с,
     таймаут 120с только между чанками (не общий таймаут генерации).
+    Overall timeout (LLM_TIMEOUT) предотвращает бесконечное зависание.
     """
+    return await asyncio.wait_for(
+        _ollama_chat_inner(client, model, messages, temperature, max_tokens, json_mode),
+        timeout=LLM_TIMEOUT,  # 600с overall — предотвращает зависание
+    )
+
+
+async def _ollama_chat_inner(
+    client: httpx.AsyncClient,
+    model: str,
+    messages: list[dict],
+    temperature: float,
+    max_tokens: int,
+    json_mode: bool = False,
+) -> tuple[str, str]:
     payload: dict = {
         "model": model,
         "messages": messages,
@@ -170,7 +186,7 @@ async def ask_agent(
                 return result
             except _RETRYABLE_ERRORS as e:
                 last_exc = e
-                if isinstance(e, httpx.TimeoutException):
+                if isinstance(e, (httpx.TimeoutException, asyncio.TimeoutError)):
                     logger.warning(f"[{agent}:{model}] таймаут ({type(e).__name__}), retry {retry+1}/{max_retries}")
                     continue  # retry без fallback на plain text
                 logger.warning(f"[{agent}:{model}] json_object failed: {e}, пробую plain text...")
