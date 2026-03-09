@@ -84,6 +84,23 @@ def _normalize_file_contracts(contract: dict) -> dict:
         contract["global_imports"] = {}
     # Удаляем записи с не-ASCII именами (LLM может вернуть русские имена из A2)
     contract = _remove_non_ascii_entries(contract)
+    # Чистим остаточные garbage tokens из сигнатур (если LLM-level strip не применён)
+    _GRB_RE = re.compile(r"<[｜|][\w▁]+[｜|]>")
+    fc = contract.get("file_contracts", {})
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key in ("signature", "name", "description", "implementation_hints"):
+                val = item.get(key, "")
+                if isinstance(val, str) and _GRB_RE.search(val):
+                    val = re.sub(r"(\w+)" + r"<[｜|][\w▁]+[｜|]>" + r"\1", r"\1", val)
+                    val = _GRB_RE.sub("", val)
+                    # Исправляем сломанные аннотации: ") - str" → ") -> str"
+                    val = re.sub(r"\)\s*-\s+(\w)", r") -> \1", val)
+                    item[key] = val
     return contract
 
 
@@ -896,6 +913,64 @@ def _validate_signature_types(
     return contract
 
 
+def _dedup_cross_file_classes(
+    contract: dict,
+    logger: logging.Logger,
+) -> dict:
+    """Удаляет дублированные классы из file_contracts.
+
+    Если один класс (по name) определён в нескольких файлах,
+    оставляем его в файле с наилучшим соответствием (по stem name),
+    или в файле с наибольшим количеством полей/методов.
+    Пример: Camera в camera.py и models.py → оставляем в camera.py.
+    """
+    fc = contract.get("file_contracts", {})
+    # Маппинг class_name → [(fname, item, field_count)]
+    class_locations: dict[str, list[tuple[str, dict, int]]] = {}
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sig = item.get("signature", "")
+            if sig.strip().startswith("class "):
+                name = item.get("name", "")
+                if name:
+                    # Считаем "richness" — длина сигнатуры как прокси
+                    richness = len(sig)
+                    class_locations.setdefault(name, []).append((fname, item, richness))
+
+    for class_name, locations in class_locations.items():
+        if len(locations) <= 1:
+            continue
+        # Выбираем лучший файл: сначала по stem match, затем по richness
+        best_fname = locations[0][0]
+        best_score = -1
+        for fname, item, richness in locations:
+            stem = Path(fname).stem.lower()
+            score = richness
+            # Бонус если stem совпадает с именем класса (camera.py для Camera)
+            if stem == class_name.lower():
+                score += 10000
+            # Бонус если это не models.py (предпочитаем бизнес-файл)
+            if stem != "models":
+                score += 100
+            if score > best_score:
+                best_score = score
+                best_fname = fname
+        # Удаляем дубли из других файлов
+        for fname, item, _ in locations:
+            if fname != best_fname:
+                fc[fname] = [i for i in fc[fname] if i is not item]
+                logger.info(
+                    f"  📋 A5 dedup: удалён дубль класса '{class_name}' из {fname} "
+                    f"(оставлен в {best_fname})"
+                )
+
+    return contract
+
+
 def _detect_and_fix_circular_imports(
     contract: dict,
     files: list[str],
@@ -1149,6 +1224,7 @@ async def _validate_and_patch_contract(
     contract = _sanitize_implementation_hints(contract, logger)
     contract = _inject_requirements_imports(contract, req_path if req_path.exists() else None, logger)
     contract = _inject_cross_file_imports(contract, logger)
+    contract = _dedup_cross_file_classes(contract, logger)
     contract = _validate_signature_types(contract, files, logger)
     contract = _validate_import_consistency(contract, logger)
     contract = _detect_and_fix_circular_imports(contract, files, logger)
@@ -1227,6 +1303,7 @@ async def patch_contract_for_file(
             contract = _sanitize_implementation_hints(contract, logger)
             contract = _inject_requirements_imports(contract, req_path if req_path.exists() else None, logger)
             contract = _inject_cross_file_imports(contract, logger)
+            contract = _dedup_cross_file_classes(contract, logger)
             contract = _validate_signature_types(contract, files_list, logger)
             contract = _detect_and_fix_circular_imports(contract, files_list, logger)
             contract = _remove_non_ascii_entries(contract)
@@ -1355,6 +1432,8 @@ async def phase_generate_api_contract(
         contract = _inject_requirements_imports(contract, req_path if req_path.exists() else None, logger)
         # Детерминистская инъекция: межфайловые импорты (data models и т.п.)
         contract = _inject_cross_file_imports(contract, logger)
+        # Дедупликация: один класс — один файл
+        contract = _dedup_cross_file_classes(contract, logger)
         # Проверка: все типы из сигнатур определены (иначе → models.py)
         contract = _validate_signature_types(contract, files_list, logger)
         # Детерминистская валидация: cross-file imports ссылаются на реальные имена
@@ -1425,10 +1504,27 @@ async def _refresh_api_contract(
         new_contract = _sanitize_implementation_hints(new_contract, logger)
         new_contract = _inject_requirements_imports(new_contract, req_path if req_path.exists() else None, logger)
         new_contract = _inject_cross_file_imports(new_contract, logger)
+        new_contract = _dedup_cross_file_classes(new_contract, logger)
         new_contract = _validate_signature_types(new_contract, files_list, logger)
         new_contract = _validate_import_consistency(new_contract, logger)
         new_contract = _detect_and_fix_circular_imports(new_contract, files_list, logger)
         new_contract = _remove_non_ascii_entries(new_contract)
+        # Восстановление: если новый A5 потерял валидные импорты из старого A5,
+        # сохраняем их (LLM при cascade refresh часто возвращает мусор вместо imports)
+        old_gi = state.get("api_contract", {}).get("global_imports", {})
+        new_gi = new_contract.setdefault("global_imports", {})
+        for fname in files_list:
+            old_imports = old_gi.get(fname, [])
+            new_imports = new_gi.get(fname, [])
+            if isinstance(old_imports, list) and isinstance(new_imports, list):
+                if len(new_imports) < len(old_imports):
+                    # Новый A5 потерял импорты — восстанавливаем из старого
+                    new_set = set(new_imports)
+                    for imp in old_imports:
+                        if imp not in new_set:
+                            new_imports.append(imp)
+                            logger.info(f"  📎 Восстановлен import из старого A5: '{imp}' для {fname}")
+                    new_gi[fname] = new_imports
         # Sync: добавляем новые файлы, удаляем призраки
         a5_files = set(new_contract.get("file_contracts", {}).keys())
         for f in a5_files:

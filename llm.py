@@ -1,9 +1,25 @@
 import asyncio
 import json
 import logging
+import re
 from typing import Optional
 
 import httpx
+
+# Regex для garbage tokens deepseek-coder (begin_of_sentence и т.п.)
+_GARBAGE_TOKEN_RE = re.compile(r"<[｜|][\w▁]+[｜|]>")
+_GARBAGE_DEDUP_RE = re.compile(r"(\w+)" + r"<[｜|][\w▁]+[｜|]>" + r"\1")
+
+
+def _strip_garbage_tokens(text: str) -> str:
+    """Убирает garbage tokens LLM (deepseek-coder) из любого текста.
+
+    Сначала дедупликация: img<token>img_bytes → img_bytes,
+    затем удаление оставшихся токенов: gcv<token>_image → gcv_image.
+    """
+    text = _GARBAGE_DEDUP_RE.sub(r"\1", text)
+    text = _GARBAGE_TOKEN_RE.sub("", text)
+    return text
 
 from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_NUM_CTX
 from cache import ThreadSafeCache, _cache_key
@@ -125,7 +141,7 @@ async def _ollama_chat_inner(
                 done_reason = chunk.get("done_reason", "stop")
                 break
 
-    content = "".join(content_parts)
+    content = _strip_garbage_tokens("".join(content_parts))
     return content, done_reason
 
 

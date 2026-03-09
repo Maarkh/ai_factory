@@ -40,6 +40,12 @@ def _sanitize_llm_code(code: str) -> str:
     code = re.sub(r"(\w+)" + _GARBAGE_TOKEN + r"\1", r"\1", code)
     # Затем убираем оставшиеся токены (gcv<token>_image → gcv_image)
     code = re.sub(_GARBAGE_TOKEN, "", code)
+    # 3. Убираем JSON-wrapper поля, которые LLM встраивает в код
+    # (imports_from_project = [...], external_dependencies = [...])
+    code = re.sub(
+        r"\n\s*(?:imports_from_project|external_dependencies|called_by)\s*=\s*\[.*?\]\s*$",
+        "", code, flags=re.DOTALL,
+    )
     return code.strip()
 
 
@@ -381,32 +387,47 @@ def _is_hardcoded_return_stub(func_node: ast.FunctionDef | ast.AsyncFunctionDef)
     if not body:
         return False
 
-    # Ровно один statement — return <literal>
-    if len(body) != 1:
-        return False
-    stmt = body[0]
-    if not isinstance(stmt, ast.Return) or stmt.value is None:
-        return False
-
-    # Проверяем что возвращаемое значение — литерал
-    val = stmt.value
-    is_literal = False
-    if isinstance(val, ast.Constant):
-        is_literal = True
-    elif isinstance(val, (ast.List, ast.Dict, ast.Tuple)) and not getattr(val, "elts", None) and not getattr(val, "keys", None):
-        is_literal = True  # return [] / return {} / return ()
-    elif isinstance(val, (ast.List, ast.Tuple)) and all(isinstance(e, ast.Constant) for e in val.elts):
-        is_literal = True  # return ['ABC123'] / return [0, 0, 0]
-
-    if not is_literal:
+    def _is_empty_literal(val: ast.AST) -> bool:
+        """Проверяет что AST-узел — пустой/захардкоженный литерал."""
+        if isinstance(val, ast.Constant):
+            return True
+        if isinstance(val, (ast.List, ast.Dict, ast.Tuple)):
+            elts = getattr(val, "elts", None) or []
+            keys = getattr(val, "keys", None) or []
+            if not elts and not keys:
+                return True  # [], {}, ()
+            if isinstance(val, (ast.List, ast.Tuple)) and all(isinstance(e, ast.Constant) for e in elts):
+                return True  # ['ABC123'], [0, 0, 0]
         return False
 
-    # Проверяем что ни один параметр не используется в теле функции
-    for node in ast.walk(func_node):
-        if isinstance(node, ast.Name) and node.id in param_names:
-            return False  # Параметр используется → возможно легитимная функция
+    # Паттерн 1: ровно один statement — return <literal>
+    if len(body) == 1:
+        stmt = body[0]
+        if isinstance(stmt, ast.Return) and stmt.value is not None and _is_empty_literal(stmt.value):
+            for node in ast.walk(func_node):
+                if isinstance(node, ast.Name) and node.id in param_names:
+                    return False
+            return True
 
-    return True
+    # Паттерн 2: var = <empty_literal>; return var (без использования параметров)
+    # Ловит: vehicles = []; return vehicles
+    if 1 < len(body) <= 3:
+        last = body[-1]
+        if isinstance(last, ast.Return) and isinstance(last.value, ast.Name):
+            ret_var = last.value.id
+            # Проверяем что переменная инициализирована пустым литералом
+            for stmt in body[:-1]:
+                if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                        and isinstance(stmt.targets[0], ast.Name)
+                        and stmt.targets[0].id == ret_var
+                        and _is_empty_literal(stmt.value)):
+                    # Переменная = пустой литерал, return переменная
+                    for node in ast.walk(func_node):
+                        if isinstance(node, ast.Name) and node.id in param_names:
+                            return False
+                    return True
+
+    return False
 
 
 def _check_function_preservation(

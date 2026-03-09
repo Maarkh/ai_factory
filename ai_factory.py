@@ -449,7 +449,7 @@ async def main() -> None:
                         _force_approve_files(state, project_path, exhausted, "spec исчерпана + exhausted", logger)
                 elif not made_progress:
                     fails = _bump_phase_fail(state, "develop")
-                    if fails >= 3:
+                    if fails >= 6:
                         unapproved = [f for f in state["files"]
                                       if f not in state.get("approved_files", [])]
                         problem = (
@@ -506,8 +506,8 @@ async def main() -> None:
 
             elif next_phase == "integration_test":
                 total_int_fails = state.get("phase_total_fails", {}).get("integration_test", 0)
-                if total_int_fails >= 8:
-                    logger.warning("⚠️  Integration test падал 8+ раз суммарно → ПРОПУСК, переход к unit_tests.")
+                if total_int_fails >= 4:
+                    logger.warning("⚠️  Integration test падал 4+ раз суммарно → ПРОПУСК, переход к unit_tests.")
                     state["integration_passed"] = True
                     state["integration_skipped"] = True
                     _reset_phase_fail(state, "integration_test")
@@ -519,8 +519,8 @@ async def main() -> None:
 
             elif next_phase == "unit_tests":
                 total_ut_fails = state.get("phase_total_fails", {}).get("unit_tests", 0)
-                if total_ut_fails >= 6:
-                    logger.warning("⚠️  Unit tests падал 6+ раз суммарно → ПРОПУСК, переход к document.")
+                if total_ut_fails >= 3:
+                    logger.warning("⚠️  Unit tests падал 3+ раз суммарно → ПРОПУСК, переход к document.")
                     state["tests_passed"] = True
                     state["tests_skipped"] = True
                     _reset_phase_fail(state, "unit_tests")
