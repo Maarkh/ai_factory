@@ -200,6 +200,10 @@ def _inject_missing_data_models(
     }
 
     for model_name in missing:
+        # Пропускаем не-ASCII имена (русские из A2) и невалидные идентификаторы
+        if not model_name.isascii() or not model_name.replace("_", "a").isidentifier():
+            logger.info(f"  📋 A5: пропущена не-ASCII data model '{model_name}' из A2")
+            continue
         dm = data_models.get(model_name, {})
         fields = dm.get("fields", [])
         # Формируем описание полей для description

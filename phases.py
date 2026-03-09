@@ -34,8 +34,12 @@ def _sanitize_llm_code(code: str) -> str:
     # 1. Убираем markdown code fences (```python ... ```)
     code = re.sub(r"^```[\w]*\s*\n?", "", code, flags=re.MULTILINE)
     code = re.sub(r"^```\s*$", "", code, flags=re.MULTILINE)
-    # 2. Убираем garbage tokens deepseek-coder (и аналогичные спец-токены)
-    code = re.sub(r"<[｜|][\w▁]+[｜|]>", "", code)
+    # 2. Убираем garbage tokens deepseek-coder (begin_of_sentence и т.п.)
+    # Сначала дедупликация: img<token>img_bytes → img_bytes (модель перезапускает генерацию)
+    _GARBAGE_TOKEN = r"<[｜|][\w▁]+[｜|]>"
+    code = re.sub(r"(\w+)" + _GARBAGE_TOKEN + r"\1", r"\1", code)
+    # Затем убираем оставшиеся токены (gcv<token>_image → gcv_image)
+    code = re.sub(_GARBAGE_TOKEN, "", code)
     return code.strip()
 
 
@@ -579,7 +583,7 @@ async def do_self_reflect(
             f"Ключевые внешние импорты из A5 (могут быть расширены разработчиком — это нормально):\n"
             f"{json.dumps(global_imports, ensure_ascii=False, indent=2)}"
         )
-        result   = await ask_agent(logger, "self_reflect", ctx, cache, 0, randomize, language)
+        result   = await ask_agent(logger, "self_reflect", ctx, cache, 0, randomize, language, max_retries=1)
         status   = result.get("status", "OK")
         feedback = _to_str(result.get("feedback", ""))
         improved = _sanitize_llm_code(_to_str(result.get("improved_code", "")))
@@ -870,12 +874,24 @@ async def phase_develop(
                 )
         if global_context:
             dev_ctx += f"ГЛОБАЛЬНЫЙ КОНТЕКСТ (public API других файлов):\n{global_context}\n\n"
-            # Извлекаем имена классов/функций из других файлов — запрет на переопределение
-            defined_elsewhere = re.findall(r'(?:class|def)\s+(\w+)', global_context)
-            if defined_elsewhere:
+            # Извлекаем имена классов/функций из других файлов + файл-источник
+            _import_hints: list[str] = []
+            _cur_file = ""
+            for _gc_line in global_context.splitlines():
+                if _gc_line.startswith("--- ") and _gc_line.endswith(" PUBLIC API ---"):
+                    _cur_file = _gc_line.split("---")[1].strip().replace(" PUBLIC API ", "")
+                elif _cur_file:
+                    _m = re.match(r"(?:class|def|async def)\s+(\w+)", _gc_line.strip())
+                    if _m:
+                        _name = _m.group(1)
+                        _stem = Path(_cur_file).stem
+                        _import_hints.append(f"from {_stem} import {_name}")
+            if _import_hints:
                 dev_ctx += (
-                    f"⛔ ЗАПРЕЩЕНО ПЕРЕОПРЕДЕЛЯТЬ (уже определены в других файлах проекта, "
-                    f"используй import): {', '.join(defined_elsewhere)}\n\n"
+                    f"⛔ ЗАПРЕЩЕНО ПЕРЕОПРЕДЕЛЯТЬ эти классы/функции — они УЖЕ СУЩЕСТВУЮТ.\n"
+                    f"ИСПОЛЬЗУЙ ИМПОРТ:\n"
+                    + "\n".join(f"  {h}" for h in _import_hints)
+                    + "\n\n"
                 )
         if existing_code:
             max_code_chars = MAX_CONTEXT_CHARS // 2
