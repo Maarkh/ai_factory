@@ -17,8 +17,8 @@ import pytest
 
 class TestSanitizeLlmCode:
     def setup_method(self):
-        from phases import _sanitize_llm_code
-        self.sanitize = _sanitize_llm_code
+        from checks import sanitize_llm_code
+        self.sanitize = sanitize_llm_code
 
     def test_strips_markdown_fences(self):
         code = "```python\nprint('hello')\n```"
@@ -56,8 +56,8 @@ class TestSanitizeLlmCode:
 
 class TestCheckFunctionPreservation:
     def setup_method(self):
-        from phases import _check_function_preservation
-        self.check = _check_function_preservation
+        from checks import check_function_preservation
+        self.check = check_function_preservation
 
     def test_no_old_code_returns_empty(self):
         assert self.check("def foo(): pass", "", "", None) == []
@@ -104,8 +104,8 @@ class TestCheckFunctionPreservation:
 
 class TestCheckClassDuplication:
     def setup_method(self):
-        from phases import _check_class_duplication
-        self.check = _check_class_duplication
+        from checks import check_class_duplication
+        self.check = check_class_duplication
 
     def test_no_context_returns_empty(self):
         assert self.check("class Foo: pass", "", None) == []
@@ -140,8 +140,8 @@ class TestCheckClassDuplication:
 
 class TestCheckImportShadowing:
     def setup_method(self):
-        from phases import _check_import_shadowing
-        self.check = _check_import_shadowing
+        from checks import check_import_shadowing
+        self.check = check_import_shadowing
 
     def test_no_shadowing(self):
         code = "from os import path\ndef my_func(): pass"
@@ -177,8 +177,8 @@ class TestCheckImportShadowing:
 
 class TestCheckDataOnlyViolations:
     def setup_method(self):
-        from phases import _check_data_only_violations
-        self.check = _check_data_only_violations
+        from checks import check_data_only_violations
+        self.check = check_data_only_violations
 
     def test_non_data_file_returns_empty(self):
         code = "from models import Camera\ndef process(): pass"
@@ -214,8 +214,8 @@ class TestCheckDataOnlyViolations:
 
 class TestCheckStubFunctions:
     def setup_method(self):
-        from phases import _check_stub_functions
-        self.check = _check_stub_functions
+        from checks import check_stub_functions
+        self.check = check_stub_functions
 
     def test_pass_stub_detected(self):
         code = "def process(data):\n    pass"
@@ -281,8 +281,8 @@ class TestCheckStubFunctions:
 
 class TestCheckContractCompliance:
     def setup_method(self):
-        from phases import _check_contract_compliance
-        self.check = _check_contract_compliance
+        from checks import check_contract_compliance
+        self.check = check_contract_compliance
 
     def test_empty_contract_returns_empty(self):
         assert self.check("def foo(): pass", []) == []
@@ -351,8 +351,8 @@ class TestCheckContractCompliance:
 
 class TestEnsureA5Imports:
     def setup_method(self):
-        from phases import _ensure_a5_imports
-        self.ensure = _ensure_a5_imports
+        from checks import ensure_a5_imports
+        self.ensure = ensure_a5_imports
 
     def test_adds_missing_import(self):
         code = "def process(): pass"
@@ -389,7 +389,7 @@ class TestEnsureA5Imports:
 
 class TestIsHardcodedReturnStub:
     def setup_method(self):
-        from phases import _is_hardcoded_return_stub
+        from checks import _is_hardcoded_return_stub
         import ast
         self.check = _is_hardcoded_return_stub
         self.ast = ast
@@ -436,7 +436,7 @@ class TestIsHardcodedReturnStub:
 
 class TestValidateGlobalImports:
     def setup_method(self):
-        from contract import _validate_global_imports
+        from contract_validation import _validate_global_imports
         self.validate = _validate_global_imports
         self.logger = logging.getLogger("test_contract")
 
@@ -496,7 +496,7 @@ class TestValidateGlobalImports:
 
 class TestValidateImportConsistency:
     def setup_method(self):
-        from contract import _validate_import_consistency
+        from contract_validation import _validate_import_consistency
         self.validate = _validate_import_consistency
         self.logger = logging.getLogger("test_contract")
 
@@ -561,7 +561,7 @@ class TestValidateImportConsistency:
 
 class TestValidateRequirementsTxt:
     def setup_method(self):
-        from contract import validate_requirements_txt
+        from contract_validation import validate_requirements_txt
         self.validate_fn = validate_requirements_txt
         self.logger = logging.getLogger("test_contract")
 
@@ -606,7 +606,7 @@ class TestValidateRequirementsTxt:
 
 class TestNormalizeFileContracts:
     def setup_method(self):
-        from contract import _normalize_file_contracts
+        from contract_validation import _normalize_file_contracts
         self.normalize = _normalize_file_contracts
 
     def test_dict_unchanged(self):
@@ -649,7 +649,7 @@ class TestNormalizeFileContracts:
 
 class TestInjectSignatureTypeImports:
     def setup_method(self):
-        from contract import _inject_signature_type_imports
+        from contract_validation import _inject_signature_type_imports
         self.inject = _inject_signature_type_imports
         self.logger = logging.getLogger("test_contract")
 
@@ -699,7 +699,7 @@ class TestContractPipelineOrder:
 
     def test_normalize_before_validate(self):
         """List-format file_contracts must be normalized before validation."""
-        from contract import _normalize_file_contracts, _validate_import_consistency
+        from contract_validation import _normalize_file_contracts, _validate_import_consistency
         contract = {
             "file_contracts": [
                 {"file": "main.py", "functions": [{"name": "main"}]},
@@ -712,7 +712,7 @@ class TestContractPipelineOrder:
 
     def test_validate_global_imports_removes_phantoms(self):
         """Phantom imports removed before consistency check."""
-        from contract import _validate_global_imports, _validate_import_consistency
+        from contract_validation import _validate_global_imports, _validate_import_consistency
         logger = logging.getLogger("test")
         contract = {
             "file_contracts": {"main.py": [{"name": "main"}]},
@@ -724,7 +724,7 @@ class TestContractPipelineOrder:
 
     def test_full_pipeline_e2e(self):
         """Simulate the full A5 validation pipeline order."""
-        from contract import (
+        from contract_validation import (
             _normalize_file_contracts,
             _validate_global_imports,
             _inject_signature_type_imports,
@@ -773,7 +773,7 @@ class TestSafetyValves:
 
     def test_max_cumulative_threshold(self):
         """MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3 = 45."""
-        from phases import MAX_CUMULATIVE
+        from phase_develop import MAX_CUMULATIVE
         from config import MAX_FILE_ATTEMPTS
         assert MAX_CUMULATIVE == MAX_FILE_ATTEMPTS * 3
 
@@ -840,7 +840,7 @@ class TestSafetyValves:
 
 class TestParseImportLine:
     def setup_method(self):
-        from contract import _parse_import_line
+        from contract_validation import _parse_import_line
         self.parse = _parse_import_line
 
     def test_simple_import(self):
@@ -997,7 +997,7 @@ class TestFindNameInClasses:
 
 class TestAutoAddRequirement:
     def setup_method(self):
-        from contract import _auto_add_requirement
+        from contract_validation import _auto_add_requirement
         self.add = _auto_add_requirement
         self.logger = logging.getLogger("test")
 
