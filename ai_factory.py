@@ -112,9 +112,14 @@ def _init_project_files(
         entry_point = "main.py"
         if "main.py" not in files_list:
             files_list.append("main.py")
-        (src_path / "requirements.txt").write_text(
+        req_path = src_path / "requirements.txt"
+        req_path.write_text(
             "\n".join(deps) if deps else "# No external dependencies\n", encoding="utf-8"
         )
+        # Исправляем невалидные pip-пакеты от LLM (opencv → opencv-python-headless)
+        from contract import _validate_requirements_txt
+        import logging as _logging
+        _validate_requirements_txt(req_path, _logging.getLogger("ai_factory"))
 
     elif language == "typescript":
         entry_point = "main.ts"

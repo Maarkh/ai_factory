@@ -1594,22 +1594,34 @@ async def phase_integration_test(
             logger.info("🔧 Ошибка pip install — исправляю requirements.txt ...")
             req_path = src_path / "requirements.txt"
             if req_path.exists():
+                from code_context import _WRONG_PIP_PACKAGES
                 lines = req_path.read_text(encoding="utf-8").splitlines()
                 new_lines = []
+                fixed_wrong = False
                 for line in lines:
                     stripped = line.strip()
                     if not stripped or stripped.startswith("#"):
                         new_lines.append(line)
                         continue
-                    # Убираем жёсткие версии (==x.y.z) → пусть pip найдёт совместимую
+                    # Исправляем невалидные pip-пакеты (opencv → opencv-python-headless)
                     pkg_base = re.split(r'[=<>~!]', stripped)[0].strip()
+                    if pkg_base in _WRONG_PIP_PACKAGES:
+                        correct_pip, _ = _WRONG_PIP_PACKAGES[pkg_base]
+                        logger.info(f"  → {pkg_base} → {correct_pip} (невалидный pip-пакет)")
+                        new_lines.append(correct_pip)
+                        fixed_wrong = True
+                        continue
+                    # Убираем жёсткие версии (==x.y.z) → пусть pip найдёт совместимую
                     if pkg_base.lower() != stripped.lower():
                         logger.info(f"  → {stripped} → {pkg_base} (убрана версия)")
                         new_lines.append(pkg_base)
                     else:
                         new_lines.append(line)
                 req_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-                logger.info("  ✅ requirements.txt обновлён (убраны версии).")
+                if fixed_wrong:
+                    logger.info("  ✅ requirements.txt: невалидные пакеты исправлены.")
+                else:
+                    logger.info("  ✅ requirements.txt обновлён (убраны версии).")
             continue  # Повторяем попытку с обновлёнными зависимостями
 
         failing_file = _find_failing_file(stderr, stdout, state["files"])

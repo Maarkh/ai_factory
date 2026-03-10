@@ -23,6 +23,15 @@ def _auto_add_requirement(requirements_path: Path, package_name: str, logger: lo
     """Авто-добавляет пакет в requirements.txt если его ещё нет."""
     if not requirements_path or not requirements_path.exists():
         return
+    # Исправляем невалидные pip-имена (LLM часто пишет import-имя вместо pip-имени)
+    from code_context import _WRONG_PIP_PACKAGES
+    if package_name in _WRONG_PIP_PACKAGES:
+        correct_pip, _ = _WRONG_PIP_PACKAGES[package_name]
+        logger.warning(
+            f"  ⚠️  _auto_add_requirement: '{package_name}' → '{correct_pip}' "
+            f"(невалидный pip-пакет)"
+        )
+        package_name = correct_pip
     try:
         content = requirements_path.read_text(encoding="utf-8")
     except OSError:
@@ -38,6 +47,48 @@ def _auto_add_requirement(requirements_path: Path, package_name: str, logger: lo
         content += "\n"
     requirements_path.write_text(content + package_name + "\n", encoding="utf-8")
     logger.info(f"  📦  Авто-добавлен '{package_name}' в requirements.txt")
+
+
+def _validate_requirements_txt(requirements_path: Path, logger: logging.Logger) -> None:
+    """Проверяет requirements.txt на невалидные pip-пакеты и исправляет их."""
+    if not requirements_path or not requirements_path.exists():
+        return
+    from code_context import _WRONG_PIP_PACKAGES
+    try:
+        content = requirements_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    lines = content.splitlines()
+    changed = False
+    new_lines: list[str] = []
+    seen_normalized: set[str] = set()
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            new_lines.append(line)
+            continue
+        pkg = re.split(r"[=<>~!\[;]", stripped)[0].strip()
+        if pkg in _WRONG_PIP_PACKAGES:
+            correct_pip, _ = _WRONG_PIP_PACKAGES[pkg]
+            logger.warning(
+                f"  ⚠️  requirements.txt: '{pkg}' → '{correct_pip}' (невалидный pip-пакет)"
+            )
+            # Заменяем на правильный, если его ещё нет
+            norm = correct_pip.lower().replace("-", "_")
+            if norm not in seen_normalized:
+                new_lines.append(correct_pip)
+                seen_normalized.add(norm)
+            changed = True
+            continue
+        norm = pkg.lower().replace("-", "_")
+        if norm in seen_normalized:
+            changed = True
+            continue  # Дубликат
+        seen_normalized.add(norm)
+        new_lines.append(line)
+    if changed:
+        requirements_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        logger.info("  ✅ requirements.txt: невалидные пакеты исправлены")
 
 
 def _parse_import_line(imp_line: str) -> tuple[str, list[str]] | None:
@@ -329,6 +380,21 @@ def _validate_global_imports(
 
             base_lower = base_module.lower()
             base_normalized = base_lower.replace("-", "_")
+
+            # Проверка: невалидный pip-пакет как import-имя
+            # (ловит "import opencv", "from opencv import ..." — opencv не Python-модуль)
+            from code_context import _WRONG_PIP_PACKAGES
+            if base_module in _WRONG_PIP_PACKAGES:
+                correct_pip, correct_import = _WRONG_PIP_PACKAGES[base_module]
+                corrected = imp_line.replace(base_module, correct_import, 1)
+                logger.warning(
+                    f"  ⚠️  A5 global_imports: '{imp_line}' для {fname} → "
+                    f"'{corrected}' ('{base_module}' невалидный модуль)"
+                )
+                valid_imports.append(corrected)
+                if requirements_path:
+                    _auto_add_requirement(requirements_path, correct_pip, logger)
+                continue
 
             # Проверяем допустимость
             if base_module in stdlib:

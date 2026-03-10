@@ -217,6 +217,23 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "Cython":                   "cython",
 }
 
+# Невалидные pip-пакеты, которые LLM часто галлюцинирует.
+# wrong_pip_name → (correct_pip_name, correct_import_name)
+_WRONG_PIP_PACKAGES: dict[str, tuple[str, str]] = {
+    "opencv":                    ("opencv-python-headless", "cv2"),
+    "cv2":                       ("opencv-python-headless", "cv2"),
+    "tensorflow-gpu":            ("tensorflow",             "tensorflow"),
+    "sklearn":                   ("scikit-learn",           "sklearn"),
+    "bs4":                       ("beautifulsoup4",         "bs4"),
+    "yaml":                      ("pyyaml",                 "yaml"),
+    "attr":                      ("attrs",                  "attr"),
+    "dotenv":                    ("python-dotenv",          "dotenv"),
+    "jwt":                       ("pyjwt",                  "jwt"),
+    "serial":                    ("pyserial",               "serial"),
+    "PIL":                       ("pillow",                 "PIL"),
+    "dateutil":                  ("python-dateutil",        "dateutil"),
+}
+
 # Известные транзитивные зависимости: пакет из requirements.txt → {import-имена}
 # Если tensorflow в requirements.txt → numpy, keras, h5py тоже валидные импорты
 _KNOWN_TRANSITIVE_DEPS: dict[str, set[str]] = {
@@ -254,6 +271,12 @@ def _parse_requirements(path: Path) -> set[str]:
         if not pkg:
             continue
         pkg_lower = pkg.lower()
+        # Пропускаем невалидные pip-пакеты (LLM-галлюцинации)
+        if pkg in _WRONG_PIP_PACKAGES:
+            correct_pip, correct_import = _WRONG_PIP_PACKAGES[pkg]
+            result.add(correct_import.lower())
+            result.add(correct_pip.lower().replace("-", "_"))
+            continue
         # Нормализация: pip нормализует дефисы в подчёркивания
         pkg_normalized = pkg_lower.replace("-", "_")
         result.add(pkg_normalized)
