@@ -30,7 +30,7 @@ class ThreadSafeCache:
 
     def __setitem__(self, key: str, value: Any) -> None:
         with self._lock:
-            self._data[key] = value
+            self._data[key] = copy.deepcopy(value)
 
     def __getitem__(self, key: str) -> Any:
         with self._lock:

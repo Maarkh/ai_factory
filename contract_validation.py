@@ -554,7 +554,7 @@ def _sanitize_implementation_hints(
                     # Имя совпадает с файлом, но класс не определён
                     available = sorted(all_defined[snake])
                     old_hints = hints
-                    hints = hints.replace(word, available[0])
+                    hints = re.sub(rf"\b{re.escape(word)}\b", available[0], hints)
                     if hints != old_hints:
                         logger.info(
                             f"  🔧 A5 hints: заменено '{word}' → '{available[0]}' в {fname} "
@@ -698,7 +698,6 @@ def _inject_requirements_imports(
         search_text = " ".join(search_parts).lower()
 
         existing = gi.setdefault(fname, [])
-        existing_text = " ".join(existing).lower()
 
         for import_name, import_line in pkg_to_import.items():
             # Проверяем упоминание пакета в hints/description (word boundary, не substring)
@@ -1194,19 +1193,28 @@ def _detect_and_fix_circular_imports(
                 + " — удаляю кросс-импорт из одного направления"
             )
             for name, from_stem, to_stem in funcs_in_cycle:
+                # Удаляем import из файла-импортёра (to_stem импортирует из from_stem)
+                # Выбираем файл с бОльшим числом зависимостей (менее "базовый")
                 from_deps = len(graph.get(from_stem, set()))
                 to_deps = len(graph.get(to_stem, set()))
-                remove_from = to_stem if to_deps >= from_deps else from_stem
-                remove_file = next((f for f in files if Path(f).stem == remove_from), None)
-                if remove_file and remove_file in gi:
-                    from_file = next((f for f in files if Path(f).stem == from_stem), None)
-                    if from_file:
-                        from_stem_name = Path(from_file).stem
-                        gi[remove_file] = [
-                            imp for imp in gi[remove_file]
-                            if not (f"from {from_stem_name} import" in imp and name in imp)
-                        ]
-                        logger.info(f"    → Удалён import '{name}' из {remove_file}")
+                # importer — файл, из которого удаляем import; source — откуда импортируется
+                if to_deps >= from_deps:
+                    importer_stem, source_stem = to_stem, from_stem
+                else:
+                    importer_stem, source_stem = from_stem, to_stem
+                importer_file = next((f for f in files if Path(f).stem == importer_stem), None)
+                if importer_file and importer_file in gi:
+                    cleaned = []
+                    for imp in gi[importer_file]:
+                        parsed = _parse_import_line(imp)
+                        if parsed and parsed[0] == source_stem and name in parsed[1]:
+                            remaining = [n for n in parsed[1] if n != name]
+                            if remaining:
+                                cleaned.append(f"from {parsed[0]} import {', '.join(remaining)}")
+                            logger.info(f"    → Удалён import '{name}' из {importer_file}")
+                            continue
+                        cleaned.append(imp)
+                    gi[importer_file] = cleaned
             contract["global_imports"] = gi
             return contract
         logger.info("  ℹ️  Циклы найдены, но нет переносимых элементов.")

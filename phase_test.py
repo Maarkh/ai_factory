@@ -278,9 +278,9 @@ async def phase_integration_test(
         _fix_docker_requirements(src_path, logger)
 
     # ── Сборка образа ────────────────────────────────────────────────────────
-    build_success = False
-    for build_attempt in range(1, 4):
-        if use_custom:
+    if use_custom:
+        build_success = False
+        for build_attempt in range(1, 4):
             logger.info(f"\n🏗️ Сборка Docker-образа (попытка {build_attempt}/3) ...")
             build_success, _, build_err = build_docker_image(src_path, image_tag)
             if build_success:
@@ -303,9 +303,8 @@ async def phase_integration_test(
             except (LLMError, ValueError) as e:
                 logger.exception(f"DevOps (build) упал: {e}")
                 stats.record("devops_runtime", get_model("devops_runtime"), False)
-        else:
-            build_success = True
-            break
+    else:
+        build_success = True
 
     if not build_success:
         state["feedbacks"][state["files"][0]] = "Не удалось собрать Docker-образ."

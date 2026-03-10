@@ -50,6 +50,8 @@ def setup_logger(project_path: Path) -> logging.Logger:
         return logger
 
     level = logging.getLevelName(LOG_LEVEL)
+    if not isinstance(level, int):
+        level = logging.INFO
     logger.setLevel(logging.DEBUG)
 
     # Файловый обработчик (DEBUG — все детали)

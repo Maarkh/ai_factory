@@ -73,9 +73,10 @@ class ModelStats:
             print("  Нет данных.")
             return
         for key, d in sorted(self.data.items()):
-            total = d["success"] + d["fail"]
-            rate  = d["success"] / total * 100 if total else 0
-            print(f"  {key}: {d['success']}/{total} ({rate:.0f}%)")
+            s, f = d.get("success", 0), d.get("fail", 0)
+            total = s + f
+            rate  = s / total * 100 if total else 0
+            print(f"  {key}: {s}/{total} ({rate:.0f}%)")
 
 
 def print_iteration_table(state: dict) -> None:

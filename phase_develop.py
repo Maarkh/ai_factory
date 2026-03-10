@@ -613,9 +613,6 @@ async def phase_develop(
         # Проверка: если код — только imports + пустые строки (модель не написала тело функций),
         # генерируем скелет из A5 контракта и повторяем запрос с ним как "existing_code"
         code_lines = [ln for ln in code.splitlines() if ln.strip() and not ln.strip().startswith("#")]
-        non_import_lines = [ln for ln in code_lines
-                            if not ln.strip().startswith(("import ", "from "))
-                            and not ln.strip().startswith(("class ", "def "))]
         has_functions = any(ln.strip().startswith(("def ", "class ", "async def ")) for ln in code_lines)
         if not has_functions and file_contract and attempt < MAX_FILE_ATTEMPTS - 1:
             logger.warning(

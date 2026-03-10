@@ -77,7 +77,7 @@ def _force_approve_files(state: dict, project_path: Path, files: list[str], reas
 
 
 def _can_revise_spec(state: dict, logger, phase: str = "") -> bool:
-    """Проверяет, не исчерпан ли лимит revise_spec (3 за проект).
+    """Проверяет, не исчерпан ли лимит revise_spec (MAX_SPEC_REVISIONS за проект).
 
     phase — имя фазы-инициатора. При отказе сбрасывается ТОЛЬКО её consecutive-счётчик,
     а не все фазы (иначе supervisor теряет информацию о проблемах в других фазах).
@@ -450,6 +450,8 @@ async def main() -> None:
                 await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                 state["max_iters"] += ITERS_BUMP_REVISE
             save_state(project_path, state)
+            save_cache(project_path, cache)
+            stats.flush()
             state["iteration"] += 1
             continue
 

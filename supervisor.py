@@ -101,13 +101,13 @@ async def ask_supervisor(
         "spec_revisions_count": len(state.get("spec_history", [])),
     }
 
-    ctx = (
+    sup_ctx = (
         f"Текущее состояние проекта:\n"
         f"{json.dumps(summary, ensure_ascii=False, indent=2)}\n\n"
         "Реши следующую фазу строго по правилам из промпта."
     )
     try:
-        result = await ask_agent(logger, "supervisor", ctx, cache, 0, randomize, language)
+        result = await ask_agent(logger, "supervisor", sup_ctx, cache, 0, randomize, language)
 
         # Детерминистская защита от scope creep: максимум 3 revise_spec
         next_phase = result.get("next_phase", "")

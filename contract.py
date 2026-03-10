@@ -345,9 +345,10 @@ async def refresh_api_contract(
             requirements_path=req_path if req_path.exists() else None,
         )
         # Восстановление: если новый A5 потерял валидные импорты из старого A5,
-        # сохраняем их (LLM при cascade refresh часто возвращает мусор вместо imports)
+        # сохраняем их, затем прогоняем через validation pipeline для очистки phantom
         old_gi = state.get("api_contract", {}).get("global_imports", {})
         new_gi = new_contract.setdefault("global_imports", {})
+        restored_any = False
         for fname in files_list:
             old_imports = old_gi.get(fname, [])
             new_imports = new_gi.get(fname, [])
@@ -357,8 +358,14 @@ async def refresh_api_contract(
                     for imp in old_imports:
                         if imp not in new_set:
                             new_imports.append(imp)
+                            restored_any = True
                             logger.info(f"  📎 Восстановлен import из старого A5: '{imp}' для {fname}")
                     new_gi[fname] = new_imports
+        if restored_any:
+            new_contract = run_a5_validation_pipeline(
+                new_contract, state.get("architecture", {}), files_list, logger,
+                requirements_path=req_path if req_path.exists() else None,
+            )
         # Sync: добавляем новые файлы, удаляем призраки
         from state import sync_files_with_a5
         a5_files = set(new_contract.get("file_contracts", {}).keys())

@@ -927,8 +927,8 @@ class TestValidateCrossFileNames:
             src = Path(td)
             code = "from main import something"
             # Self-import is checked by validate_imports, not cross_file_names
-            # This should not crash
-            self.validate(code, "main.py", ["main.py"], src)
+            warnings = self.validate(code, "main.py", ["main.py"], src)
+            assert warnings == [], f"Self-import should be skipped, got: {warnings}"
 
     def test_non_project_import_ignored(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1001,6 +1001,7 @@ class TestRepairTruncatedJson:
         text = '{"a": {"b": {"c": "val'
         result = self.repair(text)
         assert result is not None
+        assert "a" in result
 
 
 # =====================================================

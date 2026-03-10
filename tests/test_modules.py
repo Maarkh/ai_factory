@@ -56,7 +56,7 @@ def test_config_env_vars():
     assert isinstance(LLM_API_KEY, str) and len(LLM_API_KEY) > 0
     assert isinstance(LLM_TIMEOUT, float) and LLM_TIMEOUT > 0
     assert LOG_LEVEL in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
-    assert BASE_DIR.exists() or not BASE_DIR.exists()  # Path object check
+    assert isinstance(BASE_DIR, Path)
 
 
 def test_config_pipeline_knobs():

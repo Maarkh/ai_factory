@@ -16,5 +16,8 @@ MODEL_POOLS: dict[str, list[str]] = {
     "supervisor":       ["qwen3:latest"],
     "self_reflect":     ["deepseek-coder:6.7b"],
     "contract_analyst": ["deepseek-coder:6.7b"],
-    "a5_validator":     ["deepseek-coder:6.7b"],
+    "a5_validator":          ["deepseek-coder:6.7b"],
+    "a5_business_reviewer":  ["qwen3:latest"],
+    "a5_architect_reviewer": ["qwen3:latest"],
+    "a5_contract_reviewer":  ["deepseek-coder:6.7b"],
 }

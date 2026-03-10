@@ -113,7 +113,10 @@ def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
         fpath = src_path / f
         if not fpath.exists():
             continue
-        code = fpath.read_text(encoding="utf-8")
+        try:
+            code = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
         imports = (
             re.findall(r"from\s+(\S+)\s+import", code)
             + re.findall(r"^import\s+([\w.]+)", code, re.MULTILINE)
@@ -476,7 +479,7 @@ def _check_circular_imports(
                     bases.add(rel)
             else:
                 bases.add(b)
-        return bases & project_modules - {file_stem}
+        return (bases & project_modules) - {file_stem}
 
     my_deps = _get_project_imports(current_stem, override_code=code)
     visited: set[str] = set()

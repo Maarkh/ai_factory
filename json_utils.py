@@ -129,7 +129,7 @@ def extract_json_from_text(text: str) -> dict:
         raise ValueError("Пустой ответ от модели")
 
     # Извлекаем JSON из markdown-блоков ```json ... ``` или ``` ... ```
-    md_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    md_match = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", text)
     if md_match:
         try:
             return json.loads(md_match.group(1))
@@ -196,7 +196,9 @@ def extract_json_from_text(text: str) -> dict:
 
     try:
         import json_repair  # type: ignore
-        return json_repair.loads(candidate)
+        repaired = json_repair.loads(candidate)
+        if isinstance(repaired, dict) and repaired:
+            return repaired
     except (ImportError, Exception):
         pass
 
