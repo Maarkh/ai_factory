@@ -5,9 +5,9 @@ import re
 from pathlib import Path
 
 from config import (
-    MAX_FILE_ATTEMPTS, MAX_TEST_ATTEMPTS, MAX_CONTEXT_CHARS, MIN_COVERAGE,
+    MAX_FILE_ATTEMPTS, MAX_TEST_ATTEMPTS, MIN_COVERAGE,
     FACTORY_DIR, LOGS_DIR, SRC_DIR, RUN_TIMEOUT,
-    TRUNCATE_FEEDBACK, TRUNCATE_CODE, TRUNCATE_LOG, TRUNCATE_ERROR_MSG,
+    TRUNCATE_FEEDBACK, TRUNCATE_LOG, TRUNCATE_ERROR_MSG,
 )
 
 MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3
@@ -16,16 +16,14 @@ from exceptions import LLMError
 from llm import ask_agent
 from stats import ModelStats
 from json_utils import to_str, safe_contract
-from lang_utils import LANG_DISPLAY, LANG_EXT, get_execution_command, get_test_command, get_docker_image
+from lang_utils import LANG_EXT, get_execution_command, get_test_command, get_docker_image
 from log_utils import get_model, log_runtime_error
 from code_context import (
     get_global_context, get_full_context,
-    find_failing_file, validate_cross_file_names,
+    find_failing_file,
 )
-from state import push_feedback, update_dependencies, update_dockerfile, update_requirements
-from artifacts import update_artifact_a9, save_artifact
+from state import update_dependencies, update_dockerfile, update_requirements
 from infra import run_in_docker, build_docker_image
-from contract import refresh_api_contract
 from cache import ThreadSafeCache
 from checks import sanitize_llm_code, classify_test_error
 

@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 from pathlib import Path
 
 from config import TRUNCATE_CODE
@@ -14,7 +13,6 @@ from cache import ThreadSafeCache
 from stats import ModelStats
 
 from contract_validation import (
-    _auto_add_requirement,
     _normalize_file_contracts,
     _remove_non_ascii_entries,
     _inject_missing_data_models,

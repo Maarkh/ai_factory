@@ -3,13 +3,12 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from config import MAX_SPEC_REVISIONS, SRC_DIR, TRUNCATE_FEEDBACK
+from config import MAX_SPEC_REVISIONS, SRC_DIR
 from exceptions import LLMError
 from llm import ask_agent
 from stats import ModelStats
 from json_utils import safe_contract
 from lang_utils import LANG_DISPLAY
-from log_utils import get_model
 from artifacts import save_artifact
 from contract import refresh_api_contract, phase_review_api_contract
 from cache import ThreadSafeCache

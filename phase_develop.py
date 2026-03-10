@@ -8,7 +8,6 @@ from typing import Optional
 from config import (
     MAX_FILE_ATTEMPTS, MAX_CONTEXT_CHARS, SRC_DIR,
     MAX_A5_PATCHES_PER_FILE, SELF_REFLECT_RETRIES, TRUNCATE_FEEDBACK,
-    TRUNCATE_CODE,
 )
 
 MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3  # После 15 суммарных попыток — принудительный APPROVE

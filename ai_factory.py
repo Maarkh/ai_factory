@@ -48,7 +48,7 @@ from phases import (
     revise_spec,
 )
 from supervisor import (
-    PipelineContext, ctx, signal_handler,
+    ctx, signal_handler,
     ask_supervisor, bump_phase_fail, reset_phase_fail,
 )
 
