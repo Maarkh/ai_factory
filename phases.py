@@ -44,7 +44,7 @@ def _sanitize_llm_code(code: str) -> str:
     # (imports_from_project = [...], external_dependencies = [...])
     code = re.sub(
         r"\n\s*(?:imports_from_project|external_dependencies|called_by)\s*=\s*\[.*?\]\s*$",
-        "", code, flags=re.DOTALL,
+        "", code, flags=re.MULTILINE,
     )
     return code.strip()
 
@@ -93,8 +93,11 @@ def _ensure_a5_imports(code: str, global_imports: list[str]) -> str:
                         # Объединяем в один import
                         all_names = sorted(ex_names | names)
                         new_line = f"from {source} import {', '.join(all_names)}"
-                        # Заменяем в коде
-                        code = code.replace(ex_m.group(0), new_line, 1)
+                        # Заменяем в коде (ищем оригинальную строку с любым whitespace)
+                        code = re.sub(
+                            rf"^\s*from\s+{re.escape(source)}\s+import\s+.+$",
+                            new_line, code, count=1, flags=re.MULTILINE,
+                        )
                         existing_imports.discard(ex)
                         existing_imports.add(re.sub(r"\s+", " ", new_line))
                     break
@@ -121,9 +124,23 @@ def _ensure_a5_imports(code: str, global_imports: list[str]) -> str:
         lines = code.split("\n")
         insert_pos = 0
         # Пропускаем начальные комментарии, docstrings, shebang
+        in_docstring = False
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'''") or not stripped:
+            # Обработка многострочных docstrings
+            if in_docstring:
+                insert_pos = i + 1
+                if '"""' in stripped or "'''" in stripped:
+                    in_docstring = False
+                continue
+            if (stripped.startswith('"""') or stripped.startswith("'''")):
+                insert_pos = i + 1
+                # Однострочный docstring (открытие и закрытие на одной строке)
+                quote = '"""' if stripped.startswith('"""') else "'''"
+                if stripped.count(quote) < 2:
+                    in_docstring = True
+                continue
+            if stripped.startswith("#") or not stripped:
                 insert_pos = i + 1
             elif stripped.startswith("import ") or stripped.startswith("from "):
                 insert_pos = i  # Вставляем перед первым import
@@ -503,7 +520,7 @@ def _check_contract_compliance(code: str, file_contract: list) -> list[str]:
         return []
     # Извлекаем все определённые в коде имена функций и классов
     code_func_names: list[str] = re.findall(r'^\s*(?:async\s+)?def\s+(\w+)\s*\(', code, re.MULTILINE)
-    code_class_names: list[str] = re.findall(r'^class\s+(\w+)\b', code, re.MULTILINE)
+    code_class_names: list[str] = re.findall(r'^\s*class\s+(\w+)\b', code, re.MULTILINE)
     all_code_names = code_func_names + code_class_names
 
     missing = []
@@ -1184,9 +1201,14 @@ async def phase_develop(
             # Повторяем ключевые проверки на улучшенном коде
             _sr_ok = True
             for _sr_check_name, _sr_warnings in [
+                ("function_preservation", _check_function_preservation(code, new_code, "", file_contract)),
+                ("class_duplication", _check_class_duplication(new_code, current_file, state, src_path)),
+                ("import_shadowing", _check_import_shadowing(new_code)),
                 ("data_only", _check_data_only_violations(new_code, current_file, state["files"])),
                 ("imports", validate_imports(new_code, current_file, state["files"],
                                             req_path if req_path.exists() else None, language, src_path)),
+                ("cross_file_names", validate_cross_file_names(
+                    new_code, current_file, state["files"], src_path) if language == "python" else []),
                 ("stubs", _check_stub_functions(new_code)),
                 ("contract", _check_contract_compliance(new_code, file_contract)),
             ]:

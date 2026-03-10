@@ -116,7 +116,7 @@ def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
         code = fpath.read_text(encoding="utf-8")
         imports = (
             re.findall(r"from\s+(\S+)\s+import", code)
-            + re.findall(r"^import\s+(\S+)", code, re.MULTILINE)
+            + re.findall(r"^import\s+([\w.]+)", code, re.MULTILINE)
             + re.findall(r"require\(['\"]([^'\"]+)['\"]", code)
             + re.findall(r"\buse\s+([\w:]+)", code)
         )
@@ -281,8 +281,10 @@ def _parse_requirements(path: Path) -> set[str]:
         pkg_normalized = pkg_lower.replace("-", "_")
         result.add(pkg_normalized)
         # Маппинг pip→import для известных расхождений
-        if pkg_lower in _PIP_TO_IMPORT:
-            result.add(_PIP_TO_IMPORT[pkg_lower].lower())
+        # _PIP_TO_IMPORT keys могут быть в любом регистре (Twisted, Pygments...)
+        _pip_import = _PIP_TO_IMPORT.get(pkg_lower) or _PIP_TO_IMPORT.get(pkg)
+        if _pip_import:
+            result.add(_pip_import.lower())
         # Также добавляем оригинальное имя (без нормализации)
         result.add(pkg_lower)
         # Транзитивные зависимости (numpy для tensorflow/opencv и т.д.)
@@ -378,6 +380,10 @@ def _get_top_level_names(code: str) -> set[str]:
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     names.add(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    for elt in ast.walk(target):
+                        if isinstance(elt, ast.Name):
+                            names.add(elt.id)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names.add(node.target.id)
         elif isinstance(node, ast.Import):
@@ -389,7 +395,7 @@ def _get_top_level_names(code: str) -> set[str]:
                     names.add(alias.asname or alias.name)
         # Python 3.12+: type X = ... (TypeAlias)
         elif hasattr(ast, "TypeAlias") and isinstance(node, ast.TypeAlias):
-            names.add(node.name)
+            names.add(node.name.id if isinstance(node.name, ast.Name) else str(node.name))
     return names
 
 
@@ -558,7 +564,7 @@ def validate_imports(
                 except (OSError, UnicodeDecodeError):
                     return set()
             fi = re.findall(r"^\s*from\s+(\S+)\s+import", fc, re.MULTILINE)
-            di = re.findall(r"^\s*import\s+(\S+)", fc, re.MULTILINE)
+            di = re.findall(r"^\s*import\s+([\w.]+)", fc, re.MULTILINE)
             bases: set[str] = set()
             for imp in fi + di:
                 b = imp.split(".")[0]
@@ -605,13 +611,13 @@ def validate_imports(
     # Ловит паттерны вроде: VehicleRecord = data_models.VehicleRecord
     # или: result = some_module.function()
     imported_names = set()
+    # ВАЖНО: "from X import Y" НЕ делает X доступным как namespace.
+    # Только "import X" и "import X.Y" делают X доступным.
+    # from-imports добавляем только при relative import (from .X — X не namespace)
     for imp in from_imports:
-        # from X import Y → X импортирован (как модуль)
         base = imp.split(".")[0]
-        if base:
-            imported_names.add(base)
-        else:
-            # relative import: from .X import Y → X
+        if not base:
+            # relative import: from .X import Y → X может быть доступен
             rel = imp.lstrip(".").split(".")[0]
             if rel:
                 imported_names.add(rel)
@@ -747,6 +753,9 @@ def validate_cross_file_names(
             target_tree = ast.parse(target_code)
         except SyntaxError:
             continue
+        # Собираем все классы файла, затем резолвим наследование
+        _file_classes: dict[str, set[str]] = {}
+        _file_bases: dict[str, list[str]] = {}
         for tnode in target_tree.body:
             if isinstance(tnode, ast.ClassDef):
                 methods: set[str] = set()
@@ -757,10 +766,22 @@ def validate_cross_file_names(
                         for t in item.targets:
                             if isinstance(t, ast.Name):
                                 methods.add(t.id)
-                for alias in node.names:
-                    if alias.name == tnode.name:
-                        local_name = alias.asname or alias.name
-                        imported_classes[local_name] = (module_stem, methods)
+                    elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                        methods.add(item.target.id)
+                _file_classes[tnode.name] = methods
+                _file_bases[tnode.name] = [
+                    b.id for b in tnode.bases if isinstance(b, ast.Name)
+                ]
+        # Наследование: добавляем methods из базовых классов того же файла
+        for cls_name, bases in _file_bases.items():
+            for base_name in bases:
+                if base_name in _file_classes:
+                    _file_classes[cls_name] |= _file_classes[base_name]
+        for cls_name, cls_methods in _file_classes.items():
+            for alias in node.names:
+                if alias.name == cls_name:
+                    local_name = alias.asname or alias.name
+                    imported_classes[local_name] = (module_stem, cls_methods)
 
     if imported_classes:
         # variable = ClassName(...) → variable type is ClassName

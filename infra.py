@@ -23,13 +23,15 @@ def run_command(
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
             return proc.returncode, stdout, stderr
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             proc.terminate()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-            return -1, "", f"TIMEOUT: процесс не завершился за {timeout}с."
+            partial_out = (e.stdout or "")[-2000:] if e.stdout else ""
+            partial_err = (e.stderr or "")[-2000:] if e.stderr else ""
+            return -1, partial_out, f"TIMEOUT: процесс не завершился за {timeout}с.\n{partial_err}"
     except FileNotFoundError as e:
         return -1, "", f"Команда не найдена: {e}"
 

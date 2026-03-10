@@ -710,8 +710,10 @@ def _inject_requirements_imports(
         existing_text = " ".join(existing).lower()
 
         for import_name, import_line in pkg_to_import.items():
-            # Проверяем упоминание пакета в hints/description
-            if import_name.lower() in search_text and import_name.lower() not in existing_text:
+            # Проверяем упоминание пакета в hints/description (word boundary, не substring)
+            if (len(import_name) >= 3
+                    and re.search(rf'\b{re.escape(import_name.lower())}\b', search_text)
+                    and import_line not in existing):
                 existing.append(import_line)
                 logger.info(f"  📎 A5 global_imports: авто-добавлен '{import_line}' для {fname} (из requirements + hints)")
 
@@ -782,6 +784,17 @@ def _inject_cross_file_imports(
             for class_name, source_file in class_to_file.items():
                 if source_file == fname:
                     continue  # Класс определён в этом же файле
+                # Пропускаем короткие/общие имена — слишком много false positives
+                if len(class_name) < 4 or class_name in {
+                    "Error", "Data", "Config", "Image", "Result", "Response",
+                    "Request", "Event", "Model", "Base", "Item", "Type", "Node",
+                    "Info", "State", "Action", "Status", "Value", "Entry", "Record",
+                    "Task", "Message", "Handler", "Manager", "Service", "Client",
+                    "Server", "Worker", "Logger", "Filter", "Parser", "Builder",
+                }:
+                    # Для общих имён — проверяем только сигнатуру (без desc/hints)
+                    if not re.search(rf'\b{re.escape(class_name)}\b', sig_first_line):
+                        continue
                 if re.search(rf'\b{re.escape(class_name)}\b', search_text):
                     needed_imports[class_name] = source_file
 
@@ -1110,8 +1123,9 @@ def _detect_and_fix_circular_imports(
         f"{'; '.join(' → '.join(c) for c in cycles)}"
     )
 
-    # 4. Находим classes, которые импортируются другим файлом цикла
+    # 4. Находим classes/functions, которые импортируются другим файлом цикла
     classes_to_move: dict[str, str] = {}  # class_name → source_stem
+    funcs_in_cycle: list[tuple[str, str, str]] = []  # (name, from_stem, to_stem)
     for stem in cycle_stems:
         fname = next((f for f in files if Path(f).stem == stem), None)
         if not fname or fname not in fc:
@@ -1122,15 +1136,41 @@ def _detect_and_fix_circular_imports(
             for src_stem, name in import_details.get(other_stem, []):
                 if src_stem != stem:
                     continue
-                # Проверяем что name — класс в file_contracts
+                # Проверяем что name — класс или функция в file_contracts
                 for item in fc.get(fname, []):
                     if isinstance(item, dict) and item.get("name") == name:
                         sig = item.get("signature", "")
                         if sig.strip().startswith("class "):
                             classes_to_move[name] = stem
+                        else:
+                            funcs_in_cycle.append((name, stem, other_stem))
 
     if not classes_to_move:
-        logger.info("  ℹ️  Циклы найдены, но нет переносимых классов (циклы через функции).")
+        if funcs_in_cycle:
+            # Циклы через функции: разрываем удалением кросс-импорта из одного направления
+            logger.warning(
+                f"  ⚠️  Циклические imports через функции: "
+                + ", ".join(f"{n} ({s}→{d})" for n, s, d in funcs_in_cycle)
+                + " — удаляю кросс-импорт из одного направления"
+            )
+            # Удаляем import из файла с бОльшим числом зависимостей (он менее "базовый")
+            for name, from_stem, to_stem in funcs_in_cycle:
+                from_deps = len(graph.get(from_stem, set()))
+                to_deps = len(graph.get(to_stem, set()))
+                remove_from = to_stem if to_deps >= from_deps else from_stem
+                remove_file = next((f for f in files if Path(f).stem == remove_from), None)
+                if remove_file and remove_file in gi:
+                    from_file = next((f for f in files if Path(f).stem == from_stem), None)
+                    if from_file:
+                        from_stem_name = Path(from_file).stem
+                        gi[remove_file] = [
+                            imp for imp in gi[remove_file]
+                            if not (f"from {from_stem_name} import" in imp and name in imp)
+                        ]
+                        logger.info(f"    → Удалён import '{name}' из {remove_file}")
+            contract["global_imports"] = gi
+            return contract
+        logger.info("  ℹ️  Циклы найдены, но нет переносимых элементов.")
         return contract
 
     # 5. Определяем/создаём models файл
@@ -1349,8 +1389,12 @@ async def patch_contract_for_file(
         patch_fc = _parse_if_str(patch.get("file_contracts", {}), dict, {})
         patch_gi = _parse_if_str(patch.get("global_imports", {}), dict, {})
 
-        file_contract = patch_fc.get(filename) or next(iter(patch_fc.values()), [])
-        file_imports  = patch_gi.get(filename) or next(iter(patch_gi.values()), [])
+        file_contract = patch_fc.get(filename)
+        if file_contract is None:
+            file_contract = next(iter(patch_fc.values()), [])
+        file_imports = patch_gi.get(filename)
+        if file_imports is None:
+            file_imports = next(iter(patch_gi.values()), [])
 
         if file_contract:
             fc[filename] = _parse_if_str(file_contract, list, [])
@@ -1365,12 +1409,12 @@ async def patch_contract_for_file(
                 requirements_path=req_path if req_path.exists() else None,
             )
             contract = _inject_signature_type_imports(contract, logger)
-            contract = _validate_import_consistency(contract, logger)
             contract = _sanitize_implementation_hints(contract, logger)
             contract = _inject_requirements_imports(contract, req_path if req_path.exists() else None, logger)
             contract = _inject_cross_file_imports(contract, logger)
             contract = _dedup_cross_file_classes(contract, logger)
             contract = _validate_signature_types(contract, files_list, logger)
+            contract = _validate_import_consistency(contract, logger)
             contract = _detect_and_fix_circular_imports(contract, files_list, logger)
             contract = _remove_non_ascii_entries(contract)
             state["api_contract"] = contract

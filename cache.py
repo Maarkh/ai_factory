@@ -15,10 +15,12 @@ class ThreadSafeCache:
         self._data = data
         self._lock = threading.RLock()
 
+    _MISSING = object()
+
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
-            val = self._data.get(key)
-            if val is None:
+            val = self._data.get(key, self._MISSING)
+            if val is self._MISSING:
                 return default
             return copy.deepcopy(val)
 

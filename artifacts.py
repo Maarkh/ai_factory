@@ -32,10 +32,10 @@ def save_artifact(
     (art_dir / fname).write_text(text, encoding="utf-8")
 
 
-def load_artifact(project_path: Path, artifact_id: str) -> Optional[str]:
+def load_artifact(project_path: Path, artifact_id: str, extra_label: str = "") -> Optional[str]:
     """Загружает артефакт по ID. Возвращает текст или None."""
     art_dir = project_path / FACTORY_DIR / ARTIFACTS_DIR
-    label = ARTIFACT_LABELS.get(artifact_id, artifact_id.lower())
+    label = ARTIFACT_LABELS.get(artifact_id, extra_label or artifact_id.lower())
     fname = f"{artifact_id}_{label}.md"
     p = art_dir / fname
     return p.read_text(encoding="utf-8") if p.exists() else None

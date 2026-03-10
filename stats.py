@@ -32,14 +32,20 @@ class ModelStats:
         # Атомарная запись: tmp → rename
         content = json.dumps(self.data, indent=2, ensure_ascii=False)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
+        closed = False
         try:
             os.write(fd, content.encode("utf-8"))
             os.fsync(fd)
             os.close(fd)
+            closed = True
             os.replace(tmp, self.path)
         except OSError:
-            os.close(fd)
-            os.unlink(tmp)
+            if not closed:
+                os.close(fd)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
             raise
         self._dirty = 0
 

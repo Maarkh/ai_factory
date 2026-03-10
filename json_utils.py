@@ -127,7 +127,7 @@ def _extract_json_from_text(text: str) -> dict:
         raise ValueError("Пустой ответ от модели")
 
     # Извлекаем JSON из markdown-блоков ```json ... ``` или ``` ... ```
-    md_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    md_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if md_match:
         try:
             return json.loads(md_match.group(1))

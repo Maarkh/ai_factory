@@ -485,7 +485,7 @@ async def main() -> None:
                     state["e2e_attempt"] = 0
                     _reset_phase_fail(state, "e2e_review")
                 elif not phase_cross_file_check(logger, project_path, state):
-                    _bump_phase_fail(state, "e2e_review")
+                    _bump_phase_fail(state, "cross_file_check")
                     save_state(project_path, state)
                     state["iteration"] += 1
                     continue

@@ -92,7 +92,7 @@ def _get_feedback_ctx(state: dict, filename: str) -> str:
 
 def ensure_feedback_keys(state: dict) -> None:
     state.setdefault("feedbacks", {})
-    for f in state["files"]:
+    for f in state.get("files", []):
         state["feedbacks"].setdefault(f, "")
     state.setdefault("feedback_history", {})
     _safe_contract(state)
