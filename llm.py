@@ -70,7 +70,6 @@ _RETRYABLE_ERRORS = (
     httpx.TimeoutException,
     asyncio.TimeoutError,
     json.JSONDecodeError,
-    ValueError,
 )
 
 
@@ -195,7 +194,9 @@ async def ask_agent(
                     logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (done_reason=length, num_predict={LLM_MAX_TOKENS})")
                 result = json.loads(raw)
                 if not isinstance(result, dict) or not result:
-                    raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__} (len={len(result) if isinstance(result, dict) else 'N/A'})")
+                    raise json.JSONDecodeError(
+                        f"Ожидался непустой dict, получен {type(result).__name__}", raw or "", 0
+                    )
                 log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
                 if ckey is not None:
                     cache[ckey] = result
@@ -216,7 +217,9 @@ async def ask_agent(
                         logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (done_reason=length)")
                     result = extract_json_from_text(raw)
                     if not isinstance(result, dict) or not result:
-                        raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__}")
+                        raise json.JSONDecodeError(
+                            f"Ожидался непустой dict, получен {type(result).__name__}", raw or "", 0
+                        )
                     log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
                     if ckey is not None:
                         cache[ckey] = result

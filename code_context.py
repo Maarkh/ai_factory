@@ -452,12 +452,12 @@ def _check_circular_imports(
 ) -> list[str]:
     """DFS-поиск циклических импортов через граф проектных файлов."""
     current_stem = Path(filename).stem
+    stem_to_file = {Path(f).stem: f for f in project_files}
 
     def _get_project_imports(file_stem: str, override_code: str | None = None) -> set[str]:
         if override_code is not None:
             fc = override_code
         else:
-            stem_to_file = {Path(f).stem: f for f in project_files}
             target_fname = stem_to_file.get(file_stem)
             if not target_fname:
                 return set()
@@ -512,12 +512,8 @@ def _check_undefined_refs(
 ) -> list[str]:
     """Проверяет undefined module references: name.attr где name не импортирован."""
     imported_names: set[str] = set()
-    for imp in from_imports:
-        base = imp.split(".")[0]
-        if not base:
-            rel = imp.lstrip(".").split(".")[0]
-            if rel:
-                imported_names.add(rel)
+    # Только "import X" делает X доступным как namespace
+    # "from X import Y" НЕ делает X доступным
     for imp in direct_imports:
         base = imp.split(".")[0]
         if base:
@@ -632,8 +628,10 @@ def validate_imports(
         if base_lower in pip_packages or base_normalized in pip_packages:
             continue
 
-        # 4. Общеизвестные встроенные модули (typing_extensions, etc.)
-        if base.startswith("_"):
+        # 4. Общеизвестные встроенные модули с подчёркиванием
+        if base in {"_thread", "_io", "_collections", "_abc", "_decimal",
+                     "typing_extensions", "_operator", "_functools", "_heapq",
+                     "_contextvars", "_signal", "_csv", "_json", "_datetime"}:
             continue
 
         # Подсказка: если phantom-имя похоже на один из файлов проекта

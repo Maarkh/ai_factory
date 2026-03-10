@@ -199,7 +199,7 @@ def extract_json_from_text(text: str) -> dict:
         repaired = json_repair.loads(candidate)
         if isinstance(repaired, dict) and repaired:
             return repaired
-    except (ImportError, Exception):
+    except (ImportError, json.JSONDecodeError, ValueError, TypeError):
         pass
 
     raise ValueError(f"Не удалось извлечь JSON: {text[:TRUNCATE_ERROR_MSG]}...")

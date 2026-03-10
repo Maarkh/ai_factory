@@ -482,18 +482,22 @@ def _validate_import_consistency(
             if not defined_names.get(source_stem):
                 valid.append(imp_line)
                 continue
-            # Проверяем наличие каждого имени
-            valid_names = [n for n in imported_names if n in defined_names[source_stem]]
-            invalid_names = [n for n in imported_names if n not in defined_names[source_stem]]
-            if invalid_names:
-                for inv_name in invalid_names:
+            # Проверяем наличие каждого имени, сохраняя оригинальные части (с as-алиасами)
+            m_imp = re.match(r"from\s+[\w.]+\s+import\s+(.+)", imp_line.strip())
+            raw_parts = [p.strip() for p in m_imp.group(1).split(",")] if m_imp else []
+            valid_parts = []
+            for part in raw_parts:
+                name = part.split()[0].strip()
+                if name in defined_names[source_stem]:
+                    valid_parts.append(part)
+                else:
                     logger.warning(
-                        f"  ⚠️  A5 global_imports: удалён '{inv_name}' из '{imp_line}' для {fname} — "
+                        f"  ⚠️  A5 global_imports: удалён '{name}' из '{imp_line}' для {fname} — "
                         f"не определён в file_contracts {file_stems[source_stem]} "
                         f"(доступны: {', '.join(sorted(defined_names[source_stem]))})"
                     )
-            if valid_names:
-                valid.append(f"from {source_stem} import {', '.join(valid_names)}")
+            if valid_parts:
+                valid.append(f"from {source_stem} import {', '.join(valid_parts)}")
             # Если все имена невалидны — строка не добавляется
         cleaned_gi[fname] = valid
 
@@ -1105,7 +1109,9 @@ def _move_classes_to_models(
         source_file = next((f for f in files if Path(f).stem == source_stem), None)
         if not source_file:
             continue
-        source_items = fc.get(source_file, [])
+        if source_file not in fc:
+            continue
+        source_items = fc[source_file]
         for i, item in enumerate(source_items):
             if isinstance(item, dict) and item.get("name") == class_name:
                 fc[models_file].append(source_items.pop(i))
@@ -1193,21 +1199,13 @@ def _detect_and_fix_circular_imports(
                 + " — удаляю кросс-импорт из одного направления"
             )
             for name, from_stem, to_stem in funcs_in_cycle:
-                # Удаляем import из файла-импортёра (to_stem импортирует из from_stem)
-                # Выбираем файл с бОльшим числом зависимостей (менее "базовый")
-                from_deps = len(graph.get(from_stem, set()))
-                to_deps = len(graph.get(to_stem, set()))
-                # importer — файл, из которого удаляем import; source — откуда импортируется
-                if to_deps >= from_deps:
-                    importer_stem, source_stem = to_stem, from_stem
-                else:
-                    importer_stem, source_stem = from_stem, to_stem
-                importer_file = next((f for f in files if Path(f).stem == importer_stem), None)
+                # to_stem импортирует name из from_stem — удаляем этот import
+                importer_file = next((f for f in files if Path(f).stem == to_stem), None)
                 if importer_file and importer_file in gi:
                     cleaned = []
                     for imp in gi[importer_file]:
                         parsed = _parse_import_line(imp)
-                        if parsed and parsed[0] == source_stem and name in parsed[1]:
+                        if parsed and parsed[0] == from_stem and name in parsed[1]:
                             remaining = [n for n in parsed[1] if n != name]
                             if remaining:
                                 cleaned.append(f"from {parsed[0]} import {', '.join(remaining)}")
@@ -1266,11 +1264,8 @@ def run_a5_validation_pipeline(
     files: list[str],
     logger: logging.Logger,
     requirements_path: Path | None = None,
-    system_specs: dict | None = None,
 ) -> dict:
     """Полный конвейер детерминистских валидаций A5. Вызывается из 4 мест в contract.py."""
-    if system_specs:
-        contract = _inject_missing_data_models(contract, system_specs, files, logger)
     contract = _validate_global_imports(
         contract, arch_resp, files, logger,
         requirements_path=requirements_path,

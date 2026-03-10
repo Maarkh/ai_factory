@@ -142,12 +142,16 @@ def generate_summary(project_path: Path, state: dict) -> None:
 
 
 def update_requirements(src_path: Path, orig: str, alt: str) -> None:
-    """requirements.txt — в src/."""
+    """requirements.txt — в src/. Совпадение по базовому имени пакета (до ==, >=, etc.)."""
     req_path = src_path / "requirements.txt"
     if not req_path.exists():
         return
-    lines     = req_path.read_text(encoding="utf-8").splitlines()
-    new_lines = [line if line.strip().lower() != orig.strip().lower() else alt for line in lines]
+    orig_base = re.split(r"[=<>!~\[]", orig.strip())[0].strip().lower()
+    lines = req_path.read_text(encoding="utf-8").splitlines()
+    new_lines = []
+    for line in lines:
+        line_base = re.split(r"[=<>!~\[]", line.strip())[0].strip().lower()
+        new_lines.append(alt if line_base == orig_base else line)
     req_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 

@@ -542,6 +542,8 @@ async def main() -> None:
                 elif not phase_cross_file_check(logger, project_path, state):
                     bump_phase_fail(state, "cross_file_check")
                     save_state(project_path, state)
+                    save_cache(project_path, cache)
+                    stats.flush()
                     state["iteration"] += 1
                     continue
                 elif not await phase_e2e_review(logger, project_path, state, cache, stats, state["e2e_attempt"], randomize=randomize_models):

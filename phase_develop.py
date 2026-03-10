@@ -438,7 +438,7 @@ def _build_dev_context(
         _cur_file = ""
         for _gc_line in global_context.splitlines():
             if _gc_line.startswith("--- ") and _gc_line.endswith(" PUBLIC API ---"):
-                _cur_file = _gc_line.split("---")[1].strip().replace(" PUBLIC API ", "")
+                _cur_file = _gc_line.split("---")[1].strip().replace(" PUBLIC API", "").strip()
             elif _cur_file:
                 _m = re.match(r"(?:class|def|async def)\s+(\w+)", _gc_line.strip())
                 if _m:
@@ -585,7 +585,6 @@ async def phase_develop(
         dev_ctx = _build_dev_context(
             state, current_file, existing_code, file_contract, global_imports, global_context, src_path,
         )
-        req_path = src_path / "requirements.txt"
 
         dev_model = get_model("developer", attempt, randomize=randomize)
         logger.info(

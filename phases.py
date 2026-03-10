@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from config import MAX_SPEC_REVISIONS, SRC_DIR
+from config import MAX_SPEC_REVISIONS, SRC_DIR, E2E_TOTAL_SKIP, INTEGRATION_TOTAL_SKIP, UNIT_TEST_TOTAL_SKIP
 from exceptions import LLMError
 from llm import ask_agent
 from stats import ModelStats
@@ -142,11 +142,11 @@ async def revise_spec(
         state["env_fixes"]          = {}
         state["phase_fail_counts"]  = {}
         pt = state.get("phase_total_fails", {})
-        if pt.get("e2e_review", 0) < 6:
+        if pt.get("e2e_review", 0) < E2E_TOTAL_SKIP:
             state["e2e_passed"] = False
-        if pt.get("integration_test", 0) < 8:
+        if pt.get("integration_test", 0) < INTEGRATION_TOTAL_SKIP:
             state["integration_passed"] = False
-        if pt.get("unit_tests", 0) < 6:
+        if pt.get("unit_tests", 0) < UNIT_TEST_TOTAL_SKIP:
             state["tests_passed"] = False
         state["document_generated"] = False
 

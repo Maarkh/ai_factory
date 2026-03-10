@@ -18,7 +18,7 @@ def sanitize_llm_code(code: str) -> str:
     # 3. Убираем JSON-wrapper поля, которые LLM встраивает в код
     # (imports_from_project = [...], external_dependencies = [...])
     code = re.sub(
-        r"\n\s*(?:imports_from_project|external_dependencies|called_by)\s*=\s*\[.*?\]\s*$",
+        r"^\s*(?:imports_from_project|external_dependencies|called_by)\s*=\s*\[.*?\]\s*$",
         "", code, flags=re.MULTILINE,
     )
     return code.strip()
@@ -79,13 +79,16 @@ def ensure_a5_imports(code: str, global_imports: list[str]) -> str:
             if not found_source:
                 missing.append(normalized)
         else:
-            # "import X as Y" — проверяем по alias
+            # "import X as Y" — проверяем по полному совпадению (включая alias)
             m2 = re.match(r"import\s+(\S+)(?:\s+as\s+(\w+))?", normalized)
             if m2:
                 module = m2.group(1)
-                alias = m2.group(2) or module.split(".")[0]
-                # Если alias уже используется как import
+                alias = m2.group(2)
+                # Проверяем: есть ли уже точно такой же import (с тем же alias)?
                 already = any(
+                    re.match(rf"import\s+{re.escape(module)}\s+as\s+{re.escape(alias)}\b", ex)
+                    for ex in existing_imports
+                ) if alias else any(
                     re.match(rf"import\s+{re.escape(module)}\b", ex)
                     for ex in existing_imports
                 )
@@ -386,10 +389,13 @@ def _is_hardcoded_return_stub(func_node: ast.FunctionDef | ast.AsyncFunctionDef)
         if isinstance(val, (ast.List, ast.Dict, ast.Tuple)):
             elts = getattr(val, "elts", None) or []
             keys = getattr(val, "keys", None) or []
+            vals = getattr(val, "values", None) or []
             if not elts and not keys:
                 return True  # [], {}, ()
             if isinstance(val, (ast.List, ast.Tuple)) and all(isinstance(e, ast.Constant) for e in elts):
                 return True  # ['ABC123'], [0, 0, 0]
+            if isinstance(val, ast.Dict) and keys and all(isinstance(k, ast.Constant) for k in keys) and all(isinstance(v, ast.Constant) for v in vals):
+                return True  # {"plate": "ABC123", "confidence": 0.99}
         return False
 
     # Паттерн 1: ровно один statement — return <literal>
