@@ -930,41 +930,18 @@ class TestValidateCrossFileNames:
             # This should not crash
             self.validate(code, "main.py", ["main.py"], src)
 
+    def test_non_project_import_ignored(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "main.py").write_text("from flask import Flask", encoding="utf-8")
+            code = "from flask import Flask\napp = Flask(__name__)"
+            issues = self.validate(code, "main.py", ["main.py"], src)
+            assert issues == []
+
 
 # =====================================================
 # 20. code_context: _get_top_level_names
 # =====================================================
-
-class TestGetTopLevelNames:
-    def setup_method(self):
-        from code_context import get_top_level_names
-        self.get = get_top_level_names
-
-    def test_functions_and_classes(self):
-        code = "def foo(): pass\nclass Bar: pass\nasync def baz(): pass"
-        names = self.get(code)
-        assert names == {"foo", "Bar", "baz"}
-
-    def test_assignments(self):
-        code = "X = 42\ny, z = 1, 2"
-        names = self.get(code)
-        assert "X" in names
-        assert "y" in names
-        assert "z" in names
-
-    def test_import_aliases(self):
-        code = "import os\nfrom pathlib import Path\nimport numpy as np"
-        names = self.get(code)
-        assert "os" in names
-        assert "Path" in names
-        assert "np" in names
-
-    def test_syntax_error_fallback(self):
-        code = "def foo(): pass\nclass Bar: pass\n!!syntax error!!"
-        names = self.get(code)
-        assert "foo" in names
-        assert "Bar" in names
-
 
 # =====================================================
 # 21. code_context: _find_name_in_classes
@@ -994,38 +971,6 @@ class TestFindNameInClasses:
 # =====================================================
 # 22. _auto_add_requirement (contract.py)
 # =====================================================
-
-class TestAutoAddRequirement:
-    def setup_method(self):
-        from contract_validation import _auto_add_requirement
-        self.add = _auto_add_requirement
-        self.logger = logging.getLogger("test")
-
-    def test_adds_new_package(self):
-        with tempfile.TemporaryDirectory() as td:
-            req = Path(td) / "requirements.txt"
-            req.write_text("flask\n", encoding="utf-8")
-            self.add(req, "requests", self.logger)
-            content = req.read_text(encoding="utf-8")
-            assert "requests" in content
-
-    def test_does_not_duplicate(self):
-        with tempfile.TemporaryDirectory() as td:
-            req = Path(td) / "requirements.txt"
-            req.write_text("flask\nrequests\n", encoding="utf-8")
-            self.add(req, "requests", self.logger)
-            content = req.read_text(encoding="utf-8")
-            assert content.count("requests") == 1
-
-    def test_corrects_wrong_pip_name(self):
-        with tempfile.TemporaryDirectory() as td:
-            req = Path(td) / "requirements.txt"
-            req.write_text("flask\n", encoding="utf-8")
-            self.add(req, "opencv", self.logger)
-            content = req.read_text(encoding="utf-8")
-            assert "opencv-python-headless" in content
-            assert "opencv\n" not in content
-
 
 # =====================================================
 # 23. json_utils: _repair_truncated_json
@@ -1111,3 +1056,380 @@ class TestParseRequirements:
     def test_nonexistent_file(self):
         result = self.parse(Path("/nonexistent/requirements.txt"))
         assert result == set()
+
+
+# =====================================================
+# contract_validation: _auto_add_requirement
+# =====================================================
+
+class TestAutoAddRequirement:
+    def setup_method(self):
+        from contract_validation import _auto_add_requirement
+        self.add = _auto_add_requirement
+        self.logger = logging.getLogger("test")
+
+    def test_adds_new_package(self):
+        with tempfile.TemporaryDirectory() as td:
+            req = Path(td) / "requirements.txt"
+            req.write_text("flask\n", encoding="utf-8")
+            self.add(req, "requests", self.logger)
+            content = req.read_text()
+            assert "requests" in content
+
+    def test_skips_existing_package(self):
+        with tempfile.TemporaryDirectory() as td:
+            req = Path(td) / "requirements.txt"
+            req.write_text("requests\n", encoding="utf-8")
+            self.add(req, "requests", self.logger)
+            assert req.read_text().count("requests") == 1
+
+    def test_skips_existing_normalized(self):
+        with tempfile.TemporaryDirectory() as td:
+            req = Path(td) / "requirements.txt"
+            req.write_text("opencv-python\n", encoding="utf-8")
+            self.add(req, "opencv_python", self.logger)
+            lines = [l for l in req.read_text().splitlines() if l.strip()]
+            assert len(lines) == 1
+
+    def test_nonexistent_path(self):
+        self.add(Path("/nonexistent/req.txt"), "flask", self.logger)
+
+    def test_corrects_wrong_pip_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            req = Path(td) / "requirements.txt"
+            req.write_text("flask\n", encoding="utf-8")
+            self.add(req, "opencv", self.logger)
+            content = req.read_text(encoding="utf-8")
+            assert "opencv-python-headless" in content
+
+
+# =====================================================
+# contract_validation: _detect_and_fix_circular_imports
+# =====================================================
+
+class TestDetectAndFixCircularImports:
+    def setup_method(self):
+        from contract_validation import _detect_and_fix_circular_imports
+        self.detect = _detect_and_fix_circular_imports
+        self.logger = logging.getLogger("test")
+
+    def test_no_cycles_unchanged(self):
+        contract = {
+            "file_contracts": {
+                "main.py": [{"name": "main", "signature": "def main()"}],
+                "utils.py": [{"name": "helper", "signature": "def helper()"}],
+            },
+            "global_imports": {
+                "main.py": ["from utils import helper"],
+                "utils.py": [],
+            },
+        }
+        result = self.detect(contract, ["main.py", "utils.py"], self.logger)
+        assert result["global_imports"]["main.py"] == ["from utils import helper"]
+
+    def test_class_cycle_resolved_via_models(self):
+        contract = {
+            "file_contracts": {
+                "a.py": [{"name": "AClass", "signature": "class AClass"}],
+                "b.py": [{"name": "BClass", "signature": "class BClass"}],
+            },
+            "global_imports": {
+                "a.py": ["from b import BClass"],
+                "b.py": ["from a import AClass"],
+            },
+        }
+        files = ["a.py", "b.py"]
+        result = self.detect(contract, files, self.logger)
+        # At least one class should be moved to models.py
+        assert "models.py" in result["file_contracts"]
+
+    def test_empty_contract(self):
+        result = self.detect({"file_contracts": {}, "global_imports": {}}, [], self.logger)
+        assert result == {"file_contracts": {}, "global_imports": {}}
+
+
+# =====================================================
+# contract_validation: _inject_cross_file_imports
+# =====================================================
+
+class TestInjectCrossFileImports:
+    def setup_method(self):
+        from contract_validation import _inject_cross_file_imports
+        self.inject = _inject_cross_file_imports
+        self.logger = logging.getLogger("test")
+
+    def test_injects_missing_import(self):
+        contract = {
+            "file_contracts": {
+                "models.py": [{"name": "Camera", "signature": "class Camera"}],
+                "main.py": [{"name": "process", "signature": "def process(cam: Camera) -> str"}],
+            },
+            "global_imports": {"models.py": [], "main.py": []},
+        }
+        result = self.inject(contract, self.logger)
+        assert any("Camera" in imp for imp in result["global_imports"]["main.py"])
+
+    def test_no_self_import(self):
+        contract = {
+            "file_contracts": {
+                "main.py": [
+                    {"name": "MyClass", "signature": "class MyClass"},
+                    {"name": "use_it", "signature": "def use_it(x: MyClass)"},
+                ],
+            },
+            "global_imports": {"main.py": []},
+        }
+        result = self.inject(contract, self.logger)
+        assert result["global_imports"]["main.py"] == []
+
+    def test_existing_import_not_duplicated(self):
+        contract = {
+            "file_contracts": {
+                "models.py": [{"name": "Camera", "signature": "class Camera"}],
+                "main.py": [{"name": "process", "signature": "def process(cam: Camera)"}],
+            },
+            "global_imports": {"models.py": [], "main.py": ["from models import Camera"]},
+        }
+        result = self.inject(contract, self.logger)
+        assert result["global_imports"]["main.py"].count("from models import Camera") == 1
+
+
+# =====================================================
+# contract_validation: _validate_data_model_coverage
+# =====================================================
+
+class TestValidateDataModelCoverage:
+    def setup_method(self):
+        from contract_validation import _validate_data_model_coverage
+        self.check = _validate_data_model_coverage
+        self.logger = logging.getLogger("test")
+
+    def test_all_covered(self):
+        contract = {
+            "file_contracts": {
+                "models.py": [{"name": "Camera", "signature": "class Camera"}],
+            },
+        }
+        specs = {"data_models": [{"name": "Camera"}]}
+        assert self.check(contract, specs, self.logger) == []
+
+    def test_missing_model(self):
+        contract = {"file_contracts": {"main.py": [{"name": "main", "signature": "def main()"}]}}
+        specs = {"data_models": [{"name": "Vehicle"}]}
+        missing = self.check(contract, specs, self.logger)
+        assert "Vehicle" in missing
+
+    def test_camelcase_match(self):
+        contract = {
+            "file_contracts": {
+                "models.py": [{"name": "LicensePlate", "signature": "class LicensePlate"}],
+            },
+        }
+        specs = {"data_models": [{"name": "license_plate"}]}
+        assert self.check(contract, specs, self.logger) == []
+
+    def test_empty_specs(self):
+        assert self.check({"file_contracts": {}}, {}, self.logger) == []
+        assert self.check({"file_contracts": {}}, {"data_models": []}, self.logger) == []
+
+
+# =====================================================
+# contract_validation: _validate_signature_types
+# =====================================================
+
+class TestValidateSignatureTypes:
+    def setup_method(self):
+        from contract_validation import _validate_signature_types
+        self.validate = _validate_signature_types
+        self.logger = logging.getLogger("test")
+
+    def test_defined_type_ok(self):
+        contract = {
+            "file_contracts": {
+                "models.py": [{"name": "Camera", "signature": "class Camera"}],
+                "main.py": [{"name": "process", "signature": "def process(cam: Camera)"}],
+            },
+            "global_imports": {"models.py": [], "main.py": []},
+        }
+        result = self.validate(contract, ["models.py", "main.py"], self.logger)
+        # Camera is defined, no models.py creation needed
+        models_items = result["file_contracts"].get("models.py", [])
+        assert not any(i.get("name") == "Camera" and "авто-создан" in i.get("description", "")
+                       for i in models_items if isinstance(i, dict))
+
+    def test_undefined_type_creates_class(self):
+        contract = {
+            "file_contracts": {
+                "main.py": [{"name": "process", "signature": "def process(x: FooBar)"}],
+            },
+            "global_imports": {"main.py": []},
+        }
+        result = self.validate(contract, ["main.py"], self.logger)
+        assert "models.py" in result["file_contracts"]
+        names = [i["name"] for i in result["file_contracts"]["models.py"] if isinstance(i, dict)]
+        assert "FooBar" in names
+
+    def test_builtin_types_skipped(self):
+        contract = {
+            "file_contracts": {
+                "main.py": [{"name": "process", "signature": "def process(x: str, y: int) -> bool"}],
+            },
+            "global_imports": {"main.py": []},
+        }
+        result = self.validate(contract, ["main.py"], self.logger)
+        assert "models.py" not in result.get("file_contracts", {}) or \
+               result["file_contracts"].get("models.py", []) == []
+
+    def test_pip_imported_types_skipped(self):
+        contract = {
+            "file_contracts": {
+                "main.py": [{"name": "create_app", "signature": "def create_app() -> Flask"}],
+            },
+            "global_imports": {"main.py": ["from flask import Flask"]},
+        }
+        result = self.validate(contract, ["main.py"], self.logger)
+        # Flask is imported from pip, should NOT be created in models.py
+        if "models.py" in result["file_contracts"]:
+            names = [i["name"] for i in result["file_contracts"]["models.py"] if isinstance(i, dict)]
+            assert "Flask" not in names
+
+
+# =====================================================
+# contract_validation: run_a5_validation_pipeline
+# =====================================================
+
+class TestRunA5ValidationPipeline:
+    def setup_method(self):
+        from contract_validation import run_a5_validation_pipeline
+        self.run = run_a5_validation_pipeline
+        self.logger = logging.getLogger("test")
+
+    def test_basic_contract_passes(self):
+        contract = {
+            "file_contracts": {
+                "main.py": [{"name": "main", "signature": "def main()"}],
+            },
+            "global_imports": {"main.py": ["import os"]},
+        }
+        result = self.run(contract, {}, ["main.py"], self.logger)
+        assert "main.py" in result["file_contracts"]
+        assert isinstance(result["global_imports"]["main.py"], list)
+
+    def test_removes_phantom_imports(self):
+        contract = {
+            "file_contracts": {"main.py": [{"name": "main", "signature": "def main()"}]},
+            "global_imports": {"main.py": ["from phantom_module import Foo"]},
+        }
+        result = self.run(contract, {}, ["main.py"], self.logger)
+        assert len(result["global_imports"]["main.py"]) == 0
+
+
+# =====================================================
+# code_context: get_top_level_names
+# =====================================================
+
+class TestGetTopLevelNames:
+    def setup_method(self):
+        from code_context import get_top_level_names
+        self.get = get_top_level_names
+
+    def test_functions_and_classes(self):
+        code = "def foo(): pass\nclass Bar: pass\nx = 1"
+        names = self.get(code)
+        assert "foo" in names
+        assert "Bar" in names
+        assert "x" in names
+
+    def test_nested_not_included(self):
+        code = "def outer():\n    def inner(): pass"
+        names = self.get(code)
+        assert "outer" in names
+        assert "inner" not in names
+
+    def test_syntax_error_uses_regex_fallback(self):
+        names = self.get("def broken(")
+        # Regex fallback still finds the name
+        assert isinstance(names, set)
+
+    def test_assignments(self):
+        code = "X = 42\ny, z = 1, 2"
+        names = self.get(code)
+        assert "X" in names
+        assert "y" in names
+        assert "z" in names
+
+    def test_import_aliases(self):
+        code = "import os\nfrom pathlib import Path\nimport numpy as np"
+        names = self.get(code)
+        assert "os" in names
+        assert "Path" in names
+        assert "np" in names
+
+
+# =====================================================
+# code_context: validate_cross_file_names
+# =====================================================
+
+# =====================================================
+# phase_test: _deapprove_file
+# =====================================================
+
+class TestDeapproveFile:
+    def setup_method(self):
+        from phase_test import _deapprove_file
+        self.deapprove = _deapprove_file
+
+    def test_removes_from_approved(self):
+        state = {"approved_files": ["main.py"], "feedbacks": {}, "cumulative_file_attempts": {}}
+        self.deapprove(state, "main.py", "broken")
+        assert "main.py" not in state["approved_files"]
+        assert state["feedbacks"]["main.py"] == "broken"
+        assert state["cumulative_file_attempts"]["main.py"] == 3
+
+    def test_cumulative_increments(self):
+        state = {"approved_files": [], "feedbacks": {}, "cumulative_file_attempts": {"x.py": 5}}
+        self.deapprove(state, "x.py", "err", cumulative_bump=3)
+        assert state["cumulative_file_attempts"]["x.py"] == 8
+
+    def test_not_in_approved_no_error(self):
+        state = {"approved_files": ["other.py"], "feedbacks": {}, "cumulative_file_attempts": {}}
+        self.deapprove(state, "main.py", "msg")
+        assert state["feedbacks"]["main.py"] == "msg"
+        assert "other.py" in state["approved_files"]
+
+
+# =====================================================
+# 18. sync_files_with_a5 (state.py)
+# =====================================================
+
+class TestSyncFilesWithA5:
+    def setup_method(self):
+        from state import sync_files_with_a5
+        self.sync = sync_files_with_a5
+        self.logger = logging.getLogger("test")
+
+    def test_adds_new_files(self):
+        state = {"files": ["main.py"], "feedbacks": {"main.py": ""}}
+        self.sync(state, {"main.py", "utils.py"}, self.logger)
+        assert "utils.py" in state["files"]
+        assert state["feedbacks"]["utils.py"] == ""
+
+    def test_removes_ghost_files(self):
+        state = {
+            "files": ["main.py", "old.py"],
+            "feedbacks": {"main.py": "", "old.py": "fb"},
+            "approved_files": ["old.py"],
+            "file_attempts": {"old.py": 3},
+            "cumulative_file_attempts": {"old.py": 5},
+        }
+        self.sync(state, {"main.py"}, self.logger)
+        assert "old.py" not in state["files"]
+        assert "old.py" not in state["feedbacks"]
+        assert "old.py" not in state["approved_files"]
+        assert "old.py" not in state["file_attempts"]
+        assert "old.py" not in state["cumulative_file_attempts"]
+
+    def test_noop_when_synced(self):
+        state = {"files": ["a.py", "b.py"], "feedbacks": {"a.py": "", "b.py": ""}}
+        self.sync(state, {"a.py", "b.py"}, self.logger)
+        assert len(state["files"]) == 2

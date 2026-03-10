@@ -148,7 +148,7 @@ def test_sanitize_files_list():
 # 6. json_utils.py
 # ─────────────────────────────────────────────
 
-def testparse_if_str():
+def test_parse_if_str():
     from json_utils import parse_if_str
     assert parse_if_str([1, 2], list, []) == [1, 2]
     assert parse_if_str("[1,2]", list, []) == [1, 2]
@@ -156,7 +156,7 @@ def testparse_if_str():
     assert parse_if_str(None, dict, {}) == {}
 
 
-def testto_str():
+def test_to_str():
     from json_utils import to_str
     assert to_str("hi") == "hi"
     assert to_str(None) == ""
@@ -164,14 +164,14 @@ def testto_str():
     assert to_str(42) == "42"
 
 
-def testsafe_contract():
+def test_safe_contract():
     from json_utils import safe_contract
     state = {"api_contract": {"file_contracts": '{"a.py": "[1,2]"}', "global_imports": {}}}
     c = safe_contract(state)
     assert isinstance(c["file_contracts"], dict)
 
 
-def testextract_json_from_text():
+def test_extract_json_from_text():
     from json_utils import extract_json_from_text, repair_json
     assert extract_json_from_text('Some text {"key": "value"} more') == {"key": "value"}
     assert extract_json_from_text('```json\n{"answer": 42}\n```') == {"answer": 42}
@@ -335,7 +335,7 @@ def test_feedback_ctx():
     assert len(ctx) > 0
 
 
-def testsanitize_package_name():
+def test_sanitize_package_name():
     from state import sanitize_package_name
     assert sanitize_package_name("requests") == "requests"
     assert sanitize_package_name("requests>=2.0") == "requests>=2.0"
@@ -417,7 +417,7 @@ def test_global_context():
         assert order.index("b.py") < order.index("a.py")
 
 
-def testfind_failing_file():
+def test_find_failing_file():
     from code_context import find_failing_file
     stderr_py = 'Traceback:\n  File "src/utils.py", line 10\nAttributeError'
     assert find_failing_file(stderr_py, "", ["main.py", "utils.py"]) == "utils.py"
@@ -458,36 +458,30 @@ def test_pipeline_context():
 
 @pytest.mark.asyncio
 async def test_ask_agent_returns_dict():
-    """ask_agent должен вернуть dict при успешном ответе клиента."""
+    """ask_agent должен вернуть dict при успешном ответе от _ollama_chat."""
     from llm import ask_agent
     from cache import ThreadSafeCache
     import logging
 
-    mock_client = AsyncMock()
-    mock_response = MagicMock()
-    mock_response.choices[0].message.content = '{"result": "ok"}'
-    mock_client.chat.completions.create.return_value = mock_response
-
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    result = await ask_agent(
-        logger, "developer", "test prompt", cache,
-        attempt=0, language="python", client=mock_client,
-    )
+    with patch("llm._ollama_chat", new=AsyncMock(return_value=('{"result": "ok"}', "stop"))):
+        result = await ask_agent(
+            logger, "developer", "test prompt", cache,
+            attempt=0, language="python",
+        )
     assert result == {"result": "ok"}
-    assert mock_client.chat.completions.create.called
 
 
 @pytest.mark.asyncio
 async def test_ask_agent_cache_hit():
-    """При cache hit клиент не должен вызываться."""
+    """При cache hit _ollama_chat не должен вызываться."""
     from llm import ask_agent
-    from cache import ThreadSafeCache, _cache_key
+    from cache import ThreadSafeCache, cache_key
     from log_utils import get_model
     import logging
 
-    mock_client = AsyncMock()
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
@@ -496,63 +490,66 @@ async def test_ask_agent_cache_hit():
     key = cache_key("business_analyst", model, "cached text", "python")
     cache[key] = {"cached": True}
 
-    result = await ask_agent(
-        logger, "business_analyst", "cached text", cache,
-        attempt=0, language="python", client=mock_client,
-    )
+    mock_chat = AsyncMock()
+    with patch("llm._ollama_chat", new=mock_chat):
+        result = await ask_agent(
+            logger, "business_analyst", "cached text", cache,
+            attempt=0, language="python",
+        )
     assert result == {"cached": True}
-    mock_client.chat.completions.create.assert_not_called()
+    mock_chat.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_ask_agent_raises_llm_error_on_all_retries():
     """Если все попытки провалились — должен подняться LLMError."""
-    import openai
+    import httpx
     from llm import ask_agent
     from cache import ThreadSafeCache
     from exceptions import LLMError
     import logging
 
-    mock_client = AsyncMock()
-    mock_client.chat.completions.create.side_effect = openai.APIError(
-        "service unavailable", request=MagicMock(), body=None
-    )
-
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    with pytest.raises(LLMError):
-        await ask_agent(
-            logger, "developer", "fail prompt", cache,
-            attempt=0, max_retries=1, client=mock_client,
-        )
+    with patch("llm._ollama_chat", new=AsyncMock(
+        side_effect=httpx.ReadTimeout("timeout")
+    )):
+        with pytest.raises(LLMError):
+            await ask_agent(
+                logger, "developer", "fail prompt", cache,
+                attempt=0, max_retries=1,
+            )
 
 
 @pytest.mark.asyncio
 async def test_ask_agent_fallback_plain_text():
-    """При ошибке json_object — должен сделать retry без response_format."""
-    import openai
+    """При ошибке json parse — должен сделать retry в plain text mode."""
     from llm import ask_agent
     from cache import ThreadSafeCache
     import logging
 
-    mock_client = AsyncMock()
-
-    # Первый вызов (json_object mode) падает, второй (plain) возвращает JSON
-    json_error = openai.APIError("bad format", request=MagicMock(), body=None)
-    plain_response = MagicMock()
-    plain_response.choices[0].message.content = '{"fallback": true}'
-    mock_client.chat.completions.create.side_effect = [json_error, plain_response]
-
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    result = await ask_agent(
-        logger, "developer", "test", cache,
-        attempt=0, max_retries=1, client=mock_client,
-    )
+    call_count = 0
+
+    async def mock_ollama_chat(client, model, messages, temp, max_tok, json_mode=False):
+        nonlocal call_count
+        call_count += 1
+        if json_mode:
+            # json mode возвращает невалидный json → ValueError в json.loads
+            return ("not valid json", "stop")
+        # plain text → extract_json_from_text найдёт JSON
+        return ('some text {"fallback": true} more text', "stop")
+
+    with patch("llm._ollama_chat", new=mock_ollama_chat):
+        result = await ask_agent(
+            logger, "developer", "test", cache,
+            attempt=0, max_retries=1,
+        )
     assert result == {"fallback": True}
-    assert mock_client.chat.completions.create.call_count == 2
+    assert call_count == 2
 
 
 # ─────────────────────────────────────────────

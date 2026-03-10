@@ -218,8 +218,8 @@ async def ask_agent(
                     if not isinstance(result, dict) or not result:
                         raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__}")
                     log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
-                    if cache_key is not None:
-                        cache[cache_key] = result
+                    if ckey is not None:
+                        cache[ckey] = result
                     return result
                 except _RETRYABLE_ERRORS as e2:
                     last_exc = e2

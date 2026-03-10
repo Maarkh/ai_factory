@@ -24,6 +24,15 @@ from config import (
     SRC_DIR,
     ARTIFACTS_DIR,
     LOGS_DIR,
+    MAX_ARCH_ATTEMPTS,
+    MAX_A5_REVIEW_ATTEMPTS,
+    DEVELOP_STALL_THRESHOLD,
+    E2E_TOTAL_SKIP,
+    E2E_CONSECUTIVE_REVISE,
+    INTEGRATION_TOTAL_SKIP,
+    UNIT_TEST_TOTAL_SKIP,
+    ITERS_BUMP_REVISE,
+    ITERS_BUMP_SMALL,
 )
 from cache import load_cache, save_cache
 from log_utils import setup_logger, input_with_timeout
@@ -33,7 +42,7 @@ from artifacts import save_artifact
 from infra import check_docker_installed, git_init, git_commit
 from state import (
     save_state, load_state, ensure_feedback_keys,
-    generate_summary, generate_tor_md,
+    generate_summary, generate_tor_md, sync_files_with_a5,
 )
 from lang_utils import LANG_DISPLAY, DOCKER_IMAGES, sanitize_files_list, get_execution_command, get_docker_image
 from contract import phase_generate_api_contract, phase_review_api_contract
@@ -176,6 +185,171 @@ def _init_project_files(
     return files_list, entry_point
 
 
+async def _run_initial_pipeline(
+    logger, project_path: Path, project_name: str,
+    language: str, cache, stats: ModelStats, randomize_models: bool,
+) -> dict | None:
+    """Запускает начальный пайплайн BA→SA→Arch→A5. Возвращает state или None при ошибке."""
+    task = input("Опишите задачу: ").strip()
+    if not task:
+        print("❌ Задача не может быть пустой.")
+        return None
+
+    git_init(project_path)
+
+    print("\n📊 Business Analyst (→ A1) ...")
+    try:
+        ba_resp = await ask_agent(logger, "business_analyst", f"Запрос:\n{task}", cache, language=language)
+        generate_tor_md(project_path, ba_resp)
+    except Exception as e:
+        print(f"❌ Business Analyst упал: {e}")
+        return None
+
+    print("⚙️  System Analyst (→ A2) ...")
+    try:
+        sa_resp = await ask_agent(
+            logger, "system_analyst",
+            f"Запрос:\n{task}\n\nТЗ от БА (A1):\n{json.dumps(ba_resp, ensure_ascii=False, indent=2)}",
+            cache, language=language,
+        )
+    except Exception as e:
+        print(f"❌ System Analyst упал: {e}")
+        return None
+
+    print("🏗️  Architect (→ A3/A4) ...")
+    arch_resp: dict = {}
+    arch_attempt = 0
+    while arch_attempt < MAX_ARCH_ATTEMPTS:
+        if arch_attempt > 0:
+            delay = 2 ** arch_attempt
+            print(f"  ⏳ Пауза {delay}с перед попыткой {arch_attempt + 1}/5 ...")
+            await asyncio.sleep(delay)
+        try:
+            arch_resp = await ask_agent(
+                logger, "architect",
+                (
+                    f"Запрос:\n{task}\n\n"
+                    f"Спецификация от SA (A2):\n{json.dumps(sa_resp, ensure_ascii=False, indent=2)}\n\n"
+                    f"Целевой язык: {LANG_DISPLAY.get(language, language)}"
+                ),
+                cache, arch_attempt, randomize_models, language,
+            )
+            if await phase_validate_architecture(
+                logger, project_path, None, cache, stats,
+                arch_resp, sa_resp, task, language, randomize_models,
+            ):
+                break
+            arch_attempt += 1
+            print(f"🔄 Перегенерация архитектуры (попытка {arch_attempt}/{MAX_ARCH_ATTEMPTS}) ...")
+        except Exception as e:
+            print(f"❌ Architect упал: {e}")
+            arch_attempt += 1
+
+    if arch_attempt >= MAX_ARCH_ATTEMPTS:
+        print(f"❌ Не удалось валидировать архитектуру за {MAX_ARCH_ATTEMPTS} попыток.")
+        return None
+
+    deps       = arch_resp.get("dependencies", [])
+    files_raw  = arch_resp.get("files", [])
+    files_list = sanitize_files_list(files_raw, language)
+
+    files_list, entry_point = _init_project_files(
+        project_path, project_name, language,
+        deps, files_list, arch_resp, ba_resp, sa_resp, task,
+    )
+
+    state = {
+        "task":                 task,
+        "business_requirements": ba_resp,
+        "system_specs":         sa_resp,
+        "architecture":         arch_resp.get("architecture", ""),
+        "api_contract":         {},
+        "test_plan":            {},
+        "files":                files_list,
+        "approved_files":       [],
+        "feedbacks":            {f: "" for f in files_list},
+        "file_attempts":        {},
+        "spec_history":         [],
+        "env_fixes":            {},
+        "phase_fail_counts":    {},
+        "iteration":            1,
+        "max_iters":            MAX_ITERS_DEFAULT,
+        "language":             language,
+        "entry_point":          entry_point,
+        "last_phase":           "initial",
+        "e2e_passed":           False,
+        "integration_passed":   False,
+        "tests_passed":         False,
+        "document_generated":   False,
+    }
+
+    for a5_attempt in range(MAX_A5_REVIEW_ATTEMPTS):
+        api_contract = await phase_generate_api_contract(
+            logger, project_path, state, cache, stats,
+            arch_resp, sa_resp, randomize_models,
+        )
+        state["api_contract"] = api_contract
+        a5_files = set(api_contract.get("file_contracts", {}).keys())
+        sync_files_with_a5(state, a5_files, logger)
+        state["_prev_file_contracts"] = api_contract.get("file_contracts", {})
+        if await phase_review_api_contract(
+            logger, project_path, state, cache, stats,
+            api_contract, arch_resp, sa_resp, randomize_models,
+        ):
+            break
+        logger.warning(f"🔄 A5 отклонён, перегенерация (попытка {a5_attempt + 2}/{MAX_A5_REVIEW_ATTEMPTS}) ...")
+    else:
+        logger.warning(f"⚠️  A5 не прошёл ревью за {MAX_A5_REVIEW_ATTEMPTS} попыток, продолжаем с текущим.")
+
+    save_state(project_path, state)
+    save_cache(project_path, cache)
+    git_commit(project_path, "Initial architecture + artifacts A0-A5")
+
+    return state
+
+
+def _print_success_summary(state: dict, project_path: Path, language: str) -> list[str]:
+    """Печатает итоговую сводку проекта. Возвращает список пропущенных фаз."""
+    src_path = project_path / SRC_DIR
+    skipped = []
+    if state.get("e2e_skipped"):
+        skipped.append("E2E")
+    if state.get("integration_skipped"):
+        skipped.append("Integration")
+    if state.get("tests_skipped"):
+        skipped.append("Unit tests")
+    all_skipped = len(skipped) >= 3
+    print("\n" + "═" * 80)
+    if all_skipped:
+        print(f"{'⚠️  ЧАСТИЧНЫЙ УСПЕХ — ВСЕ ТЕСТЫ ПРОПУЩЕНЫ ⚠️':^80}")
+    elif skipped:
+        print(f"{'⚠️  УСПЕХ С ОГОВОРКАМИ ⚠️':^80}")
+    else:
+        print(f"{'🎉 УСПЕХ! Проект готов 🎉':^80}")
+    print("═" * 80)
+    print(f"📂 Папка проекта : {project_path}")
+    print(f"📦 Исходный код  : {src_path}")
+    print(f"🗄️  Метаданные    : {project_path / FACTORY_DIR}")
+    print(f"🌍 Язык          : {LANG_DISPLAY.get(language, language)}")
+    print(f"🔢 Итераций      : {state['iteration']}")
+    print(f"📄 Файлов        : {len(state['files'])}")
+    if skipped:
+        print(f"⚠️  ПРОПУЩЕНО    : {', '.join(skipped)}")
+    else:
+        print(f"🧪 Unit-тесты + покрытие ≥ {MIN_COVERAGE}%")
+    print(f"🚀 Docker-ready")
+    print("\n📋 Артефакты проекта:")
+    art_dir = project_path / FACTORY_DIR / ARTIFACTS_DIR
+    if art_dir.exists():
+        for art in sorted(art_dir.iterdir()):
+            print(f"   {art.name}")
+    print("\n📋 Запуск:")
+    run_cmd = get_execution_command(language, state.get("entry_point", "main.py"))
+    print(f"   docker run --rm -v $(pwd)/src:/app -w /app {get_docker_image(language)} bash -c '{run_cmd}'")
+    print("═" * 80)
+    return skipped
+
+
 async def main() -> None:
     if not check_docker_installed():
         return
@@ -224,136 +398,12 @@ async def main() -> None:
     if state:
         ensure_feedback_keys(state)
     else:
-        task = input("Опишите задачу: ").strip()
-        if not task:
-            print("❌ Задача не может быть пустой.")
-            return
-
-        git_init(project_path)
-
-        print("\n📊 Business Analyst (→ A1) ...")
-        try:
-            ba_resp = await ask_agent(logger, "business_analyst", f"Запрос:\n{task}", cache, language=language)
-            generate_tor_md(project_path, ba_resp)  # сохраняет A1
-        except Exception as e:
-            print(f"❌ Business Analyst упал: {e}")
-            return
-
-        print("⚙️  System Analyst (→ A2) ...")
-        try:
-            sa_resp = await ask_agent(
-                logger, "system_analyst",
-                f"Запрос:\n{task}\n\nТЗ от БА (A1):\n{json.dumps(ba_resp, ensure_ascii=False, indent=2)}",
-                cache, language=language,
-            )
-        except Exception as e:
-            print(f"❌ System Analyst упал: {e}")
-            return
-
-        print("🏗️  Architect (→ A3/A4) ...")
-        arch_resp: dict = {}
-        arch_attempt = 0
-        while arch_attempt < 5:
-            if arch_attempt > 0:
-                delay = 2 ** arch_attempt
-                print(f"  ⏳ Пауза {delay}с перед попыткой {arch_attempt + 1}/5 ...")
-                await asyncio.sleep(delay)
-            try:
-                arch_resp = await ask_agent(
-                    logger, "architect",
-                    (
-                        f"Запрос:\n{task}\n\n"
-                        f"Спецификация от SA (A2):\n{json.dumps(sa_resp, ensure_ascii=False, indent=2)}\n\n"
-                        f"Целевой язык: {LANG_DISPLAY.get(language, language)}"
-                    ),
-                    cache, arch_attempt, randomize_models, language,
-                )
-                if await phase_validate_architecture(
-                    logger, project_path, None, cache, stats,
-                    arch_resp, sa_resp, task, language, randomize_models,
-                ):
-                    break
-                arch_attempt += 1
-                print(f"🔄 Перегенерация архитектуры (попытка {arch_attempt}/5) ...")
-            except Exception as e:
-                print(f"❌ Architect упал: {e}")
-                arch_attempt += 1
-
-        if arch_attempt >= 5:
-            print("❌ Не удалось валидировать архитектуру за 5 попыток.")
-            return
-
-        deps       = arch_resp.get("dependencies", [])
-        files_raw  = arch_resp.get("files", [])
-        files_list = sanitize_files_list(files_raw, language)
-
-        files_list, entry_point = _init_project_files(
-            project_path, project_name, language,
-            deps, files_list, arch_resp, ba_resp, sa_resp, task,
+        state = await _run_initial_pipeline(
+            logger, project_path, project_name, language,
+            cache, stats, randomize_models,
         )
-
-        # Начальное состояние с полями для артефактов
-        state = {
-            "task":                 task,
-            "business_requirements": ba_resp,
-            "system_specs":         sa_resp,
-            "architecture":         arch_resp.get("architecture", ""),
-            "api_contract":         {},      # A5 — заполняется ниже
-            "test_plan":            {},      # A7
-            "files":                files_list,
-            "approved_files":       [],
-            "feedbacks":            {f: "" for f in files_list},
-            "file_attempts":        {},
-            "spec_history":         [],
-            "env_fixes":            {},
-            "phase_fail_counts":    {},
-            "iteration":            1,
-            "max_iters":            MAX_ITERS_DEFAULT,
-            "language":             language,
-            "entry_point":          entry_point,
-            "last_phase":           "initial",
-            "e2e_passed":           False,
-            "integration_passed":   False,
-            "tests_passed":         False,
-            "document_generated":   False,
-        }
-
-        # Генерируем A5 (API Contract) с ревью
-        for a5_attempt in range(3):
-            api_contract = await phase_generate_api_contract(
-                logger, project_path, state, cache, stats,
-                arch_resp, sa_resp, randomize_models,
-            )
-            state["api_contract"] = api_contract
-            # Sync: A5 pipeline мог создать/удалить файлы (models.py и т.п.)
-            a5_files = set(api_contract.get("file_contracts", {}).keys())
-            for f in a5_files:
-                if f not in state["files"]:
-                    state["files"].append(f)
-                    state["feedbacks"][f] = ""
-            # Удаляем файлы-призраки (есть в state, но нет в A5)
-            for f in list(state["files"]):
-                if f not in a5_files:
-                    logger.info(f"  🗑️  Удалён файл-призрак из state: {f} (нет в A5)")
-                    state["files"].remove(f)
-                    state["feedbacks"].pop(f, None)
-                    if f in state.get("approved_files", []):
-                        state["approved_files"].remove(f)
-                    state.get("file_attempts", {}).pop(f, None)
-                    state.get("cumulative_file_attempts", {}).pop(f, None)
-            state["_prev_file_contracts"] = api_contract.get("file_contracts", {})
-            if await phase_review_api_contract(
-                logger, project_path, state, cache, stats,
-                api_contract, arch_resp, sa_resp, randomize_models,
-            ):
-                break
-            logger.warning(f"🔄 A5 отклонён, перегенерация (попытка {a5_attempt + 2}/3) ...")
-        else:
-            logger.warning("⚠️  A5 не прошёл ревью за 3 попытки, продолжаем с текущим.")
-
-        save_state(project_path, state)
-        save_cache(project_path, cache)
-        git_commit(project_path, "Initial architecture + artifacts A0-A5")
+        if state is None:
+            return
 
     # Привязываем контекст для signal handler
     ctx.bind(project_path, state)
@@ -398,7 +448,7 @@ async def main() -> None:
                     "Вероятно, фундаментальная проблема в спецификации."
                 )
                 await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                state["max_iters"] += 10
+                state["max_iters"] += ITERS_BUMP_REVISE
             save_state(project_path, state)
             state["iteration"] += 1
             continue
@@ -433,7 +483,7 @@ async def main() -> None:
                     if _can_revise_spec(state, logger, "develop"):
                         print(f"📋 Проблема спецификации: {', '.join(spec_blocked)} → revise_spec")
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                        state["max_iters"] += 10
+                        state["max_iters"] += ITERS_BUMP_REVISE
                         for f in spec_blocked:
                             state["file_attempts"][f] = 0
                     else:
@@ -450,14 +500,14 @@ async def main() -> None:
                     if _can_revise_spec(state, logger, "develop"):
                         print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                        state["max_iters"] += 10
+                        state["max_iters"] += ITERS_BUMP_REVISE
                         for f in exhausted:
                             state["file_attempts"][f] = 0
                     else:
                         _force_approve_files(state, project_path, exhausted, "spec исчерпана + exhausted", logger)
                 elif not made_progress:
                     fails = bump_phase_fail(state, "develop")
-                    if fails >= 6:
+                    if fails >= DEVELOP_STALL_THRESHOLD:
                         unapproved = [f for f in state["files"]
                                       if f not in state.get("approved_files", [])]
                         problem = (
@@ -472,7 +522,7 @@ async def main() -> None:
                         if _can_revise_spec(state, logger, "develop"):
                             print(f"⚠️  Разработка не продвигается {fails} итераций → revise_spec ({', '.join(unapproved)})")
                             await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                            state["max_iters"] += 10
+                            state["max_iters"] += ITERS_BUMP_REVISE
                             for f in unapproved:
                                 state["file_attempts"][f] = 0
                         else:
@@ -481,8 +531,8 @@ async def main() -> None:
             elif next_phase == "e2e_review":
                 total_e2e_fails = state.get("phase_total_fails", {}).get("e2e_review", 0)
                 # Предохранитель: после 6+ суммарных E2E отказов — пропускаем к integration_test
-                if total_e2e_fails >= 6:
-                    logger.warning("⚠️  E2E падал 6+ раз суммарно → ПРОПУСК (e2e_skipped=true), переход к integration_test.")
+                if total_e2e_fails >= E2E_TOTAL_SKIP:
+                    logger.warning(f"⚠️  E2E падал {E2E_TOTAL_SKIP}+ раз суммарно → ПРОПУСК (e2e_skipped=true), переход к integration_test.")
                     state["e2e_passed"] = True
                     state["e2e_skipped"] = True
                     state["e2e_attempt"] = 0
@@ -495,8 +545,8 @@ async def main() -> None:
                 elif not await phase_e2e_review(logger, project_path, state, cache, stats, state["e2e_attempt"], randomize=randomize_models):
                     fails = bump_phase_fail(state, "e2e_review")
                     state["e2e_attempt"] += 1
-                    if fails >= 3 and _can_revise_spec(state, logger, "e2e_review"):
-                        print("⚠️  E2E падает 3 раза подряд → принудительный revise_spec.")
+                    if fails >= E2E_CONSECUTIVE_REVISE and _can_revise_spec(state, logger, "e2e_review"):
+                        print(f"⚠️  E2E падает {E2E_CONSECUTIVE_REVISE} раз подряд → принудительный revise_spec.")
                         feedbacks = [
                             f"  {f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
                             for f in state["files"] if state["feedbacks"].get(f, "")
@@ -506,7 +556,7 @@ async def main() -> None:
                             "Конкретные замечания ревьюеров:\n" + "\n".join(feedbacks)
                         )
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                        state["max_iters"] += 5
+                        state["max_iters"] += ITERS_BUMP_SMALL
                 else:
                     state["e2e_passed"] = True
                     state["e2e_attempt"] = 0
@@ -514,8 +564,8 @@ async def main() -> None:
 
             elif next_phase == "integration_test":
                 total_int_fails = state.get("phase_total_fails", {}).get("integration_test", 0)
-                if total_int_fails >= 4:
-                    logger.warning("⚠️  Integration test падал 4+ раз суммарно → ПРОПУСК, переход к unit_tests.")
+                if total_int_fails >= INTEGRATION_TOTAL_SKIP:
+                    logger.warning(f"⚠️  Integration test падал {INTEGRATION_TOTAL_SKIP}+ раз суммарно → ПРОПУСК, переход к unit_tests.")
                     state["integration_passed"] = True
                     state["integration_skipped"] = True
                     reset_phase_fail(state, "integration_test")
@@ -527,8 +577,8 @@ async def main() -> None:
 
             elif next_phase == "unit_tests":
                 total_ut_fails = state.get("phase_total_fails", {}).get("unit_tests", 0)
-                if total_ut_fails >= 3:
-                    logger.warning("⚠️  Unit tests падал 3+ раз суммарно → ПРОПУСК, переход к document.")
+                if total_ut_fails >= UNIT_TEST_TOTAL_SKIP:
+                    logger.warning(f"⚠️  Unit tests падал {UNIT_TEST_TOTAL_SKIP}+ раз суммарно → ПРОПУСК, переход к document.")
                     state["tests_passed"] = True
                     state["tests_skipped"] = True
                     reset_phase_fail(state, "unit_tests")
@@ -549,50 +599,13 @@ async def main() -> None:
                         "Авто-эскалация от Supervisor"
                     ).strip() or "Авто-эскалация от Supervisor"
                     await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                    state["max_iters"] += 10
+                    state["max_iters"] += ITERS_BUMP_REVISE
 
             elif next_phase == "success":
                 git_commit(project_path, f"Successful build: iteration {state['iteration']}")
                 print_iteration_table(state)
                 generate_summary(project_path, state)
-
-                src_path = project_path / SRC_DIR
-                skipped = []
-                if state.get("e2e_skipped"):
-                    skipped.append("E2E")
-                if state.get("integration_skipped"):
-                    skipped.append("Integration")
-                if state.get("tests_skipped"):
-                    skipped.append("Unit tests")
-                all_skipped = len(skipped) >= 3
-                print("\n" + "═" * 80)
-                if all_skipped:
-                    print(f"{'⚠️  ЧАСТИЧНЫЙ УСПЕХ — ВСЕ ТЕСТЫ ПРОПУЩЕНЫ ⚠️':^80}")
-                elif skipped:
-                    print(f"{'⚠️  УСПЕХ С ОГОВОРКАМИ ⚠️':^80}")
-                else:
-                    print(f"{'🎉 УСПЕХ! Проект готов 🎉':^80}")
-                print("═" * 80)
-                print(f"📂 Папка проекта : {project_path}")
-                print(f"📦 Исходный код  : {src_path}")
-                print(f"🗄️  Метаданные    : {project_path / FACTORY_DIR}")
-                print(f"🌍 Язык          : {LANG_DISPLAY.get(language, language)}")
-                print(f"🔢 Итераций      : {state['iteration']}")
-                print(f"📄 Файлов        : {len(state['files'])}")
-                if skipped:
-                    print(f"⚠️  ПРОПУЩЕНО    : {', '.join(skipped)}")
-                else:
-                    print(f"🧪 Unit-тесты + покрытие ≥ {MIN_COVERAGE}%")
-                print(f"🚀 Docker-ready")
-                print("\n📋 Артефакты проекта:")
-                art_dir = project_path / FACTORY_DIR / ARTIFACTS_DIR
-                if art_dir.exists():
-                    for art in sorted(art_dir.iterdir()):
-                        print(f"   {art.name}")
-                print("\n📋 Запуск:")
-                run_cmd = get_execution_command(language, state.get("entry_point", "main.py"))
-                print(f"   docker run --rm -v $(pwd)/src:/app -w /app {get_docker_image(language)} bash -c '{run_cmd}'")
-                print("═" * 80)
+                skipped = _print_success_summary(state, project_path, language)
                 stats.print_report()
 
                 act = input_with_timeout(
@@ -619,7 +632,7 @@ async def main() -> None:
                         # Сброс phase counters чтобы safety valves не блокировали re-test
                         state["phase_total_fails"] = {}
                         state["phase_fail_counts"] = {}
-                        state["max_iters"] += 5
+                        state["max_iters"] += ITERS_BUMP_SMALL
                         save_state(project_path, state)
                 elif act == "spec":
                     if _can_revise_spec(state, logger, "success"):
@@ -627,7 +640,7 @@ async def main() -> None:
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                         state["e2e_passed"] = state["integration_passed"] = \
                             state["tests_passed"] = state["document_generated"] = False
-                        state["max_iters"] += 10
+                        state["max_iters"] += ITERS_BUMP_REVISE
                         save_state(project_path, state)
                     else:
                         print("⚠️  Лимит ревизий спецификации исчерпан (3/3).")

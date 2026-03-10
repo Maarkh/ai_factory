@@ -232,6 +232,249 @@ async def phase_a5_compliance_review(
     save_artifact(project_path, "A5.1", {"status": "APPROVE_ALL"})
     return True
 
+def _reject_file(
+    state: dict,
+    file_attempts: dict,
+    cumulative_attempts: dict,
+    current_file: str,
+    attempt: int,
+    total_attempts: int,
+    feedback: str,
+    stats: ModelStats,
+    dev_model: str,
+    logger: logging.Logger,
+) -> None:
+    """Записывает REJECT файла: статистика, feedback, инкремент счётчиков."""
+    stats.record("developer", dev_model, False)
+    push_feedback(state, current_file, feedback)
+    file_attempts[current_file] = attempt + 1
+    cumulative_attempts[current_file] = total_attempts + 1
+
+
+def _run_checks(
+    code: str,
+    existing_code: str,
+    current_file: str,
+    state: dict,
+    file_contract: list,
+    global_context: str,
+    global_imports: list,
+    language: str,
+    src_path: Path,
+) -> tuple[str, str] | None:
+    """Запускает 9 детерминистских проверок на код.
+
+    Возвращает (check_name, feedback) при первом провале, или None если все проверки пройдены.
+    """
+    req_path = src_path / "requirements.txt"
+
+    # 1. Потеря функций из предыдущей версии
+    if existing_code:
+        last_fb = state.get("feedbacks", {}).get(current_file, "")
+        pres_warnings = check_function_preservation(code, existing_code, last_fb, file_contract)
+        if pres_warnings:
+            return "function_preservation", (
+                "АВТОМАТИЧЕСКИЙ REJECT — потеря функций из предыдущей версии:\n"
+                + "\n".join(f"  - {w}" for w in pres_warnings)
+                + "\n\n⚠️ НЕ ПЕРЕПИСЫВАЙ файл с нуля. Исправь ТОЛЬКО то, что указано "
+                "в фидбэке. Сохрани ВСЮ существующую структуру."
+            )
+
+    # 2. Дублирование классов из других файлов
+    dup_warnings = check_class_duplication(code, global_context, file_contract)
+    if dup_warnings:
+        return "class_duplication", (
+            "АВТОМАТИЧЕСКИЙ REJECT — дублирование классов из других файлов проекта:\n"
+            + "\n".join(f"  - {w}" for w in dup_warnings)
+            + "\n\nНЕ ОПРЕДЕЛЯЙ эти классы заново. Используй import."
+        )
+
+    # 3. Import shadowing (from X import Y + def Y)
+    shadow_warnings = check_import_shadowing(code)
+    if shadow_warnings:
+        return "import_shadowing", (
+            "АВТОМАТИЧЕСКИЙ REJECT — конфликт имён (import + определение):\n"
+            + "\n".join(f"  - {w}" for w in shadow_warnings)
+            + "\n\nЕсли имя импортировано из другого файла — НЕ определяй его заново."
+        )
+
+    # 4. Data-only файл не должен импортировать из проекта
+    data_only_warnings = check_data_only_violations(code, current_file, state["files"])
+    if data_only_warnings:
+        return "data_only", (
+            "АВТОМАТИЧЕСКИЙ REJECT — нарушение правил data-only файла:\n"
+            + "\n".join(f"  - {w}" for w in data_only_warnings)
+            + f"\n\n{current_file} — это файл для ХРАНЕНИЯ data structures.\n"
+            "Он НЕ ДОЛЖЕН импортировать из других файлов проекта.\n"
+            "Он НЕ ДОЛЖЕН содержать бизнес-логику (функции).\n"
+            "Другие файлы импортируют ОТСЮДА, а не наоборот."
+        )
+
+    # 5. Валидность импортов (stdlib / pip / проект)
+    import_warnings = validate_imports(
+        code, current_file, state["files"],
+        req_path if req_path.exists() else None, language, src_path,
+    )
+    if import_warnings:
+        expected_hint = ""
+        if global_imports:
+            expected_hint = (
+                "\n\nОЖИДАЕМЫЕ ИМПОРТЫ из A5 контракта для этого файла:\n"
+                + "\n".join(f"  {imp}" for imp in global_imports)
+            )
+        req_content_hint = ""
+        if req_path.exists():
+            rc = req_path.read_text(encoding="utf-8").strip()
+            if rc:
+                req_content_hint = f"\n\nСодержимое requirements.txt (доступные пакеты):\n{rc}"
+        return "imports", (
+            "АВТОМАТИЧЕСКИЙ REJECT — невалидные импорты:\n"
+            + "\n".join(f"  - {w}" for w in import_warnings)
+            + "\n\nИсправь: используй только stdlib, pip-пакеты из requirements.txt "
+            "или модули проекта: " + ", ".join(state["files"])
+            + expected_hint
+            + req_content_hint
+        )
+
+    # 6. Кросс-файловые имена (from X import Y → Y существует в X)
+    if language == "python":
+        xfile_warnings = validate_cross_file_names(code, current_file, state["files"], src_path)
+        if xfile_warnings:
+            return "cross_file_names", (
+                "АВТОМАТИЧЕСКИЙ REJECT — ошибки кросс-файловых имён:\n"
+                + "\n".join(f"  - {w}" for w in xfile_warnings)
+                + "\n\nПроверь что все импортируемые имена определены в целевых файлах."
+            )
+
+    # 7. Функции-заглушки (pass, ..., NotImplementedError)
+    stub_warnings = check_stub_functions(code)
+    if stub_warnings:
+        return "stubs", (
+            "АВТОМАТИЧЕСКИЙ REJECT — функции-заглушки:\n"
+            + "\n".join(f"  - {w}" for w in stub_warnings)
+            + "\n\nВесь код должен быть полностью рабочим. Заглушки (pass, ..., "
+            "raise NotImplementedError) и фиктивные реализации "
+            "(захардкоженные return без использования параметров) ЗАПРЕЩЕНЫ."
+        )
+
+    # 8. Все required функции/классы из A5 контракта присутствуют
+    contract_missing = check_contract_compliance(code, file_contract)
+    if contract_missing:
+        return "contract_compliance", (
+            "АВТОМАТИЧЕСКИЙ REJECT — отсутствуют required элементы из A5 контракта:\n"
+            + "\n".join(f"  - {m}" for m in contract_missing)
+            + "\n\nРеализуй ВСЕ функции/классы, указанные в API контракте A5."
+        )
+
+    return None
+
+
+def _build_dev_context(
+    state: dict,
+    current_file: str,
+    existing_code: str,
+    file_contract: list,
+    global_imports: list,
+    global_context: str,
+    src_path: Path,
+) -> str:
+    """Собирает контекст для агента-разработчика."""
+    dev_ctx = (
+        f"Задача:\n{state['task']}\n\n"
+        f"СИСТЕМНЫЕ СПЕЦИФИКАЦИИ (A2):\n"
+        f"{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}\n\n"
+        f"Файл для написания: `{current_file}`.\n\n"
+    )
+
+    # Специальная инструкция для entry point
+    if current_file == state.get("entry_point"):
+        dev_ctx += (
+            "⚠️ ЭТОТ ФАЙЛ — ТОЧКА ВХОДА ПРИЛОЖЕНИЯ.\n"
+            "НЕ определяй здесь бизнес-классы — они в других файлах, ИМПОРТИРУЙ их.\n"
+            "Содержимое: импорты + инициализация + запуск (идиоматичная точка входа для целевого языка).\n\n"
+        )
+
+    # Специальная инструкция для data-only файлов
+    if Path(current_file).stem in ("models", "data_models"):
+        dev_ctx += (
+            "⚠️ ЭТОТ ФАЙЛ — ХРАНИЛИЩЕ DATA STRUCTURES (data-only).\n"
+            "ОБЯЗАТЕЛЬНО:\n"
+            "  - Определи ЗДЕСЬ ВСЕ классы/структуры из контракта ниже\n"
+            "  - Используй идиоматичные структуры данных для целевого языка\n"
+            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
+            "  - Импортировать из ДРУГИХ ФАЙЛОВ ПРОЕКТА\n"
+            "  - Определять PUBLIC top-level функции\n"
+            "  - Допускаются ТОЛЬКО: stdlib импорты\n"
+            "  - Приватные хелперы допустимы\n"
+            "Другие модули будут импортировать структуры ОТСЮДА.\n\n"
+        )
+
+    # A5 контракт
+    if file_contract:
+        dev_ctx += (
+            f"API КОНТРАКТ (A5) — реализуй ИМЕННО эти функции/классы:\n"
+            f"{json.dumps(file_contract, ensure_ascii=False, indent=2)}\n\n"
+        )
+    if global_imports:
+        dev_ctx += (
+            f"ОЖИДАЕМЫЕ ИМПОРТЫ (A5):\n"
+            f"{json.dumps(global_imports, ensure_ascii=False, indent=2)}\n\n"
+        )
+
+    # requirements.txt
+    req_path = src_path / "requirements.txt"
+    if req_path.exists():
+        req_content = req_path.read_text(encoding="utf-8").strip()
+        if req_content:
+            dev_ctx += (
+                f"ДОСТУПНЫЕ PIP-ПАКЕТЫ (requirements.txt):\n{req_content}\n"
+                f"⛔ Импорт пакетов НЕ из этого списка будет отклонён.\n\n"
+            )
+
+    # Глобальный контекст
+    if global_context:
+        dev_ctx += f"ГЛОБАЛЬНЫЙ КОНТЕКСТ (public API других файлов):\n{global_context}\n\n"
+        _import_hints: list[str] = []
+        _cur_file = ""
+        for _gc_line in global_context.splitlines():
+            if _gc_line.startswith("--- ") and _gc_line.endswith(" PUBLIC API ---"):
+                _cur_file = _gc_line.split("---")[1].strip().replace(" PUBLIC API ", "")
+            elif _cur_file:
+                _m = re.match(r"(?:class|def|async def)\s+(\w+)", _gc_line.strip())
+                if _m:
+                    _name = _m.group(1)
+                    _stem = Path(_cur_file).stem
+                    _import_hints.append(f"from {_stem} import {_name}")
+        if _import_hints:
+            dev_ctx += (
+                f"⛔ ЗАПРЕЩЕНО ПЕРЕОПРЕДЕЛЯТЬ эти классы/функции — они УЖЕ СУЩЕСТВУЮТ.\n"
+                f"ИСПОЛЬЗУЙ ИМПОРТ:\n"
+                + "\n".join(f"  {h}" for h in _import_hints)
+                + "\n\n"
+            )
+
+    # Существующий код
+    if existing_code:
+        max_code_chars = MAX_CONTEXT_CHARS // 2
+        trimmed = existing_code[:max_code_chars] + "\n# [... код обрезан ...]" if len(existing_code) > max_code_chars else existing_code
+        dev_ctx += f"ТЕКУЩИЙ КОД `{current_file}`:\n{trimmed}\n\n"
+
+    # Feedback
+    feedback_ctx = get_feedback_ctx(state, current_file)
+    if feedback_ctx:
+        max_feedback_chars = MAX_CONTEXT_CHARS // 3
+        if len(feedback_ctx) > max_feedback_chars:
+            feedback_ctx = feedback_ctx[:max_feedback_chars] + "\n[... обрезано ...]"
+        if existing_code:
+            dev_ctx += (
+                "⚠️ ПРАВЬ ТОЧЕЧНО: текущий код уже предоставлен выше. "
+                "Исправь ТОЛЬКО проблемы из фидбэка ниже, сохрани работающую структуру.\n\n"
+            )
+        dev_ctx += feedback_ctx
+
+    return dev_ctx
+
+
 async def phase_develop(
     logger: logging.Logger,
     project_path: Path,
@@ -339,93 +582,10 @@ async def phase_develop(
                     attempt = 0
                     logger.info(f"🔄 A5 для {current_file} обновлён (патч {patches_done + 1}/{MAX_A5_PATCHES_PER_FILE}) → счётчик попыток сброшен.")
 
-        dev_ctx = (
-            f"Задача:\n{state['task']}\n\n"
-            f"СИСТЕМНЫЕ СПЕЦИФИКАЦИИ (A2):\n"
-            f"{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}\n\n"
-            f"Файл для написания: `{current_file}`.\n\n"
+        dev_ctx = _build_dev_context(
+            state, current_file, existing_code, file_contract, global_imports, global_context, src_path,
         )
-
-        # Специальная инструкция для entry point — не раздувать бизнес-логикой
-        if current_file == state.get("entry_point"):
-            dev_ctx += (
-                "⚠️ ЭТОТ ФАЙЛ — ТОЧКА ВХОДА ПРИЛОЖЕНИЯ.\n"
-                "НЕ определяй здесь бизнес-классы — они в других файлах, ИМПОРТИРУЙ их.\n"
-                "Содержимое: импорты + инициализация + запуск (идиоматичная точка входа для целевого языка).\n\n"
-            )
-
-        # Специальная инструкция для data-only файлов (models.py, data_models.py)
-        if Path(current_file).stem in ("models", "data_models"):
-            dev_ctx += (
-                "⚠️ ЭТОТ ФАЙЛ — ХРАНИЛИЩЕ DATA STRUCTURES (data-only).\n"
-                "ОБЯЗАТЕЛЬНО:\n"
-                "  - Определи ЗДЕСЬ ВСЕ классы/структуры из контракта ниже\n"
-                "  - Используй идиоматичные структуры данных для целевого языка\n"
-                "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
-                "  - Импортировать из ДРУГИХ ФАЙЛОВ ПРОЕКТА\n"
-                "  - Определять PUBLIC top-level функции\n"
-                "  - Допускаются ТОЛЬКО: stdlib импорты\n"
-                "  - Приватные хелперы допустимы\n"
-                "Другие модули будут импортировать структуры ОТСЮДА.\n\n"
-            )
-
-        # Добавляем A5 если он есть
-        if file_contract:
-            dev_ctx += (
-                f"API КОНТРАКТ (A5) — реализуй ИМЕННО эти функции/классы:\n"
-                f"{json.dumps(file_contract, ensure_ascii=False, indent=2)}\n\n"
-            )
-        if global_imports:
-            dev_ctx += (
-                f"ОЖИДАЕМЫЕ ИМПОРТЫ (A5):\n"
-                f"{json.dumps(global_imports, ensure_ascii=False, indent=2)}\n\n"
-            )
         req_path = src_path / "requirements.txt"
-        if req_path.exists():
-            req_content = req_path.read_text(encoding="utf-8").strip()
-            if req_content:
-                dev_ctx += (
-                    f"ДОСТУПНЫЕ PIP-ПАКЕТЫ (requirements.txt):\n{req_content}\n"
-                    f"⛔ Импорт пакетов НЕ из этого списка будет отклонён.\n\n"
-                )
-        if global_context:
-            dev_ctx += f"ГЛОБАЛЬНЫЙ КОНТЕКСТ (public API других файлов):\n{global_context}\n\n"
-            # Извлекаем имена классов/функций из других файлов + файл-источник
-            _import_hints: list[str] = []
-            _cur_file = ""
-            for _gc_line in global_context.splitlines():
-                if _gc_line.startswith("--- ") and _gc_line.endswith(" PUBLIC API ---"):
-                    _cur_file = _gc_line.split("---")[1].strip().replace(" PUBLIC API ", "")
-                elif _cur_file:
-                    _m = re.match(r"(?:class|def|async def)\s+(\w+)", _gc_line.strip())
-                    if _m:
-                        _name = _m.group(1)
-                        _stem = Path(_cur_file).stem
-                        _import_hints.append(f"from {_stem} import {_name}")
-            if _import_hints:
-                dev_ctx += (
-                    f"⛔ ЗАПРЕЩЕНО ПЕРЕОПРЕДЕЛЯТЬ эти классы/функции — они УЖЕ СУЩЕСТВУЮТ.\n"
-                    f"ИСПОЛЬЗУЙ ИМПОРТ:\n"
-                    + "\n".join(f"  {h}" for h in _import_hints)
-                    + "\n\n"
-                )
-        if existing_code:
-            max_code_chars = MAX_CONTEXT_CHARS // 2
-            if len(existing_code) > max_code_chars:
-                existing_code = existing_code[:max_code_chars] + "\n# [... код обрезан ...]"
-            dev_ctx += f"ТЕКУЩИЙ КОД `{current_file}`:\n{existing_code}\n\n"
-        feedback_ctx = get_feedback_ctx(state, current_file)
-        if feedback_ctx:
-            max_feedback_chars = MAX_CONTEXT_CHARS // 3
-            if len(feedback_ctx) > max_feedback_chars:
-                feedback_ctx = feedback_ctx[:max_feedback_chars] + "\n[... обрезано ...]"
-            # Если есть и код и фидбэк — явная инструкция на точечное исправление
-            if existing_code:
-                dev_ctx += (
-                    "⚠️ ПРАВЬ ТОЧЕЧНО: текущий код уже предоставлен выше. "
-                    "Исправь ТОЛЬКО проблемы из фидбэка ниже, сохрани работающую структуру.\n\n"
-                )
-            dev_ctx += feedback_ctx
 
         dev_model = get_model("developer", attempt, randomize=randomize)
         logger.info(
@@ -517,154 +677,16 @@ async def phase_develop(
             file_attempts[current_file] = 0
             continue
 
-        # Детерминистская проверка: не потерял ли developer функции из предыдущей версии
-        if existing_code:
-            last_fb = state.get("feedbacks", {}).get(current_file, "")
-            pres_warnings = check_function_preservation(code, existing_code, last_fb, file_contract)
-            if pres_warnings:
-                pres_feedback = (
-                    "АВТОМАТИЧЕСКИЙ REJECT — потеря функций из предыдущей версии:\n"
-                    + "\n".join(f"  - {w}" for w in pres_warnings)
-                    + "\n\n⚠️ НЕ ПЕРЕПИСЫВАЙ файл с нуля. Исправь ТОЛЬКО то, что указано "
-                    "в фидбэке. Сохрани ВСЮ существующую структуру."
-                )
-                logger.warning(f"⛔ {current_file}: {len(pres_warnings)} функций потеряно → авто-REJECT")
-                stats.record("developer", dev_model, False)
-                push_feedback(state, current_file, pres_feedback)
-                file_attempts[current_file] = attempt + 1
-                cumulative_attempts[current_file] = total_attempts + 1
-                continue
-
-        # Детерминистская проверка: не дублирует ли код классы из других файлов
-        dup_warnings = check_class_duplication(code, global_context, file_contract)
-        if dup_warnings:
-            dup_feedback = (
-                "АВТОМАТИЧЕСКИЙ REJECT — дублирование классов из других файлов проекта:\n"
-                + "\n".join(f"  - {w}" for w in dup_warnings)
-                + "\n\nНЕ ОПРЕДЕЛЯЙ эти классы заново. Используй import."
-            )
-            logger.warning(f"⛔ {current_file}: дублирование {len(dup_warnings)} классов → автоматический REJECT")
-            stats.record("developer", dev_model, False)
-            push_feedback(state, current_file, dup_feedback)
-            file_attempts[current_file] = attempt + 1
-            cumulative_attempts[current_file] = total_attempts + 1
-            continue
-
-        # Детерминистская проверка: import shadowing (from X import Y + def Y)
-        shadow_warnings = check_import_shadowing(code)
-        if shadow_warnings:
-            shadow_feedback = (
-                "АВТОМАТИЧЕСКИЙ REJECT — конфликт имён (import + определение):\n"
-                + "\n".join(f"  - {w}" for w in shadow_warnings)
-                + "\n\nЕсли имя импортировано из другого файла — НЕ определяй его заново."
-            )
-            logger.warning(f"⛔ {current_file}: {len(shadow_warnings)} конфликтов имён → авто-REJECT")
-            stats.record("developer", dev_model, False)
-            push_feedback(state, current_file, shadow_feedback)
-            file_attempts[current_file] = attempt + 1
-            cumulative_attempts[current_file] = total_attempts + 1
-            continue
-
-        # Детерминистская проверка: data-only файл (models.py) не должен импортировать из проекта
-        data_only_warnings = check_data_only_violations(code, current_file, state["files"])
-        if data_only_warnings:
-            data_only_feedback = (
-                "АВТОМАТИЧЕСКИЙ REJECT — нарушение правил data-only файла:\n"
-                + "\n".join(f"  - {w}" for w in data_only_warnings)
-                + f"\n\n{current_file} — это файл для ХРАНЕНИЯ data structures.\n"
-                "Он НЕ ДОЛЖЕН импортировать из других файлов проекта.\n"
-                "Он НЕ ДОЛЖЕН содержать бизнес-логику (функции).\n"
-                "Другие файлы импортируют ОТСЮДА, а не наоборот."
-            )
-            logger.warning(f"⛔ {current_file}: data-only нарушения → авто-REJECT")
-            stats.record("developer", dev_model, False)
-            push_feedback(state, current_file, data_only_feedback)
-            file_attempts[current_file] = attempt + 1
-            cumulative_attempts[current_file] = total_attempts + 1
-            continue
-
-        # Детерминистская проверка: валидность импортов (stdlib / pip / проект)
-        req_path = src_path / "requirements.txt"
-        import_warnings = validate_imports(
-            code, current_file, state["files"],
-            req_path if req_path.exists() else None, language, src_path,
+        # Детерминистские проверки (9 штук)
+        check_result = _run_checks(
+            code, existing_code, current_file, state, file_contract,
+            global_context, global_imports, language, src_path,
         )
-        if import_warnings:
-            # Подсказка: показать ожидаемые импорты из A5
-            expected_hint = ""
-            if global_imports:
-                expected_hint = (
-                    "\n\nОЖИДАЕМЫЕ ИМПОРТЫ из A5 контракта для этого файла:\n"
-                    + "\n".join(f"  {imp}" for imp in global_imports)
-                )
-            req_content_hint = ""
-            if req_path.exists():
-                rc = req_path.read_text(encoding="utf-8").strip()
-                if rc:
-                    req_content_hint = f"\n\nСодержимое requirements.txt (доступные пакеты):\n{rc}"
-            import_feedback = (
-                "АВТОМАТИЧЕСКИЙ REJECT — невалидные импорты:\n"
-                + "\n".join(f"  - {w}" for w in import_warnings)
-                + "\n\nИсправь: используй только stdlib, pip-пакеты из requirements.txt "
-                "или модули проекта: " + ", ".join(state["files"])
-                + expected_hint
-                + req_content_hint
-            )
-            logger.warning(f"⛔ {current_file}: {len(import_warnings)} ошибок импорта → авто-REJECT")
-            stats.record("developer", dev_model, False)
-            push_feedback(state, current_file, import_feedback)
-            file_attempts[current_file] = attempt + 1
-            cumulative_attempts[current_file] = total_attempts + 1
-            continue
-
-        # Детерминистская проверка: кросс-файловые имена (from X import Y → Y существует в X)
-        if language == "python":
-            xfile_warnings = validate_cross_file_names(
-                code, current_file, state["files"], src_path,
-            )
-            if xfile_warnings:
-                xfile_feedback = (
-                    "АВТОМАТИЧЕСКИЙ REJECT — ошибки кросс-файловых имён:\n"
-                    + "\n".join(f"  - {w}" for w in xfile_warnings)
-                    + "\n\nПроверь что все импортируемые имена определены в целевых файлах."
-                )
-                logger.warning(f"⛔ {current_file}: {len(xfile_warnings)} ошибок имён → авто-REJECT")
-                stats.record("developer", dev_model, False)
-                push_feedback(state, current_file, xfile_feedback)
-                file_attempts[current_file] = attempt + 1
-                cumulative_attempts[current_file] = total_attempts + 1
-                continue
-
-        # Детерминистская проверка: нет ли функций-заглушек (pass, ..., NotImplementedError)
-        stub_warnings = check_stub_functions(code)
-        if stub_warnings:
-            stub_feedback = (
-                "АВТОМАТИЧЕСКИЙ REJECT — функции-заглушки:\n"
-                + "\n".join(f"  - {w}" for w in stub_warnings)
-                + "\n\nВесь код должен быть полностью рабочим. Заглушки (pass, ..., "
-                "raise NotImplementedError) и фиктивные реализации "
-                "(захардкоженные return без использования параметров) ЗАПРЕЩЕНЫ."
-            )
-            logger.warning(f"⛔ {current_file}: {len(stub_warnings)} заглушек → авто-REJECT")
-            stats.record("developer", dev_model, False)
-            push_feedback(state, current_file, stub_feedback)
-            file_attempts[current_file] = attempt + 1
-            cumulative_attempts[current_file] = total_attempts + 1
-            continue
-
-        # Детерминистская проверка: все required функции/классы из A5 контракта присутствуют
-        contract_missing = check_contract_compliance(code, file_contract)
-        if contract_missing:
-            contract_feedback = (
-                "АВТОМАТИЧЕСКИЙ REJECT — отсутствуют required элементы из A5 контракта:\n"
-                + "\n".join(f"  - {m}" for m in contract_missing)
-                + "\n\nРеализуй ВСЕ функции/классы, указанные в API контракте A5."
-            )
-            logger.warning(f"⛔ {current_file}: отсутствуют {len(contract_missing)} элементов A5 → авто-REJECT")
-            stats.record("developer", dev_model, False)
-            push_feedback(state, current_file, contract_feedback)
-            file_attempts[current_file] = attempt + 1
-            cumulative_attempts[current_file] = total_attempts + 1
+        if check_result:
+            check_name, check_feedback = check_result
+            logger.warning(f"⛔ {current_file}: {check_name} → авто-REJECT")
+            _reject_file(state, file_attempts, cumulative_attempts, current_file,
+                         attempt, total_attempts, check_feedback, stats, dev_model, logger)
             continue
 
         file_path.write_text(code, encoding="utf-8")
@@ -676,26 +698,15 @@ async def phase_develop(
         if sr_status == "NEEDS_IMPROVEMENT":
             # Перечитываем файл — self-reflect мог записать улучшенный код
             new_code = file_path.read_text(encoding="utf-8")
-            # Повторяем ключевые проверки на улучшенном коде
-            _sr_ok = True
-            for _sr_check_name, _sr_warnings in [
-                ("function_preservation", check_function_preservation(code, new_code, "", file_contract)),
-                ("class_duplication", check_class_duplication(new_code, current_file, state, src_path)),
-                ("import_shadowing", check_import_shadowing(new_code)),
-                ("data_only", check_data_only_violations(new_code, current_file, state["files"])),
-                ("imports", validate_imports(new_code, current_file, state["files"],
-                                            req_path if req_path.exists() else None, language, src_path)),
-                ("cross_file_names", validate_cross_file_names(
-                    new_code, current_file, state["files"], src_path) if language == "python" else []),
-                ("stubs", check_stub_functions(new_code)),
-                ("contract", check_contract_compliance(new_code, file_contract)),
-            ]:
-                if _sr_warnings:
-                    logger.warning(f"  ⚠️  Self-reflect ввёл ошибки ({_sr_check_name}) → откат")
-                    file_path.write_text(code, encoding="utf-8")  # откат к оригиналу
-                    _sr_ok = False
-                    break
-            if _sr_ok:
+            # Повторяем проверки — если self-reflect ввёл ошибки, откатываем
+            sr_check = _run_checks(
+                new_code, code, current_file, state, file_contract,
+                global_context, global_imports, language, src_path,
+            )
+            if sr_check:
+                logger.warning(f"  ⚠️  Self-reflect ввёл ошибки ({sr_check[0]}) → откат")
+                file_path.write_text(code, encoding="utf-8")
+            else:
                 code = new_code
 
         # Внешний ревью

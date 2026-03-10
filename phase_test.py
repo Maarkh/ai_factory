@@ -33,6 +33,15 @@ _EXCEPTION_LINE_RE = re.compile(
 )
 
 
+def _deapprove_file(state: dict, filename: str, feedback_msg: str, cumulative_bump: int = 3) -> None:
+    """Де-апрувит файл: убирает из approved, бампит cumulative, ставит feedback."""
+    if filename in state.get("approved_files", []):
+        state["approved_files"].remove(filename)
+    cum = state.setdefault("cumulative_file_attempts", {})
+    cum[filename] = cum.get(filename, 0) + cumulative_bump
+    state.setdefault("feedbacks", {})[filename] = feedback_msg
+
+
 async def phase_e2e_review(
     logger: logging.Logger,
     project_path: Path,
@@ -210,12 +219,10 @@ def phase_cross_file_check(
             "АВТОМАТИЧЕСКИЙ REJECT — кросс-файловые ошибки (до E2E):\n"
             + "\n".join(f"  - {w}" for w in warnings)
         )
-        state["feedbacks"][filename] = feedback
-        approved = state.get("approved_files", [])
-        if filename in approved:
-            approved.remove(filename)
+        was_approved = filename in state.get("approved_files", [])
+        _deapprove_file(state, filename, feedback, cumulative_bump=2)
+        if was_approved:
             logger.warning(f"  ⛔ {filename}: {len(warnings)} проблем → снят APPROVE")
-        cumulative[filename] = cumulative.get(filename, 0) + 2
         has_actionable = True
 
     if not has_actionable:
@@ -338,15 +345,11 @@ async def phase_integration_test(
                 )
                 log_runtime_error(project_path, combined_output)
                 failing_file = find_failing_file(stderr, stdout, state["files"])
-                state["feedbacks"][failing_file] = (
+                _deapprove_file(state, failing_file, (
                     "ПРОГРАММА ЗАМАСКИРОВАЛА ОШИБКУ (rc=0, но traceback в выводе):\n"
                     f"{combined_output[-TRUNCATE_LOG:]}\n\n"
                     "Исправь причину exception — не ловить его через try/except, а устранить."
-                )
-                if failing_file in state.get("approved_files", []):
-                    state["approved_files"].remove(failing_file)
-                cum = state.setdefault("cumulative_file_attempts", {})
-                cum[failing_file] = cum.get(failing_file, 0) + 3
+                ))
                 return False
 
             logger.info("\n✅ Приложение завершилось успешно!")
@@ -449,14 +452,10 @@ async def phase_integration_test(
                     logger.warning(
                         f"⚠️  '{pkg_clean}' уже в requirements, но всё равно падает → возврат разработчику."
                     )
-                    state["feedbacks"][failing_file] = (
+                    _deapprove_file(state, failing_file, (
                         f"ПРОГРАММА УПАЛА. Пакет '{pkg_clean}' установлен, но код падает. "
                         f"Проблема в логике или импортах.\nTraceback:\n{stderr}"
-                    )
-                    if failing_file in state.get("approved_files", []):
-                        state["approved_files"].remove(failing_file)
-                    cum = state.setdefault("cumulative_file_attempts", {})
-                    cum[failing_file] = cum.get(failing_file, 0) + 3
+                    ))
                     return False
                 else:
                     logger.info(f"🔧 Добавляю пакет: {missing_pkg}")
@@ -467,11 +466,7 @@ async def phase_integration_test(
                 update_dependencies(src_path, language, missing_pkg)
                 continue
 
-        if failing_file in state.get("approved_files", []):
-            state["approved_files"].remove(failing_file)
-        cum = state.setdefault("cumulative_file_attempts", {})
-        cum[failing_file] = cum.get(failing_file, 0) + 3
-        state["feedbacks"][failing_file] = f"ПРОГРАММА УПАЛА.\nTRACEBACK:\n{stderr}\nQA:\n{fix}"
+        _deapprove_file(state, failing_file, f"ПРОГРАММА УПАЛА.\nTRACEBACK:\n{stderr}\nQA:\n{fix}")
         logger.info("🔄 Возврат к разработчику.")
         return False
 
@@ -580,14 +575,10 @@ async def phase_unit_tests(
             if coverage < MIN_COVERAGE:
                 logger.warning(f"❌ Покрытие {coverage}% < {MIN_COVERAGE}%")
                 entry = state.get("entry_point", "main.py")
-                state["feedbacks"][entry] = (
+                _deapprove_file(state, entry, (
                     f"Покрытие {coverage}% < порога {MIN_COVERAGE}%. "
                     "Добавь публичные функции с понятными сигнатурами."
-                )
-                if entry in state.get("approved_files", []):
-                    state["approved_files"].remove(entry)
-                cum = state.setdefault("cumulative_file_attempts", {})
-                cum[entry] = cum.get(entry, 0) + 3
+                ))
                 return False
 
             logger.info(f"✅ Тесты пройдены! Покрытие: {coverage}%")
@@ -619,14 +610,10 @@ async def phase_unit_tests(
             logger.warning(
                 f"  🐛 Ошибка в коде приложения ({failing_app_file}), не в тестах."
             )
-            state["feedbacks"][failing_app_file] = (
+            _deapprove_file(state, failing_app_file, (
                 f"UNIT-ТЕСТЫ ОБНАРУЖИЛИ БАГ В КОДЕ:\n{stderr[-TRUNCATE_LOG:]}"
                 f"\n\nВывод:\n{stdout[-TRUNCATE_LOG // 2:]}"
-            )
-            if failing_app_file in state.get("approved_files", []):
-                state["approved_files"].remove(failing_app_file)
-            cum = state.setdefault("cumulative_file_attempts", {})
-            cum[failing_app_file] = cum.get(failing_app_file, 0) + 3
+            ))
             return False
 
         logger.info(
@@ -642,12 +629,8 @@ async def phase_unit_tests(
         "Де-аппрувим по _find_failing_file."
     )
     failing_file = find_failing_file(last_stderr, last_stdout, state["files"])
-    state["feedbacks"][failing_file] = (
+    _deapprove_file(state, failing_file, (
         f"UNIT-ТЕСТЫ НЕ ПРОЙДЕНЫ ПОСЛЕ {MAX_TEST_ATTEMPTS} ПОПЫТОК ГЕНЕРАЦИИ:\n"
         f"{last_stderr[-TRUNCATE_LOG:]}\n\nВывод:\n{last_stdout[-TRUNCATE_LOG // 2:]}"
-    )
-    if failing_file in state.get("approved_files", []):
-        state["approved_files"].remove(failing_file)
-    cum = state.setdefault("cumulative_file_attempts", {})
-    cum[failing_file] = cum.get(failing_file, 0) + 3
+    ))
     return False

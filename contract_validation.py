@@ -672,7 +672,8 @@ def _inject_requirements_imports(
             import_name = PIP_TO_IMPORT.get(pkg, PIP_TO_IMPORT.get(pkg_norm, pkg_norm))
             if import_name and import_name.isidentifier():
                 pkg_to_import[import_name] = f"import {import_name}"
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"⚠️  Ошибка чтения requirements.txt для inject_requirements_imports: {exc}")
         return contract
 
     if not pkg_to_import:
@@ -1040,28 +1041,14 @@ def _dedup_cross_file_classes(
     return contract
 
 
-def _detect_and_fix_circular_imports(
-    contract: dict,
+def _build_import_graph(
+    gi: dict[str, list[str]],
     files: list[str],
-    logger: logging.Logger,
-) -> dict:
-    """Детерминистская проверка циклических зависимостей в A5 global_imports.
-
-    Строит граф из cross-file imports, находит циклы, переносит shared classes
-    в models.py для разрыва циклов.
-    """
-    fc = contract.get("file_contracts", {})
-    gi = contract.get("global_imports", {})
-    if not fc or not gi:
-        return contract
-
-    project_stems = {Path(f).stem for f in files}
-
-    # 1. Строим граф: stem → set(dependency stems)
+    project_stems: set[str],
+) -> tuple[dict[str, set[str]], dict[str, list[tuple[str, str]]]]:
+    """Строит граф зависимостей из global_imports A5. Возвращает (graph, import_details)."""
     graph: dict[str, set[str]] = {Path(f).stem: set() for f in files}
-    # (source_stem, imported_name) для каждого файла
     import_details: dict[str, list[tuple[str, str]]] = {}
-
     for fname, imports in gi.items():
         if not isinstance(imports, list):
             continue
@@ -1077,8 +1064,11 @@ def _detect_and_fix_circular_imports(
                 graph[stem].add(src_stem)
                 for name in names:
                     import_details[stem].append((src_stem, name))
+    return graph, import_details
 
-    # 2. Поиск циклов через DFS (color-based)
+
+def _find_graph_cycles(graph: dict[str, set[str]]) -> list[list[str]]:
+    """DFS-поиск циклов в графе зависимостей (color-based)."""
     WHITE, GRAY, BLACK = 0, 1, 2
     color = {v: WHITE for v in graph}
     cycles: list[list[str]] = []
@@ -1099,11 +1089,73 @@ def _detect_and_fix_circular_imports(
     for v in graph:
         if color[v] == WHITE:
             _dfs(v, [v])
+    return cycles
 
+
+def _move_classes_to_models(
+    classes_to_move: dict[str, str],
+    fc: dict, gi: dict,
+    files: list[str],
+    project_stems: set[str],
+    models_file: str, models_stem: str,
+    logger: logging.Logger,
+) -> int:
+    """Переносит классы из file_contracts в models.py, обновляет global_imports. Возвращает кол-во перемещённых."""
+    moved = 0
+    for class_name, source_stem in classes_to_move.items():
+        source_file = next((f for f in files if Path(f).stem == source_stem), None)
+        if not source_file:
+            continue
+        source_items = fc.get(source_file, [])
+        for i, item in enumerate(source_items):
+            if isinstance(item, dict) and item.get("name") == class_name:
+                fc[models_file].append(source_items.pop(i))
+                moved += 1
+                break
+        new_import = f"from {models_stem} import {class_name}"
+        for fkey, imp_list in gi.items():
+            if not isinstance(imp_list, list):
+                continue
+            for idx, imp_line in enumerate(imp_list):
+                parsed = _parse_import_line(imp_line)
+                if not parsed:
+                    continue
+                imp_src, imp_names = parsed
+                if imp_src != source_stem or class_name not in imp_names:
+                    continue
+                remaining = [n for n in imp_names if n != class_name]
+                if remaining:
+                    gi[fkey][idx] = f"from {imp_src} import {', '.join(remaining)}"
+                else:
+                    gi[fkey][idx] = ""
+                if new_import not in gi[fkey]:
+                    gi[fkey].append(new_import)
+                break
+            gi[fkey] = [imp for imp in gi[fkey] if imp]
+    return moved
+
+
+def _detect_and_fix_circular_imports(
+    contract: dict,
+    files: list[str],
+    logger: logging.Logger,
+) -> dict:
+    """Детерминистская проверка циклических зависимостей в A5 global_imports.
+
+    Строит граф из cross-file imports, находит циклы, переносит shared classes
+    в models.py для разрыва циклов.
+    """
+    fc = contract.get("file_contracts", {})
+    gi = contract.get("global_imports", {})
+    if not fc or not gi:
+        return contract
+
+    project_stems = {Path(f).stem for f in files}
+    graph, import_details = _build_import_graph(gi, files, project_stems)
+    cycles = _find_graph_cycles(graph)
     if not cycles:
         return contract
 
-    # 3. Собираем все stems участвующие в циклах
     cycle_stems: set[str] = set()
     for cycle in cycles:
         cycle_stems.update(cycle)
@@ -1113,9 +1165,9 @@ def _detect_and_fix_circular_imports(
         f"{'; '.join(' → '.join(c) for c in cycles)}"
     )
 
-    # 4. Находим classes/functions, которые импортируются другим файлом цикла
-    classes_to_move: dict[str, str] = {}  # class_name → source_stem
-    funcs_in_cycle: list[tuple[str, str, str]] = []  # (name, from_stem, to_stem)
+    # Находим classes/functions, которые импортируются другим файлом цикла
+    classes_to_move: dict[str, str] = {}
+    funcs_in_cycle: list[tuple[str, str, str]] = []
     for stem in cycle_stems:
         fname = next((f for f in files if Path(f).stem == stem), None)
         if not fname or fname not in fc:
@@ -1126,7 +1178,6 @@ def _detect_and_fix_circular_imports(
             for src_stem, name in import_details.get(other_stem, []):
                 if src_stem != stem:
                     continue
-                # Проверяем что name — класс или функция в file_contracts
                 for item in fc.get(fname, []):
                     if isinstance(item, dict) and item.get("name") == name:
                         sig = item.get("signature", "")
@@ -1137,13 +1188,11 @@ def _detect_and_fix_circular_imports(
 
     if not classes_to_move:
         if funcs_in_cycle:
-            # Циклы через функции: разрываем удалением кросс-импорта из одного направления
             logger.warning(
                 f"  ⚠️  Циклические imports через функции: "
                 + ", ".join(f"{n} ({s}→{d})" for n, s, d in funcs_in_cycle)
                 + " — удаляю кросс-импорт из одного направления"
             )
-            # Удаляем import из файла с бОльшим числом зависимостей (он менее "базовый")
             for name, from_stem, to_stem in funcs_in_cycle:
                 from_deps = len(graph.get(from_stem, set()))
                 to_deps = len(graph.get(to_stem, set()))
@@ -1163,7 +1212,7 @@ def _detect_and_fix_circular_imports(
         logger.info("  ℹ️  Циклы найдены, но нет переносимых элементов.")
         return contract
 
-    # 5. Определяем/создаём models файл
+    # Определяем/создаём models файл
     ext = Path(files[0]).suffix if files else ".py"
     models_file = f"models{ext}"
     models_stem = "models"
@@ -1177,48 +1226,12 @@ def _detect_and_fix_circular_imports(
     fc.setdefault(models_file, [])
     gi.setdefault(models_file, [])
 
-    # 6. Переносим классы
-    moved = 0
-    for class_name, source_stem in classes_to_move.items():
-        source_file = next((f for f in files if Path(f).stem == source_stem), None)
-        if not source_file:
-            continue
-        # Перемещаем контракт класса
-        source_items = fc.get(source_file, [])
-        for i, item in enumerate(source_items):
-            if isinstance(item, dict) and item.get("name") == class_name:
-                fc[models_file].append(source_items.pop(i))
-                moved += 1
-                break
-        # Обновляем global_imports: from source_stem import Class → from models import Class
-        new_import = f"from {models_stem} import {class_name}"
-        for fkey, imp_list in gi.items():
-            if not isinstance(imp_list, list):
-                continue
-            for idx, imp_line in enumerate(imp_list):
-                parsed = _parse_import_line(imp_line)
-                if not parsed:
-                    continue
-                imp_src, imp_names = parsed
-                if imp_src != source_stem or class_name not in imp_names:
-                    continue
-                # Убираем class_name из текущей строки
-                remaining = [n for n in imp_names if n != class_name]
-                if remaining:
-                    gi[fkey][idx] = f"from {imp_src} import {', '.join(remaining)}"
-                else:
-                    gi[fkey][idx] = ""  # Пометка для удаления
-                # Добавляем новый import из models
-                if new_import not in gi[fkey]:
-                    gi[fkey].append(new_import)
-                break
-            # Чистим пустые строки
-            gi[fkey] = [imp for imp in gi[fkey] if imp]
+    moved = _move_classes_to_models(classes_to_move, fc, gi, files, project_stems,
+                                     models_file, models_stem, logger)
 
-    # 7. models.py — data-only: удаляем только PROJECT-file imports (не stdlib/pip)
+    # models.py — data-only: удаляем только PROJECT-file imports (не stdlib/pip)
     models_imports = gi.get(models_file, [])
     if isinstance(models_imports, list):
-        # stems без самого models
         other_project_stems = project_stems - {models_stem}
         clean = []
         for imp in models_imports:
@@ -1236,4 +1249,31 @@ def _detect_and_fix_circular_imports(
 
     contract["file_contracts"] = fc
     contract["global_imports"] = gi
+    return contract
+
+
+def run_a5_validation_pipeline(
+    contract: dict,
+    arch_resp: dict,
+    files: list[str],
+    logger: logging.Logger,
+    requirements_path: Path | None = None,
+    system_specs: dict | None = None,
+) -> dict:
+    """Полный конвейер детерминистских валидаций A5. Вызывается из 4 мест в contract.py."""
+    if system_specs:
+        contract = _inject_missing_data_models(contract, system_specs, files, logger)
+    contract = _validate_global_imports(
+        contract, arch_resp, files, logger,
+        requirements_path=requirements_path,
+    )
+    contract = _inject_signature_type_imports(contract, logger)
+    contract = _sanitize_implementation_hints(contract, logger)
+    contract = _inject_requirements_imports(contract, requirements_path, logger)
+    contract = _inject_cross_file_imports(contract, logger)
+    contract = _dedup_cross_file_classes(contract, logger)
+    contract = _validate_signature_types(contract, files, logger)
+    contract = _validate_import_consistency(contract, logger)
+    contract = _detect_and_fix_circular_imports(contract, files, logger)
+    contract = _remove_non_ascii_entries(contract)
     return contract

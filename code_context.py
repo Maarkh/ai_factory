@@ -440,6 +440,112 @@ def _get_all_bound_names(code: str) -> set[str]:
     return names
 
 
+def _check_circular_imports(
+    code: str,
+    filename: str,
+    project_files: list[str],
+    project_modules: set[str],
+    src_path: Path,
+) -> list[str]:
+    """DFS-поиск циклических импортов через граф проектных файлов."""
+    current_stem = Path(filename).stem
+
+    def _get_project_imports(file_stem: str, override_code: str | None = None) -> set[str]:
+        if override_code is not None:
+            fc = override_code
+        else:
+            stem_to_file = {Path(f).stem: f for f in project_files}
+            target_fname = stem_to_file.get(file_stem)
+            if not target_fname:
+                return set()
+            fp = src_path / target_fname
+            if not fp.exists():
+                return set()
+            try:
+                fc = fp.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return set()
+        fi = re.findall(r"^\s*from\s+(\S+)\s+import", fc, re.MULTILINE)
+        di = re.findall(r"^\s*import\s+([\w.]+)", fc, re.MULTILINE)
+        bases: set[str] = set()
+        for imp in fi + di:
+            b = imp.split(".")[0]
+            if b == "":
+                rel = imp.lstrip(".").split(".")[0]
+                if rel:
+                    bases.add(rel)
+            else:
+                bases.add(b)
+        return bases & project_modules - {file_stem}
+
+    my_deps = _get_project_imports(current_stem, override_code=code)
+    visited: set[str] = set()
+    stack = [(dep, [current_stem, dep]) for dep in my_deps]
+    while stack:
+        node, path = stack.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+        node_deps = _get_project_imports(node)
+        if current_stem in node_deps:
+            cycle_path = " → ".join(path + [current_stem])
+            return [
+                f"циклический импорт: {cycle_path} "
+                f"(файлы импортируют друг друга по кругу)"
+            ]
+        for nd in node_deps:
+            if nd not in visited:
+                stack.append((nd, path + [nd]))
+    return []
+
+
+def _check_undefined_refs(
+    code: str,
+    filename: str,
+    from_imports: list[str],
+    direct_imports: list[str],
+    stdlib: set[str],
+    pip_packages: set[str],
+) -> list[str]:
+    """Проверяет undefined module references: name.attr где name не импортирован."""
+    imported_names: set[str] = set()
+    for imp in from_imports:
+        base = imp.split(".")[0]
+        if not base:
+            rel = imp.lstrip(".").split(".")[0]
+            if rel:
+                imported_names.add(rel)
+    for imp in direct_imports:
+        base = imp.split(".")[0]
+        if base:
+            imported_names.add(base)
+    imported_names.update({"self", "cls", "super", "type", "print", "len", "range",
+                           "str", "int", "float", "bool", "list", "dict", "set",
+                           "tuple", "None", "True", "False", "Exception"})
+    imported_names.update(_get_all_bound_names(code))
+
+    warnings: list[str] = []
+    seen_refs: set[str] = set()
+    try:
+        attr_tree = ast.parse(code)
+        for node in ast.walk(attr_tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                ref_name = node.value.id
+                if ref_name in imported_names or ref_name in seen_refs:
+                    continue
+                if ref_name in stdlib or ref_name in pip_packages:
+                    continue
+                seen_refs.add(ref_name)
+                warnings.append(
+                    f"undefined reference '{ref_name}' в {filename}: "
+                    f"используется как '{ref_name}.…' но не импортирован "
+                    f"(добавь import или from ... import)"
+                )
+    except SyntaxError:
+        pass
+    return warnings
+
+
 def validate_imports(
     code: str,
     filename: str,
@@ -542,63 +648,11 @@ def validate_imports(
             f"{hint}"
         )
 
-    # Проверка циклических импортов через граф (1-hop и N-hop)
+    # Проверка циклических импортов
     if src_path:
-        current_stem = Path(filename).stem
+        warnings.extend(_check_circular_imports(code, filename, project_files, project_modules, src_path))
 
-        def _get_project_imports(file_stem: str, override_code: str | None = None) -> set[str]:
-            """Извлекает проектные зависимости из файла.
-            override_code — использовать вместо чтения с диска (для текущего файла)."""
-            if override_code is not None:
-                fc = override_code
-            else:
-                stem_to_file = {Path(f).stem: f for f in project_files}
-                target_fname = stem_to_file.get(file_stem)
-                if not target_fname:
-                    return set()
-                fp = src_path / target_fname
-                if not fp.exists():
-                    return set()
-                try:
-                    fc = fp.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    return set()
-            fi = re.findall(r"^\s*from\s+(\S+)\s+import", fc, re.MULTILINE)
-            di = re.findall(r"^\s*import\s+([\w.]+)", fc, re.MULTILINE)
-            bases: set[str] = set()
-            for imp in fi + di:
-                b = imp.split(".")[0]
-                if b == "":
-                    rel = imp.lstrip(".").split(".")[0]
-                    if rel:
-                        bases.add(rel)
-                else:
-                    bases.add(b)
-            return bases & project_modules - {file_stem}
-
-        # Строим граф импортов — для текущего файла используем code из параметра
-        my_deps = _get_project_imports(current_stem, override_code=code)
-        # DFS: ищем путь обратно к current_stem
-        visited: set[str] = set()
-        stack = [(dep, [current_stem, dep]) for dep in my_deps]
-        while stack:
-            node, path = stack.pop()
-            if node in visited:
-                continue
-            visited.add(node)
-            node_deps = _get_project_imports(node)
-            if current_stem in node_deps:
-                cycle_path = " → ".join(path + [current_stem])
-                warnings.append(
-                    f"циклический импорт: {cycle_path} "
-                    f"(файлы импортируют друг друга по кругу)"
-                )
-                break  # Одного цикла достаточно
-            for nd in node_deps:
-                if nd not in visited:
-                    stack.append((nd, path + [nd]))
-
-    # Проверка self-referencing assignments: func = func (до определения)
+    # Проверка self-referencing assignments: func = func
     self_refs = re.findall(r"^(\w+)\s*=\s*(\w+)\s*(?:#.*)?$", code, re.MULTILINE)
     for lhs, rhs in self_refs:
         if lhs == rhs:
@@ -607,53 +661,130 @@ def validate_imports(
                 f"переменная ссылается на саму себя (возможно, пропущен import)"
             )
 
-    # Проверка undefined module references: name.attr где name не импортирован
-    # Ловит паттерны вроде: VehicleRecord = data_models.VehicleRecord
-    # или: result = some_module.function()
-    imported_names = set()
-    # ВАЖНО: "from X import Y" НЕ делает X доступным как namespace.
-    # Только "import X" и "import X.Y" делают X доступным.
-    # from-imports добавляем только при relative import (from .X — X не namespace)
-    for imp in from_imports:
-        base = imp.split(".")[0]
-        if not base:
-            # relative import: from .X import Y → X может быть доступен
-            rel = imp.lstrip(".").split(".")[0]
-            if rel:
-                imported_names.add(rel)
-    for imp in direct_imports:
-        # import X → X импортирован
-        base = imp.split(".")[0]
-        if base:
-            imported_names.add(base)
-    # Добавляем builtins и стандартные имена, которые не требуют import
-    imported_names.update({"self", "cls", "super", "type", "print", "len", "range",
-                           "str", "int", "float", "bool", "list", "dict", "set",
-                           "tuple", "None", "True", "False", "Exception"})
-    # Все имена, связанные в файле (def/class/присвоения/параметры на ЛЮБОМ уровне)
-    imported_names.update(_get_all_bound_names(code))
+    # Проверка undefined module references
+    warnings.extend(_check_undefined_refs(code, filename, from_imports, direct_imports, stdlib, pip_packages))
 
-    # Ищем name.attr паттерны через AST (не self.X, не cls.X)
-    # AST-based подход не ловит ложные срабатывания в строках и комментариях
-    seen_refs: set[str] = set()
+    return warnings
+
+
+def _collect_class_members(target_code: str) -> dict[str, set[str]]:
+    """Собирает {class_name: {methods, attributes}} из кода файла с учётом наследования."""
     try:
-        attr_tree = ast.parse(code)
-        for node in ast.walk(attr_tree):
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-                ref_name = node.value.id
-                if ref_name in imported_names or ref_name in seen_refs:
-                    continue
-                if ref_name in stdlib or ref_name in pip_packages:
-                    continue
-                seen_refs.add(ref_name)
-                warnings.append(
-                    f"undefined reference '{ref_name}' в {filename}: "
-                    f"используется как '{ref_name}.…' но не импортирован "
-                    f"(добавь import или from ... import)"
-                )
+        target_tree = ast.parse(target_code)
     except SyntaxError:
-        pass  # Если код не парсится — пропускаем проверку
+        return {}
+    file_classes: dict[str, set[str]] = {}
+    file_bases: dict[str, list[str]] = {}
+    for tnode in target_tree.body:
+        if isinstance(tnode, ast.ClassDef):
+            members: set[str] = set()
+            for item in tnode.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    members.add(item.name)
+                elif isinstance(item, ast.Assign):
+                    for t in item.targets:
+                        if isinstance(t, ast.Name):
+                            members.add(t.id)
+                elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                    members.add(item.target.id)
+            file_classes[tnode.name] = members
+            file_bases[tnode.name] = [b.id for b in tnode.bases if isinstance(b, ast.Name)]
+    # Наследование: добавляем members из базовых классов того же файла
+    for cls_name, bases in file_bases.items():
+        for base_name in bases:
+            if base_name in file_classes:
+                file_classes[cls_name] |= file_classes[base_name]
+    return file_classes
 
+
+def _collect_imported_classes(
+    tree: ast.Module,
+    project_stems: dict[str, str],
+    get_file_cached,
+) -> dict[str, tuple[str, set[str]]]:
+    """Собирает информацию об импортированных классах из проектных файлов.
+
+    Возвращает {local_alias: (source_stem, class_methods)}.
+    """
+    imported: dict[str, tuple[str, set[str]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        module_stem = node.module.split(".")[0]
+        if module_stem not in project_stems:
+            continue
+        cached = get_file_cached(module_stem)
+        if cached is None:
+            continue
+        _, target_code = cached
+        file_classes = _collect_class_members(target_code)
+        for cls_name, cls_methods in file_classes.items():
+            for alias in node.names:
+                if alias.name == cls_name:
+                    local_name = alias.asname or alias.name
+                    imported[local_name] = (module_stem, cls_methods)
+    return imported
+
+
+def _validate_method_calls(
+    tree: ast.Module,
+    imported_classes: dict[str, tuple[str, set[str]]],
+    project_stems: dict[str, str],
+) -> list[str]:
+    """Проверяет что instance.method() вызовы используют существующие методы."""
+    if not imported_classes:
+        return []
+
+    # variable = ClassName(...) → variable type is ClassName
+    instance_types: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and isinstance(node.value, ast.Call):
+                if isinstance(node.value.func, ast.Name) and node.value.func.id in imported_classes:
+                    instance_types[target.id] = node.value.func.id
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                if target.value.id == "self" and isinstance(node.value, ast.Call):
+                    if isinstance(node.value.func, ast.Name) and node.value.func.id in imported_classes:
+                        instance_types[f"self.{target.attr}"] = node.value.func.id
+
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for node in ast.walk(tree):
+        # var.method()
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            var_name = node.value.id
+            method_name = node.attr
+            class_name = instance_types.get(var_name)
+            if not class_name or method_name.startswith("_"):
+                continue
+            source_stem, cls_methods = imported_classes[class_name]
+            wkey = f"{var_name}.{method_name}"
+            if method_name not in cls_methods and wkey not in seen:
+                seen.add(wkey)
+                public = sorted(m for m in cls_methods if not m.startswith("_") and m != "__init__")
+                warnings.append(
+                    f"{var_name}.{method_name}(): метод '{method_name}' не найден "
+                    f"в классе {class_name} из {project_stems[source_stem]}. "
+                    f"Доступные методы: {', '.join(public) if public else '(нет)'}"
+                )
+        # self.x.method()
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute):
+            if isinstance(node.value.value, ast.Name) and node.value.value.id == "self":
+                key = f"self.{node.value.attr}"
+                class_name = instance_types.get(key)
+                if not class_name or node.attr.startswith("_"):
+                    continue
+                source_stem, cls_methods = imported_classes[class_name]
+                wkey = f"{key}.{node.attr}"
+                if node.attr not in cls_methods and wkey not in seen:
+                    seen.add(wkey)
+                    public = sorted(m for m in cls_methods if not m.startswith("_") and m != "__init__")
+                    warnings.append(
+                        f"self.{node.value.attr}.{node.attr}(): метод '{node.attr}' не найден "
+                        f"в классе {class_name} из {project_stems[source_stem]}. "
+                        f"Доступные методы: {', '.join(public) if public else '(нет)'}"
+                    )
     return warnings
 
 
@@ -736,103 +867,9 @@ def validate_cross_file_names(
                         f"Доступные имена: {', '.join(suggestions) if suggestions else '(пусто)'}"
                     )
 
-    # Дополнительно: проверяем что вызываемые методы на импортированных классах существуют
-    # Ловит: eg.generate_event() когда EventGenerator имеет только generate_events()
-    imported_classes: dict[str, tuple[str, set[str]]] = {}  # alias → (source_stem, class_methods)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ImportFrom) or not node.module:
-            continue
-        module_stem = node.module.split(".")[0]
-        if module_stem not in project_stems:
-            continue
-        cached = _get_for(module_stem)
-        if cached is None:
-            continue
-        _, target_code = cached
-        try:
-            target_tree = ast.parse(target_code)
-        except SyntaxError:
-            continue
-        # Собираем все классы файла, затем резолвим наследование
-        _file_classes: dict[str, set[str]] = {}
-        _file_bases: dict[str, list[str]] = {}
-        for tnode in target_tree.body:
-            if isinstance(tnode, ast.ClassDef):
-                methods: set[str] = set()
-                for item in tnode.body:
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        methods.add(item.name)
-                    elif isinstance(item, ast.Assign):
-                        for t in item.targets:
-                            if isinstance(t, ast.Name):
-                                methods.add(t.id)
-                    elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-                        methods.add(item.target.id)
-                _file_classes[tnode.name] = methods
-                _file_bases[tnode.name] = [
-                    b.id for b in tnode.bases if isinstance(b, ast.Name)
-                ]
-        # Наследование: добавляем methods из базовых классов того же файла
-        for cls_name, bases in _file_bases.items():
-            for base_name in bases:
-                if base_name in _file_classes:
-                    _file_classes[cls_name] |= _file_classes[base_name]
-        for cls_name, cls_methods in _file_classes.items():
-            for alias in node.names:
-                if alias.name == cls_name:
-                    local_name = alias.asname or alias.name
-                    imported_classes[local_name] = (module_stem, cls_methods)
-
-    if imported_classes:
-        # variable = ClassName(...) → variable type is ClassName
-        instance_types: dict[str, str] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and len(node.targets) == 1:
-                target = node.targets[0]
-                if isinstance(target, ast.Name) and isinstance(node.value, ast.Call):
-                    if isinstance(node.value.func, ast.Name) and node.value.func.id in imported_classes:
-                        instance_types[target.id] = node.value.func.id
-                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-                    if target.value.id == "self" and isinstance(node.value, ast.Call):
-                        if isinstance(node.value.func, ast.Name) and node.value.func.id in imported_classes:
-                            instance_types[f"self.{target.attr}"] = node.value.func.id
-
-        # Проверяем instance.method() вызовы
-        seen_method_warnings: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-                var_name = node.value.id
-                method_name = node.attr
-                class_name = instance_types.get(var_name)
-                if not class_name or method_name.startswith("_"):
-                    continue
-                source_stem, cls_methods = imported_classes[class_name]
-                wkey = f"{var_name}.{method_name}"
-                if method_name not in cls_methods and wkey not in seen_method_warnings:
-                    seen_method_warnings.add(wkey)
-                    public = sorted(m for m in cls_methods if not m.startswith("_") and m != "__init__")
-                    warnings.append(
-                        f"{var_name}.{method_name}(): метод '{method_name}' не найден "
-                        f"в классе {class_name} из {project_stems[source_stem]}. "
-                        f"Доступные методы: {', '.join(public) if public else '(нет)'}"
-                    )
-            # self.x.method()
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute):
-                if isinstance(node.value.value, ast.Name) and node.value.value.id == "self":
-                    key = f"self.{node.value.attr}"
-                    class_name = instance_types.get(key)
-                    if not class_name or node.attr.startswith("_"):
-                        continue
-                    source_stem, cls_methods = imported_classes[class_name]
-                    wkey = f"{key}.{node.attr}"
-                    if node.attr not in cls_methods and wkey not in seen_method_warnings:
-                        seen_method_warnings.add(wkey)
-                        public = sorted(m for m in cls_methods if not m.startswith("_") and m != "__init__")
-                        warnings.append(
-                            f"self.{node.value.attr}.{node.attr}(): метод '{node.attr}' не найден "
-                            f"в классе {class_name} из {project_stems[source_stem]}. "
-                            f"Доступные методы: {', '.join(public) if public else '(нет)'}"
-                        )
+    # Проверяем что вызываемые методы на импортированных классах существуют
+    imported_classes = _collect_imported_classes(tree, project_stems, _get_for)
+    warnings.extend(_validate_method_calls(tree, imported_classes, project_stems))
 
     return warnings
 

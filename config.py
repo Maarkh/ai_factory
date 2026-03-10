@@ -38,6 +38,17 @@ MAX_LLM_RETRIES         = 3   # Число retry для ask_agent
 SELF_REFLECT_RETRIES    = 1   # max_retries для self_reflect (модель слабая)
 FLUSH_EVERY = 20              # сбрасывать на диск каждые N записей
 
+# Пороги безопасности фаз (сколько провалов до пропуска/эскалации)
+MAX_ARCH_ATTEMPTS       = 5   # Попытки генерации архитектуры
+MAX_A5_REVIEW_ATTEMPTS  = 3   # Попытки ревью A5 контракта
+DEVELOP_STALL_THRESHOLD = 6   # develop без прогресса → revise_spec
+E2E_TOTAL_SKIP          = 6   # E2E суммарных провалов → пропуск
+E2E_CONSECUTIVE_REVISE  = 3   # E2E подряд → revise_spec
+INTEGRATION_TOTAL_SKIP  = 4   # Integration суммарных провалов → пропуск
+UNIT_TEST_TOTAL_SKIP    = 3   # Unit test суммарных провалов → пропуск
+ITERS_BUMP_REVISE       = 10  # max_iters += N после revise_spec
+ITERS_BUMP_SMALL        = 5   # max_iters += N при minor escalation
+
 # ─────────────────────────────────────────────
 # Лимиты отображения/усечения (символы)
 # ─────────────────────────────────────────────
