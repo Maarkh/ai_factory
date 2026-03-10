@@ -16,6 +16,9 @@ from config import (
     MAX_ABSOLUTE_ITERS,
     MAX_FILE_ATTEMPTS,
     MAX_PHASE_TOTAL_FAILS,
+    MAX_ITERS_DEFAULT,
+    MAX_ITERS_INCREMENT,
+    TRUNCATE_FEEDBACK,
     MIN_COVERAGE,
     FACTORY_DIR,
     SRC_DIR,
@@ -45,8 +48,8 @@ from phases import (
     revise_spec,
 )
 from supervisor import (
-    PipelineContext, _ctx, signal_handler,
-    ask_supervisor, _bump_phase_fail, _reset_phase_fail,
+    PipelineContext, ctx, signal_handler,
+    ask_supervisor, bump_phase_fail, reset_phase_fail,
 )
 
 
@@ -117,9 +120,9 @@ def _init_project_files(
             "\n".join(deps) if deps else "# No external dependencies\n", encoding="utf-8"
         )
         # Исправляем невалидные pip-пакеты от LLM (opencv → opencv-python-headless)
-        from contract import _validate_requirements_txt
+        from contract import validate_requirements_txt
         import logging as _logging
-        _validate_requirements_txt(req_path, _logging.getLogger("ai_factory"))
+        validate_requirements_txt(req_path, _logging.getLogger("ai_factory"))
 
     elif language == "typescript":
         entry_point = "main.ts"
@@ -305,7 +308,7 @@ async def main() -> None:
             "env_fixes":            {},
             "phase_fail_counts":    {},
             "iteration":            1,
-            "max_iters":            200,
+            "max_iters":            MAX_ITERS_DEFAULT,
             "language":             language,
             "entry_point":          entry_point,
             "last_phase":           "initial",
@@ -353,7 +356,7 @@ async def main() -> None:
         git_commit(project_path, "Initial architecture + artifacts A0-A5")
 
     # Привязываем контекст для signal handler
-    _ctx.bind(project_path, state)
+    ctx.bind(project_path, state)
 
     # ── Главный цикл ─────────────────────────────────────────────────────────
     state.setdefault("e2e_attempt", 0)
@@ -366,10 +369,10 @@ async def main() -> None:
 
         if state["iteration"] > state["max_iters"]:
             if input_with_timeout(
-                f"⚠️  Лимит {state['max_iters']} итераций. Дать ещё 15? (y/n): ",
+                f"⚠️  Лимит {state['max_iters']} итераций. Дать ещё {MAX_ITERS_INCREMENT}? (y/n): ",
                 WAIT_TIMEOUT, "y"
             ).lower() == "y":
-                state["max_iters"] += 15
+                state["max_iters"] += MAX_ITERS_INCREMENT
                 save_state(project_path, state)
             else:
                 stats.print_report()
@@ -414,7 +417,7 @@ async def main() -> None:
                 made_progress = len(approved_after) > len(approved_before)
 
                 if made_progress:
-                    _reset_phase_fail(state, "develop")
+                    reset_phase_fail(state, "develop")
 
                 # Немедленная эскалация: reviewer сказал что проблема в спецификации
                 if spec_blocked:
@@ -423,7 +426,7 @@ async def main() -> None:
                         "Разработчик НЕ может исправить это без изменения A2/A3/A5. "
                         "Последние замечания: "
                         + "; ".join(
-                            f"{f}: {state['feedbacks'].get(f, '')[:300]}"
+                            f"{f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
                             for f in spec_blocked
                         )
                     )
@@ -440,7 +443,7 @@ async def main() -> None:
                         f"Файлы не удалось написать за {MAX_FILE_ATTEMPTS} попыток: {', '.join(exhausted)}. "
                         "Последние замечания: "
                         + "; ".join(
-                            f"{f}: {state['feedbacks'].get(f, '')[:200]}"
+                            f"{f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
                             for f in exhausted
                         )
                     )
@@ -453,7 +456,7 @@ async def main() -> None:
                     else:
                         _force_approve_files(state, project_path, exhausted, "spec исчерпана + exhausted", logger)
                 elif not made_progress:
-                    fails = _bump_phase_fail(state, "develop")
+                    fails = bump_phase_fail(state, "develop")
                     if fails >= 6:
                         unapproved = [f for f in state["files"]
                                       if f not in state.get("approved_files", [])]
@@ -462,7 +465,7 @@ async def main() -> None:
                             f"Файлы без прогресса: {', '.join(unapproved)}. "
                             "Последние замечания: "
                             + "; ".join(
-                                f"{f}: {state['feedbacks'].get(f, '')[:200]}"
+                                f"{f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
                                 for f in unapproved
                             )
                         )
@@ -483,19 +486,19 @@ async def main() -> None:
                     state["e2e_passed"] = True
                     state["e2e_skipped"] = True
                     state["e2e_attempt"] = 0
-                    _reset_phase_fail(state, "e2e_review")
+                    reset_phase_fail(state, "e2e_review")
                 elif not phase_cross_file_check(logger, project_path, state):
-                    _bump_phase_fail(state, "cross_file_check")
+                    bump_phase_fail(state, "cross_file_check")
                     save_state(project_path, state)
                     state["iteration"] += 1
                     continue
                 elif not await phase_e2e_review(logger, project_path, state, cache, stats, state["e2e_attempt"], randomize=randomize_models):
-                    fails = _bump_phase_fail(state, "e2e_review")
+                    fails = bump_phase_fail(state, "e2e_review")
                     state["e2e_attempt"] += 1
                     if fails >= 3 and _can_revise_spec(state, logger, "e2e_review"):
                         print("⚠️  E2E падает 3 раза подряд → принудительный revise_spec.")
                         feedbacks = [
-                            f"  {f}: {state['feedbacks'].get(f, '')[:300]}"
+                            f"  {f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
                             for f in state["files"] if state["feedbacks"].get(f, "")
                         ]
                         problem = (
@@ -507,7 +510,7 @@ async def main() -> None:
                 else:
                     state["e2e_passed"] = True
                     state["e2e_attempt"] = 0
-                    _reset_phase_fail(state, "e2e_review")
+                    reset_phase_fail(state, "e2e_review")
 
             elif next_phase == "integration_test":
                 total_int_fails = state.get("phase_total_fails", {}).get("integration_test", 0)
@@ -515,12 +518,12 @@ async def main() -> None:
                     logger.warning("⚠️  Integration test падал 4+ раз суммарно → ПРОПУСК, переход к unit_tests.")
                     state["integration_passed"] = True
                     state["integration_skipped"] = True
-                    _reset_phase_fail(state, "integration_test")
+                    reset_phase_fail(state, "integration_test")
                 elif not await phase_integration_test(logger, project_path, state, cache, stats, randomize=randomize_models):
-                    _bump_phase_fail(state, "integration_test")
+                    bump_phase_fail(state, "integration_test")
                 else:
                     state["integration_passed"] = True
-                    _reset_phase_fail(state, "integration_test")
+                    reset_phase_fail(state, "integration_test")
 
             elif next_phase == "unit_tests":
                 total_ut_fails = state.get("phase_total_fails", {}).get("unit_tests", 0)
@@ -528,12 +531,12 @@ async def main() -> None:
                     logger.warning("⚠️  Unit tests падал 3+ раз суммарно → ПРОПУСК, переход к document.")
                     state["tests_passed"] = True
                     state["tests_skipped"] = True
-                    _reset_phase_fail(state, "unit_tests")
+                    reset_phase_fail(state, "unit_tests")
                 elif not await phase_unit_tests(logger, project_path, state, cache, stats, randomize=randomize_models):
-                    _bump_phase_fail(state, "unit_tests")
+                    bump_phase_fail(state, "unit_tests")
                 else:
                     state["tests_passed"] = True
-                    _reset_phase_fail(state, "unit_tests")
+                    reset_phase_fail(state, "unit_tests")
 
             elif next_phase == "document":
                 await phase_document(logger, project_path, state, cache, randomize=randomize_models)

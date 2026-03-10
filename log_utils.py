@@ -7,7 +7,7 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from config import FACTORY_DIR, LOGS_DIR, LOG_LEVEL
+from config import FACTORY_DIR, LOGS_DIR, LOG_LEVEL, LOG_FILE_MAX_BYTES, LOG_INTERACTION_CHARS
 from models_pool import MODEL_POOLS
 
 
@@ -55,7 +55,7 @@ def setup_logger(project_path: Path) -> logging.Logger:
     # Файловый обработчик (DEBUG — все детали)
     file_handler = RotatingFileHandler(
         logs_dir / "agent_interactions.log",
-        maxBytes=10 * 1024 * 1024,
+        maxBytes=LOG_FILE_MAX_BYTES,
         backupCount=5,
         encoding="utf-8",
     )
@@ -83,7 +83,7 @@ def setup_logger(project_path: Path) -> logging.Logger:
 
 def log_interaction(
     logger: logging.Logger, agent: str, model: str,
-    prompt: str, response: str, max_chars: int = 2000
+    prompt: str, response: str, max_chars: int = LOG_INTERACTION_CHARS
 ) -> None:
     sep = "=" * 50
     logger.debug(

@@ -4,9 +4,10 @@ import re
 import sys
 from pathlib import Path
 
+from config import TRUNCATE_CODE
 from exceptions import LLMError
 from llm import ask_agent
-from json_utils import _parse_if_str
+from json_utils import parse_if_str
 from artifacts import save_artifact
 from lang_utils import LANG_DISPLAY
 from log_utils import get_model
@@ -24,9 +25,9 @@ def _auto_add_requirement(requirements_path: Path, package_name: str, logger: lo
     if not requirements_path or not requirements_path.exists():
         return
     # Исправляем невалидные pip-имена (LLM часто пишет import-имя вместо pip-имени)
-    from code_context import _WRONG_PIP_PACKAGES
-    if package_name in _WRONG_PIP_PACKAGES:
-        correct_pip, _ = _WRONG_PIP_PACKAGES[package_name]
+    from code_context import WRONG_PIP_PACKAGES
+    if package_name in WRONG_PIP_PACKAGES:
+        correct_pip, _ = WRONG_PIP_PACKAGES[package_name]
         logger.warning(
             f"  ⚠️  _auto_add_requirement: '{package_name}' → '{correct_pip}' "
             f"(невалидный pip-пакет)"
@@ -49,11 +50,11 @@ def _auto_add_requirement(requirements_path: Path, package_name: str, logger: lo
     logger.info(f"  📦  Авто-добавлен '{package_name}' в requirements.txt")
 
 
-def _validate_requirements_txt(requirements_path: Path, logger: logging.Logger) -> None:
+def validate_requirements_txt(requirements_path: Path, logger: logging.Logger) -> None:
     """Проверяет requirements.txt на невалидные pip-пакеты и исправляет их."""
     if not requirements_path or not requirements_path.exists():
         return
-    from code_context import _WRONG_PIP_PACKAGES
+    from code_context import WRONG_PIP_PACKAGES
     try:
         content = requirements_path.read_text(encoding="utf-8")
     except OSError:
@@ -68,8 +69,8 @@ def _validate_requirements_txt(requirements_path: Path, logger: logging.Logger) 
             new_lines.append(line)
             continue
         pkg = re.split(r"[=<>~!\[;]", stripped)[0].strip()
-        if pkg in _WRONG_PIP_PACKAGES:
-            correct_pip, _ = _WRONG_PIP_PACKAGES[pkg]
+        if pkg in WRONG_PIP_PACKAGES:
+            correct_pip, _ = WRONG_PIP_PACKAGES[pkg]
             logger.warning(
                 f"  ⚠️  requirements.txt: '{pkg}' → '{correct_pip}' (невалидный pip-пакет)"
             )
@@ -335,8 +336,8 @@ def _validate_global_imports(
             pip_names.add(pkg.replace("-", "_"))
     # Дополнительно: pip-пакеты из requirements.txt (всегда актуальный источник)
     if requirements_path and requirements_path.exists():
-        from code_context import _parse_requirements
-        pip_names.update(_parse_requirements(requirements_path))
+        from code_context import parse_requirements
+        pip_names.update(parse_requirements(requirements_path))
 
     cleaned_gi: dict[str, list[str]] = {}
     for fname, imports in gi.items():
@@ -362,8 +363,8 @@ def _validate_global_imports(
             # Проверка: base_module должен быть валидным Python-идентификатором
             # (ловит "from opencv-python import cv2" — дефис невалиден)
             if not base_module.isidentifier():
-                from code_context import _PIP_TO_IMPORT
-                correct = _PIP_TO_IMPORT.get(base_module.lower())
+                from code_context import PIP_TO_IMPORT
+                correct = PIP_TO_IMPORT.get(base_module.lower())
                 if correct:
                     corrected = f"import {correct}"
                     logger.warning(
@@ -383,9 +384,9 @@ def _validate_global_imports(
 
             # Проверка: невалидный pip-пакет как import-имя
             # (ловит "import opencv", "from opencv import ..." — opencv не Python-модуль)
-            from code_context import _WRONG_PIP_PACKAGES
-            if base_module in _WRONG_PIP_PACKAGES:
-                correct_pip, correct_import = _WRONG_PIP_PACKAGES[base_module]
+            from code_context import WRONG_PIP_PACKAGES
+            if base_module in WRONG_PIP_PACKAGES:
+                correct_pip, correct_import = WRONG_PIP_PACKAGES[base_module]
                 corrected = imp_line.replace(base_module, correct_import, 1)
                 logger.warning(
                     f"  ⚠️  A5 global_imports: '{imp_line}' для {fname} → "
@@ -665,7 +666,7 @@ def _inject_requirements_imports(
     """
     if not requirements_path or not requirements_path.exists():
         return contract
-    from code_context import _PIP_TO_IMPORT
+    from code_context import PIP_TO_IMPORT
     fc = contract.get("file_contracts", {})
     gi = contract.setdefault("global_imports", {})
 
@@ -679,7 +680,7 @@ def _inject_requirements_imports(
             pkg = re.split(r"[=<>~!\[]", line)[0].strip().lower()
             pkg_norm = pkg.replace("-", "_")
             # Ищем правильное имя импорта
-            import_name = _PIP_TO_IMPORT.get(pkg, _PIP_TO_IMPORT.get(pkg_norm, pkg_norm))
+            import_name = PIP_TO_IMPORT.get(pkg, PIP_TO_IMPORT.get(pkg_norm, pkg_norm))
             if import_name and import_name.isidentifier():
                 pkg_to_import[import_name] = f"import {import_name}"
     except Exception:
@@ -1296,8 +1297,8 @@ async def _validate_and_patch_contract(
         )
         try:
             patch = await ask_agent(logger, "contract_analyst", ctx, cache, 0, randomize, language)
-            patch_fc = _parse_if_str(patch.get("file_contracts", {}), dict, {})
-            patch_gi = _parse_if_str(patch.get("global_imports", {}), dict, {})
+            patch_fc = parse_if_str(patch.get("file_contracts", {}), dict, {})
+            patch_gi = parse_if_str(patch.get("global_imports", {}), dict, {})
 
             # Берём контракт для нашего файла — или весь ответ если ключ не совпал
             file_contract = patch_fc.get(fname)
@@ -1308,8 +1309,8 @@ async def _validate_and_patch_contract(
                 file_imports = next(iter(patch_gi.values()), [])
 
             if file_contract:
-                fc[fname] = _parse_if_str(file_contract, list, [])
-                gi[fname] = _parse_if_str(file_imports,  list, [])
+                fc[fname] = parse_if_str(file_contract, list, [])
+                gi[fname] = parse_if_str(file_imports,  list, [])
                 logger.info(f"   ✅ Контракт для {fname} получен ({len(fc[fname])} функций).")
                 stats.record("contract_analyst", get_model("contract_analyst"), True)
             else:
@@ -1369,8 +1370,8 @@ async def patch_contract_for_file(
     ctx = (
         f"Текущий API контракт (A5) для файла `{filename}`:\n"
         f"{json.dumps(current, ensure_ascii=False, indent=2)}\n\n"
-        f"Код разработчика (НЕ прошёл ревью):\n{developer_code[:3000]}\n\n"
-        f"Замечания ревьюера (код отклонён из-за этих проблем):\n{feedback[:1500]}\n\n"
+        f"Код разработчика (НЕ прошёл ревью):\n{developer_code[:TRUNCATE_CODE]}\n\n"
+        f"Замечания ревьюера (код отклонён из-за этих проблем):\n{feedback[:TRUNCATE_CODE // 2]}\n\n"
         f"Контракты ДРУГИХ файлов проекта (для called_by ссылок):\n"
         f"{json.dumps({k: v for k, v in fc.items() if k != filename}, ensure_ascii=False, indent=2)}\n\n"
         f"Язык: {LANG_DISPLAY.get(language, language)}\n\n"
@@ -1386,8 +1387,8 @@ async def patch_contract_for_file(
     try:
         patch = await ask_agent(logger, "contract_analyst", ctx, cache, 0, randomize, language)
         patch = _normalize_file_contracts(patch) if isinstance(patch, dict) else {}
-        patch_fc = _parse_if_str(patch.get("file_contracts", {}), dict, {})
-        patch_gi = _parse_if_str(patch.get("global_imports", {}), dict, {})
+        patch_fc = parse_if_str(patch.get("file_contracts", {}), dict, {})
+        patch_gi = parse_if_str(patch.get("global_imports", {}), dict, {})
 
         file_contract = patch_fc.get(filename)
         if file_contract is None:
@@ -1397,8 +1398,8 @@ async def patch_contract_for_file(
             file_imports = next(iter(patch_gi.values()), [])
 
         if file_contract:
-            fc[filename] = _parse_if_str(file_contract, list, [])
-            gi[filename] = _parse_if_str(file_imports, list, [])
+            fc[filename] = parse_if_str(file_contract, list, [])
+            gi[filename] = parse_if_str(file_imports, list, [])
             contract["file_contracts"] = fc
             contract["global_imports"] = gi
             # Post-validation: полный набор валидаций как в phase_generate_api_contract
@@ -1563,7 +1564,7 @@ async def phase_generate_api_contract(
         return {"file_contracts": {}, "global_imports": {}}
 
 
-async def _refresh_api_contract(
+async def refresh_api_contract(
     logger: logging.Logger,
     project_path: Path,
     state: dict,

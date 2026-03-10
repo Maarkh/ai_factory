@@ -46,7 +46,7 @@ for mod in modules:
 # 2. cache.py
 # ─────────────────────────────────────────────
 print("\n── 2. cache.py ───────────────────────────────────")
-from cache import ThreadSafeCache, _cache_key, load_cache, save_cache
+from cache import ThreadSafeCache, cache_key, load_cache, save_cache
 
 c = ThreadSafeCache({"a": 1})
 check("ThreadSafeCache get",       c.get("a") == 1)
@@ -55,12 +55,12 @@ c["b"] = 2
 check("ThreadSafeCache __setitem__", c["b"] == 2)
 check("ThreadSafeCache to_dict",   c.to_dict() == {"a": 1, "b": 2})
 
-key1 = _cache_key("agent", "model", "text", "python")
-key2 = _cache_key("agent", "model", "text", "python")
-key3 = _cache_key("agent", "model", "text", "typescript")
-check("_cache_key deterministic",  key1 == key2)
-check("_cache_key differs by lang", key1 != key3)
-check("_cache_key is sha256 hex",  len(key1) == 64)
+key1 = cache_key("agent", "model", "text", "python")
+key2 = cache_key("agent", "model", "text", "python")
+key3 = cache_key("agent", "model", "text", "typescript")
+check("cache_key deterministic",  key1 == key2)
+check("cache_key differs by lang", key1 != key3)
+check("cache_key is sha256 hex",  len(key1) == 64)
 
 with tempfile.TemporaryDirectory() as td:
     p = Path(td)
@@ -112,34 +112,34 @@ check("sanitize_files fallback ts", fallback_ts == ["main.ts"])
 # 4. json_utils.py
 # ─────────────────────────────────────────────
 print("\n── 4. json_utils.py ──────────────────────────────")
-from json_utils import _parse_if_str, _to_str, _safe_contract, _repair_json, _extract_json_from_text
+from json_utils import parse_if_str, to_str, safe_contract, repair_json, extract_json_from_text
 
-check("_parse_if_str correct type",  _parse_if_str([1, 2], list, []) == [1, 2])
-check("_parse_if_str str→list",      _parse_if_str("[1,2]", list, []) == [1, 2])
-check("_parse_if_str wrong type fb", _parse_if_str("hello", list, [99]) == [99])
-check("_parse_if_str None fb",       _parse_if_str(None, dict, {}) == {})
+check("parse_if_str correct type",  parse_if_str([1, 2], list, []) == [1, 2])
+check("parse_if_str str→list",      parse_if_str("[1,2]", list, []) == [1, 2])
+check("parse_if_str wrong type fb", parse_if_str("hello", list, [99]) == [99])
+check("parse_if_str None fb",       parse_if_str(None, dict, {}) == {})
 
-check("_to_str string",   _to_str("hi") == "hi")
-check("_to_str None",     _to_str(None) == "")
-check("_to_str dict",     _to_str({"k": 1}) == '{"k": 1}')
-check("_to_str int",      _to_str(42) == "42")
+check("to_str string",   to_str("hi") == "hi")
+check("to_str None",     to_str(None) == "")
+check("to_str dict",     to_str({"k": 1}) == '{"k": 1}')
+check("to_str int",      to_str(42) == "42")
 
 state = {"api_contract": {"file_contracts": '{"a.py": "[1,2]"}', "global_imports": {}}}
-c2 = _safe_contract(state)
-check("_safe_contract normalises str fc", isinstance(c2["file_contracts"], dict))
+c2 = safe_contract(state)
+check("safe_contract normalises str fc", isinstance(c2["file_contracts"], dict))
 
-repaired = _repair_json('{"a": 1,}')
-check("_repair_json trailing comma",  json.loads(repaired) == {"a": 1})
+repaired = repair_json('{"a": 1,}')
+check("repair_json trailing comma",  json.loads(repaired) == {"a": 1})
 
-parsed = _extract_json_from_text('Some text {"key": "value"} more text')
+parsed = extract_json_from_text('Some text {"key": "value"} more text')
 check("_extract_json from text",      parsed == {"key": "value"})
 
 md_text = '```json\n{"answer": 42}\n```'
-parsed_md = _extract_json_from_text(md_text)
+parsed_md = extract_json_from_text(md_text)
 check("_extract_json from markdown",  parsed_md == {"answer": 42})
 
 try:
-    _extract_json_from_text("no json here")
+    extract_json_from_text("no json here")
     check("_extract_json raises on no json", False)
 except ValueError:
     check("_extract_json raises on no json", True)
@@ -260,30 +260,30 @@ check("container name prefix",        name1.startswith("factory_"))
 print("\n── 9. state.py ───────────────────────────────────")
 from state import (
     save_state, load_state, MAX_FEEDBACK_HISTORY,
-    _push_feedback, _get_feedback_ctx, ensure_feedback_keys,
-    _sanitize_package_name, update_requirements, update_dockerfile,
+    push_feedback, get_feedback_ctx, ensure_feedback_keys,
+    sanitize_package_name, update_requirements, update_dockerfile,
 )
 
 check("MAX_FEEDBACK_HISTORY", MAX_FEEDBACK_HISTORY == 3)
 
 st = {"files": ["a.py", "b.py"], "feedbacks": {}, "feedback_history": {}}
-_push_feedback(st, "a.py", "fix this")
-check("_push_feedback sets feedbacks",  st["feedbacks"]["a.py"] == "fix this")
-check("_push_feedback history",         st["feedback_history"]["a.py"] == ["fix this"])
+push_feedback(st, "a.py", "fix this")
+check("push_feedback sets feedbacks",  st["feedbacks"]["a.py"] == "fix this")
+check("push_feedback history",         st["feedback_history"]["a.py"] == ["fix this"])
 
 # overflow: push MAX+1 items
 for i in range(MAX_FEEDBACK_HISTORY + 1):
-    _push_feedback(st, "a.py", f"feedback {i}")
-check("_push_feedback trims history", len(st["feedback_history"]["a.py"]) == MAX_FEEDBACK_HISTORY)
+    push_feedback(st, "a.py", f"feedback {i}")
+check("push_feedback trims history", len(st["feedback_history"]["a.py"]) == MAX_FEEDBACK_HISTORY)
 
-ctx = _get_feedback_ctx(st, "a.py")
-check("_get_feedback_ctx non-empty",  len(ctx) > 0)
-ctx_none = _get_feedback_ctx({"feedbacks": {}, "feedback_history": {}}, "x.py")
-check("_get_feedback_ctx missing",    ctx_none == "")
+ctx = get_feedback_ctx(st, "a.py")
+check("get_feedback_ctx non-empty",  len(ctx) > 0)
+ctx_none = get_feedback_ctx({"feedbacks": {}, "feedback_history": {}}, "x.py")
+check("get_feedback_ctx missing",    ctx_none == "")
 
-check("_sanitize_package_name basic",   _sanitize_package_name("requests") == "requests")
-check("_sanitize_package_name version", _sanitize_package_name("requests>=2.0") == "requests>=2.0")
-check("_sanitize_package_name strips",  _sanitize_package_name("pkg; sys_platform") == "pkgsys_platform")
+check("sanitize_package_name basic",   sanitize_package_name("requests") == "requests")
+check("sanitize_package_name version", sanitize_package_name("requests>=2.0") == "requests>=2.0")
+check("sanitize_package_name strips",  sanitize_package_name("pkg; sys_platform") == "pkgsys_platform")
 
 with tempfile.TemporaryDirectory() as td:
     p = Path(td)
@@ -319,7 +319,7 @@ with tempfile.TemporaryDirectory() as td:
 # 10. code_context.py
 # ─────────────────────────────────────────────
 print("\n── 10. code_context.py ───────────────────────────")
-from code_context import extract_public_api, get_global_context, build_dependency_order, _find_failing_file
+from code_context import extract_public_api, get_global_context, build_dependency_order, find_failing_file
 
 py_code = """\
 import os
@@ -356,20 +356,20 @@ with tempfile.TemporaryDirectory() as td:
     check("build_dependency_order b before a", order.index("b.py") < order.index("a.py"))
 
 stderr_py = 'Traceback:\n  File "src/utils.py", line 10\nAttributeError'
-check("_find_failing_file python",  _find_failing_file(stderr_py, "", ["main.py", "utils.py"]) == "utils.py")
+check("find_failing_file python",  find_failing_file(stderr_py, "", ["main.py", "utils.py"]) == "utils.py")
 
 stderr_ts = "error at (main.ts:5:3)"
-check("_find_failing_file ts",      _find_failing_file("", stderr_ts, ["main.ts", "utils.ts"]) == "main.ts")
+check("find_failing_file ts",      find_failing_file("", stderr_ts, ["main.ts", "utils.ts"]) == "main.ts")
 
-check("_find_failing_file fallback", _find_failing_file("", "", ["a.py"]) == "a.py")
-check("_find_failing_file empty",    _find_failing_file("", "", []) == "main.py")
+check("find_failing_file fallback", find_failing_file("", "", ["a.py"]) == "a.py")
+check("find_failing_file empty",    find_failing_file("", "", []) == "main.py")
 
 
 # ─────────────────────────────────────────────
 # 11. supervisor.py
 # ─────────────────────────────────────────────
 print("\n── 11. supervisor.py ─────────────────────────────")
-from supervisor import PipelineContext, _ctx, signal_handler, _bump_phase_fail, _reset_phase_fail
+from supervisor import PipelineContext, ctx, signal_handler, bump_phase_fail, reset_phase_fail
 
 ctx_obj = PipelineContext()
 check("PipelineContext init",           ctx_obj.state is None)
@@ -377,15 +377,15 @@ check("PipelineContext save_if_bound",  True)  # no-op when unbound, should not 
 ctx_obj.save_if_bound()
 
 st_sup = {"phase_fail_counts": {}, "phase_total_fails": {}}
-n1 = _bump_phase_fail(st_sup, "develop")
-n2 = _bump_phase_fail(st_sup, "develop")
-check("_bump_phase_fail increments",      n1 == 1 and n2 == 2)
-check("_bump_phase_fail total_fails",     st_sup["phase_total_fails"]["develop"] == 2)
-_reset_phase_fail(st_sup, "develop")
-check("_reset_phase_fail zeroes count",   st_sup["phase_fail_counts"]["develop"] == 0)
-check("_reset_phase_fail keeps total",    st_sup["phase_total_fails"]["develop"] == 2)
+n1 = bump_phase_fail(st_sup, "develop")
+n2 = bump_phase_fail(st_sup, "develop")
+check("bump_phase_fail increments",      n1 == 1 and n2 == 2)
+check("bump_phase_fail total_fails",     st_sup["phase_total_fails"]["develop"] == 2)
+reset_phase_fail(st_sup, "develop")
+check("reset_phase_fail zeroes count",   st_sup["phase_fail_counts"]["develop"] == 0)
+check("reset_phase_fail keeps total",    st_sup["phase_total_fails"]["develop"] == 2)
 
-check("_ctx is PipelineContext",          isinstance(_ctx, PipelineContext))
+check("_ctx is PipelineContext",          isinstance(ctx, PipelineContext))
 
 
 # ─────────────────────────────────────────────

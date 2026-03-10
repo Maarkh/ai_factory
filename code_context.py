@@ -142,7 +142,7 @@ def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
     return order
 
 
-def _find_failing_file(stderr: str, stdout: str, files: list[str]) -> str:
+def find_failing_file(stderr: str, stdout: str, files: list[str]) -> str:
     """Определяет файл с ошибкой по traceback. Возвращает имя файла или files[0]."""
     combined = stderr + "\n" + stdout
     # Python: File "path/file.py", line N
@@ -176,7 +176,7 @@ def _find_failing_file(stderr: str, stdout: str, files: list[str]) -> str:
 # ─────────────────────────────────────────────
 
 # Маппинг pip-пакет → import-имя (для пакетов, где они различаются)
-_PIP_TO_IMPORT: dict[str, str] = {
+PIP_TO_IMPORT: dict[str, str] = {
     "opencv-python":            "cv2",
     "opencv-python-headless":   "cv2",
     "opencv-contrib-python":    "cv2",
@@ -219,7 +219,7 @@ _PIP_TO_IMPORT: dict[str, str] = {
 
 # Невалидные pip-пакеты, которые LLM часто галлюцинирует.
 # wrong_pip_name → (correct_pip_name, correct_import_name)
-_WRONG_PIP_PACKAGES: dict[str, tuple[str, str]] = {
+WRONG_PIP_PACKAGES: dict[str, tuple[str, str]] = {
     "opencv":                    ("opencv-python-headless", "cv2"),
     "cv2":                       ("opencv-python-headless", "cv2"),
     "tensorflow-gpu":            ("tensorflow",             "tensorflow"),
@@ -255,7 +255,7 @@ _KNOWN_TRANSITIVE_DEPS: dict[str, set[str]] = {
 }
 
 
-def _parse_requirements(path: Path) -> set[str]:
+def parse_requirements(path: Path) -> set[str]:
     """Парсит requirements.txt и возвращает множество допустимых import-имён."""
     if not path.exists():
         return set()
@@ -272,8 +272,8 @@ def _parse_requirements(path: Path) -> set[str]:
             continue
         pkg_lower = pkg.lower()
         # Пропускаем невалидные pip-пакеты (LLM-галлюцинации)
-        if pkg in _WRONG_PIP_PACKAGES:
-            correct_pip, correct_import = _WRONG_PIP_PACKAGES[pkg]
+        if pkg in WRONG_PIP_PACKAGES:
+            correct_pip, correct_import = WRONG_PIP_PACKAGES[pkg]
             result.add(correct_import.lower())
             result.add(correct_pip.lower().replace("-", "_"))
             continue
@@ -281,8 +281,8 @@ def _parse_requirements(path: Path) -> set[str]:
         pkg_normalized = pkg_lower.replace("-", "_")
         result.add(pkg_normalized)
         # Маппинг pip→import для известных расхождений
-        # _PIP_TO_IMPORT keys могут быть в любом регистре (Twisted, Pygments...)
-        _pip_import = _PIP_TO_IMPORT.get(pkg_lower) or _PIP_TO_IMPORT.get(pkg)
+        # PIP_TO_IMPORT keys могут быть в любом регистре (Twisted, Pygments...)
+        _pip_import = PIP_TO_IMPORT.get(pkg_lower) or PIP_TO_IMPORT.get(pkg)
         if _pip_import:
             result.add(_pip_import.lower())
         # Также добавляем оригинальное имя (без нормализации)
@@ -327,7 +327,7 @@ def _get_stdlib_modules() -> frozenset[str]:
     })
 
 
-def _find_name_in_classes(code: str, name: str) -> str | None:
+def find_name_in_classes(code: str, name: str) -> str | None:
     """Ищет имя как метод/атрибут класса в коде. Возвращает имя класса или None.
 
     Используется для улучшения фидбэка: если `from X import Y` невалиден,
@@ -354,7 +354,7 @@ def _find_name_in_classes(code: str, name: str) -> str | None:
     return None
 
 
-def _get_top_level_names(code: str) -> set[str]:
+def get_top_level_names(code: str) -> set[str]:
     """Извлекает только TOP-LEVEL определения из Python-кода через AST.
 
     Обходит ТОЛЬКО tree.body (не вложенные узлы).
@@ -464,7 +464,7 @@ def validate_imports(
 
     warnings: list[str] = []
     stdlib = _get_stdlib_modules()
-    pip_packages = _parse_requirements(requirements_path) if requirements_path else set()
+    pip_packages = parse_requirements(requirements_path) if requirements_path else set()
 
     # Множество имён проектных модулей (без расширения)
     project_modules = {Path(f).stem for f in project_files}
@@ -695,7 +695,7 @@ def validate_cross_file_names(
         except (OSError, UnicodeDecodeError):
             _cache[stem] = None
             return None
-        names = _get_top_level_names(target_code)
+        names = get_top_level_names(target_code)
         _cache[stem] = (names, target_code)
         return (names, target_code)
 
@@ -718,7 +718,7 @@ def validate_cross_file_names(
                 continue
             if alias.name not in target_names:
                 # Проверяем: может это метод класса в целевом файле?
-                owner_class = _find_name_in_classes(target_code, alias.name)
+                owner_class = find_name_in_classes(target_code, alias.name)
                 if owner_class:
                     warnings.append(
                         f"from {module_stem} import {alias.name}: "
@@ -886,7 +886,7 @@ def validate_project_consistency(
             continue
         file_codes[fname] = code
         stem = Path(fname).stem
-        symbol_table[stem] = _get_top_level_names(code)
+        symbol_table[stem] = get_top_level_names(code)
 
     issues: dict[str, list[str]] = {}
 
@@ -917,7 +917,7 @@ def validate_project_consistency(
                 if alias.name not in target_names:
                     # Проверяем: может это метод класса?
                     target_code = file_codes.get(target_fname, "")
-                    owner_class = _find_name_in_classes(target_code, alias.name) if target_code else None
+                    owner_class = find_name_in_classes(target_code, alias.name) if target_code else None
                     if owner_class:
                         file_warnings.append(
                             f"from {module_stem} import {alias.name}: "

@@ -41,7 +41,7 @@ class ThreadSafeCache:
             return copy.deepcopy(self._data)
 
 
-def _cache_key(agent: str, model: str, user_text: str, language: str) -> str:
+def cache_key(agent: str, model: str, user_text: str, language: str) -> str:
     return hashlib.sha256(f"{agent}:{model}:{language}:{user_text}".encode()).hexdigest()
 
 

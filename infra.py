@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from config import FACTORY_DIR, RUN_TIMEOUT
+from config import FACTORY_DIR, RUN_TIMEOUT, TRUNCATE_LOG
 from lang_utils import get_docker_image
 
 logger = logging.getLogger(__name__)
@@ -29,8 +29,8 @@ def run_command(
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-            partial_out = (e.stdout or "")[-2000:] if e.stdout else ""
-            partial_err = (e.stderr or "")[-2000:] if e.stderr else ""
+            partial_out = (e.stdout or "")[-TRUNCATE_LOG:] if e.stdout else ""
+            partial_err = (e.stderr or "")[-TRUNCATE_LOG:] if e.stderr else ""
             return -1, partial_out, f"TIMEOUT: процесс не завершился за {timeout}с.\n{partial_err}"
     except FileNotFoundError as e:
         return -1, "", f"Команда не найдена: {e}"

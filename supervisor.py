@@ -41,14 +41,14 @@ class PipelineContext:
                 logger.warning(f"⚠️  Не удалось сохранить состояние: {e}")
 
 
-_ctx = PipelineContext()
+ctx = PipelineContext()
 
 
 def signal_handler(sig, frame) -> None:
     global _shutdown_requested
     _shutdown_requested = True
     print("\n⌛ Ctrl+C — сохраняем состояние...")
-    _ctx.save_if_bound()
+    ctx.save_if_bound()
     sys.exit(0)
 
 
@@ -127,7 +127,7 @@ async def ask_supervisor(
         return _fallback_phase(state, f"fallback: supervisor exception: {e}")
 
 
-def _bump_phase_fail(state: dict, phase: str) -> int:
+def bump_phase_fail(state: dict, phase: str) -> int:
     counts = state.setdefault("phase_fail_counts", {})
     counts[phase] = counts.get(phase, 0) + 1
     # Общий счётчик фейлов за весь проект (не сбрасывается)
@@ -136,5 +136,5 @@ def _bump_phase_fail(state: dict, phase: str) -> int:
     return counts[phase]
 
 
-def _reset_phase_fail(state: dict, phase: str) -> None:
+def reset_phase_fail(state: dict, phase: str) -> None:
     state.setdefault("phase_fail_counts", {})[phase] = 0

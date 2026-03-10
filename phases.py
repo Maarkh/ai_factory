@@ -7,20 +7,25 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from config import MAX_FILE_ATTEMPTS, MAX_TEST_ATTEMPTS, MAX_CONTEXT_CHARS, MIN_COVERAGE, FACTORY_DIR, LOGS_DIR, SRC_DIR, RUN_TIMEOUT, MAX_SPEC_REVISIONS
+from config import (
+    MAX_FILE_ATTEMPTS, MAX_TEST_ATTEMPTS, MAX_CONTEXT_CHARS, MIN_COVERAGE,
+    FACTORY_DIR, LOGS_DIR, SRC_DIR, RUN_TIMEOUT, MAX_SPEC_REVISIONS,
+    MAX_A5_PATCHES_PER_FILE, SELF_REFLECT_RETRIES, TRUNCATE_FEEDBACK,
+    TRUNCATE_CODE, TRUNCATE_LOG, TRUNCATE_ERROR_MSG,
+)
 
 MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3  # После 15 суммарных попыток — принудительный APPROVE
 from exceptions import LLMError
 from llm import ask_agent
 from stats import ModelStats
-from json_utils import _to_str, _safe_contract
+from json_utils import to_str, safe_contract
 from lang_utils import LANG_DISPLAY, LANG_EXT, get_execution_command, get_test_command, get_docker_image
 from log_utils import get_model, log_runtime_error
-from code_context import get_global_context, get_full_context, build_dependency_order, _find_failing_file, validate_imports, validate_cross_file_names
-from state import _push_feedback, _get_feedback_ctx, update_dependencies, update_dockerfile, update_requirements
+from code_context import get_global_context, get_full_context, build_dependency_order, find_failing_file, validate_imports, validate_cross_file_names
+from state import push_feedback, get_feedback_ctx, update_dependencies, update_dockerfile, update_requirements
 from artifacts import update_artifact_a9, save_artifact
 from infra import run_in_docker, build_docker_image
-from contract import _refresh_api_contract, phase_review_api_contract, patch_contract_for_file
+from contract import refresh_api_contract, phase_review_api_contract, patch_contract_for_file
 from cache import ThreadSafeCache
 
 # Детекция замаскированных ошибок (rc=0 но traceback в stdout)
@@ -581,7 +586,7 @@ async def _review_file(
         result   = await ask_agent(logger, "reviewer", rev_ctx,
                                    cache, attempt, randomize, language)
         status   = result.get("status", "REJECT")
-        feedback = _to_str(result.get("feedback", ""))
+        feedback = to_str(result.get("feedback", ""))
         needs_spec = bool(result.get("needs_spec_revision", False))
         stats.record("reviewer", rev_model, status == "APPROVE")
         if needs_spec:
@@ -609,8 +614,8 @@ async def do_self_reflect(
     logger.info(f"🤔 [{sr_model}] Self-Reflect проверяет {current_file} ...")
 
     # Контракт для текущего файла из A5
-    file_contract  = _safe_contract(state).get("file_contracts", {}).get(current_file, [])
-    global_imports = _safe_contract(state).get("global_imports", {}).get(current_file, [])
+    file_contract  = safe_contract(state).get("file_contracts", {}).get(current_file, [])
+    global_imports = safe_contract(state).get("global_imports", {}).get(current_file, [])
 
     try:
         ctx = (
@@ -621,14 +626,14 @@ async def do_self_reflect(
             f"Ключевые внешние импорты из A5 (могут быть расширены разработчиком — это нормально):\n"
             f"{json.dumps(global_imports, ensure_ascii=False, indent=2)}"
         )
-        result   = await ask_agent(logger, "self_reflect", ctx, cache, 0, randomize, language, max_retries=1)
+        result   = await ask_agent(logger, "self_reflect", ctx, cache, 0, randomize, language, max_retries=SELF_REFLECT_RETRIES)
         status   = result.get("status", "OK")
-        feedback = _to_str(result.get("feedback", ""))
-        improved = _sanitize_llm_code(_to_str(result.get("improved_code", "")))
+        feedback = to_str(result.get("feedback", ""))
+        improved = _sanitize_llm_code(to_str(result.get("improved_code", "")))
 
         if status == "NEEDS_IMPROVEMENT" and improved:
             (src_path / current_file).write_text(improved, encoding="utf-8")
-            logger.info(f"  → Self-Reflect улучшил код: {feedback[:80]}")
+            logger.info(f"  → Self-Reflect улучшил код: {feedback[:TRUNCATE_FEEDBACK]}")
 
         stats.record("self_reflect", sr_model, status == "OK")
         return status, feedback
@@ -675,8 +680,8 @@ async def phase_validate_architecture(
         try:
             val_resp = await ask_agent(logger, agent_key, val_ctx, cache, 0, randomize, language)
             if val_resp.get("status") in ("REJECT", "CANNOT_FIX"):
-                fb = _to_str(val_resp.get("feedback", val_resp.get("explanation", "")))
-                logger.warning(f"  ❌ {label} отклонил: {fb[:150]}")
+                fb = to_str(val_resp.get("feedback", val_resp.get("explanation", "")))
+                logger.warning(f"  ❌ {label} отклонил: {fb[:TRUNCATE_FEEDBACK]}")
                 rejections += 1
                 stats.record(agent_key, get_model(agent_key), False)
             else:
@@ -705,7 +710,7 @@ async def phase_a5_compliance_review(
     src_path = project_path / SRC_DIR
 
     all_code = get_full_context(src_path, state["files"])
-    a5_contract = _safe_contract(state)
+    a5_contract = safe_contract(state)
 
     agents = [
         ("a5_business_reviewer", "Business Analyst"),
@@ -732,7 +737,7 @@ async def phase_a5_compliance_review(
             continue
 
         status = result.get("status", "REJECT")
-        feedback = _to_str(result.get("feedback", ""))
+        feedback = to_str(result.get("feedback", ""))
         if status == "REJECT":
             rejections.append((agent_key, label, feedback))
             stats.record(agent_key, get_model(agent_key), False)
@@ -788,7 +793,7 @@ async def phase_develop(
             file_path = src_path / current_file
             if file_path.exists() and file_path.read_text(encoding="utf-8").strip():
                 # Перед force-approve: инжектируем A5 imports в код на диске
-                gi = _safe_contract(state).get("global_imports", {}).get(current_file, [])
+                gi = safe_contract(state).get("global_imports", {}).get(current_file, [])
                 if gi:
                     existing = file_path.read_text(encoding="utf-8")
                     patched = _ensure_a5_imports(existing, gi)
@@ -838,14 +843,14 @@ async def phase_develop(
         global_context = get_global_context(src_path, state["files"], exclude=current_file)
 
         # A5: контракт для текущего файла
-        file_contract  = _safe_contract(state).get("file_contracts", {}).get(current_file, [])
-        global_imports = _safe_contract(state).get("global_imports", {}).get(current_file, [])
+        file_contract  = safe_contract(state).get("file_contracts", {}).get(current_file, [])
+        global_imports = safe_contract(state).get("global_imports", {}).get(current_file, [])
 
         # Патч A5 после 3+ неудачных попыток — контракт может не соответствовать реальности
         # Лимит: не более 2 патч-ресетов на файл (чтобы не откладывать force-approve бесконечно)
         a5_patch_counts: dict = state.setdefault("_a5_patch_counts", {})
         patches_done = a5_patch_counts.get(current_file, 0)
-        if attempt >= 3 and file_contract and existing_code and patches_done < 2:
+        if attempt >= 3 and file_contract and existing_code and patches_done < MAX_A5_PATCHES_PER_FILE:
             last_feedback = state.get("feedbacks", {}).get(current_file, "")
             if last_feedback:
                 patched = await patch_contract_for_file(
@@ -854,12 +859,12 @@ async def phase_develop(
                 )
                 if patched:
                     a5_patch_counts[current_file] = patches_done + 1
-                    file_contract  = _safe_contract(state).get("file_contracts", {}).get(current_file, [])
-                    global_imports = _safe_contract(state).get("global_imports", {}).get(current_file, [])
+                    file_contract  = safe_contract(state).get("file_contracts", {}).get(current_file, [])
+                    global_imports = safe_contract(state).get("global_imports", {}).get(current_file, [])
                     # Сброс попыток после патча A5 — дать developer шанс с новым контрактом
                     file_attempts[current_file] = 0
                     attempt = 0
-                    logger.info(f"🔄 A5 для {current_file} обновлён (патч {patches_done + 1}/2) → счётчик попыток сброшен.")
+                    logger.info(f"🔄 A5 для {current_file} обновлён (патч {patches_done + 1}/{MAX_A5_PATCHES_PER_FILE}) → счётчик попыток сброшен.")
 
         dev_ctx = (
             f"Задача:\n{state['task']}\n\n"
@@ -936,7 +941,7 @@ async def phase_develop(
             if len(existing_code) > max_code_chars:
                 existing_code = existing_code[:max_code_chars] + "\n# [... код обрезан ...]"
             dev_ctx += f"ТЕКУЩИЙ КОД `{current_file}`:\n{existing_code}\n\n"
-        feedback_ctx = _get_feedback_ctx(state, current_file)
+        feedback_ctx = get_feedback_ctx(state, current_file)
         if feedback_ctx:
             max_feedback_chars = MAX_CONTEXT_CHARS // 3
             if len(feedback_ctx) > max_feedback_chars:
@@ -1052,7 +1057,7 @@ async def phase_develop(
                 )
                 logger.warning(f"⛔ {current_file}: {len(pres_warnings)} функций потеряно → авто-REJECT")
                 stats.record("developer", dev_model, False)
-                _push_feedback(state, current_file, pres_feedback)
+                push_feedback(state, current_file, pres_feedback)
                 file_attempts[current_file] = attempt + 1
                 cumulative_attempts[current_file] = total_attempts + 1
                 continue
@@ -1067,7 +1072,7 @@ async def phase_develop(
             )
             logger.warning(f"⛔ {current_file}: дублирование {len(dup_warnings)} классов → автоматический REJECT")
             stats.record("developer", dev_model, False)
-            _push_feedback(state, current_file, dup_feedback)
+            push_feedback(state, current_file, dup_feedback)
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue
@@ -1082,7 +1087,7 @@ async def phase_develop(
             )
             logger.warning(f"⛔ {current_file}: {len(shadow_warnings)} конфликтов имён → авто-REJECT")
             stats.record("developer", dev_model, False)
-            _push_feedback(state, current_file, shadow_feedback)
+            push_feedback(state, current_file, shadow_feedback)
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue
@@ -1100,7 +1105,7 @@ async def phase_develop(
             )
             logger.warning(f"⛔ {current_file}: data-only нарушения → авто-REJECT")
             stats.record("developer", dev_model, False)
-            _push_feedback(state, current_file, data_only_feedback)
+            push_feedback(state, current_file, data_only_feedback)
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue
@@ -1134,7 +1139,7 @@ async def phase_develop(
             )
             logger.warning(f"⛔ {current_file}: {len(import_warnings)} ошибок импорта → авто-REJECT")
             stats.record("developer", dev_model, False)
-            _push_feedback(state, current_file, import_feedback)
+            push_feedback(state, current_file, import_feedback)
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue
@@ -1152,7 +1157,7 @@ async def phase_develop(
                 )
                 logger.warning(f"⛔ {current_file}: {len(xfile_warnings)} ошибок имён → авто-REJECT")
                 stats.record("developer", dev_model, False)
-                _push_feedback(state, current_file, xfile_feedback)
+                push_feedback(state, current_file, xfile_feedback)
                 file_attempts[current_file] = attempt + 1
                 cumulative_attempts[current_file] = total_attempts + 1
                 continue
@@ -1169,7 +1174,7 @@ async def phase_develop(
             )
             logger.warning(f"⛔ {current_file}: {len(stub_warnings)} заглушек → авто-REJECT")
             stats.record("developer", dev_model, False)
-            _push_feedback(state, current_file, stub_feedback)
+            push_feedback(state, current_file, stub_feedback)
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue
@@ -1184,7 +1189,7 @@ async def phase_develop(
             )
             logger.warning(f"⛔ {current_file}: отсутствуют {len(contract_missing)} элементов A5 → авто-REJECT")
             stats.record("developer", dev_model, False)
-            _push_feedback(state, current_file, contract_feedback)
+            push_feedback(state, current_file, contract_feedback)
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             continue
@@ -1239,7 +1244,7 @@ async def phase_develop(
             update_artifact_a9(project_path, current_file, f"Одобрен на попытке {attempt + 1}. Модель: {dev_model}.")
         else:
             stats.record("developer", dev_model, False)
-            combined = "\n".join(filter(None, [_to_str(sr_feedback), _to_str(rev_feedback)]))
+            combined = "\n".join(filter(None, [to_str(sr_feedback), to_str(rev_feedback)]))
             # Защита от пустого feedback при REJECT
             if not combined:
                 combined = (
@@ -1255,8 +1260,8 @@ async def phase_develop(
                     "НЕ жди изменений спецификации — реши проблему В РАМКАХ текущего API контракта. "
                     "Адаптируй код под текущие интерфейсы файлов проекта."
                 )
-            logger.warning(f"❌ {current_file} отклонён: {combined[:100]}")
-            _push_feedback(state, current_file, combined)
+            logger.warning(f"❌ {current_file} отклонён: {combined[:TRUNCATE_FEEDBACK]}")
+            push_feedback(state, current_file, combined)
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             # Эскалация на spec только после 3+ неудачных попыток
@@ -1326,8 +1331,8 @@ async def phase_e2e_review(
             else:
                 # Fallback: старый формат target_file + feedback
                 target   = resp.get("target_file", "").strip() or state["files"][0]
-                feedback = _to_str(resp.get("feedback", ""))
-                logger.warning(f"❌ E2E [{label}] REJECT на {target}: {feedback[:120]}")
+                feedback = to_str(resp.get("feedback", ""))
+                logger.warning(f"❌ E2E [{label}] REJECT на {target}: {feedback[:TRUNCATE_FEEDBACK]}")
                 rejections.append((agent_key, target, feedback))
             stats.record(agent_key, model, False)
             result_ok = False
@@ -1358,7 +1363,7 @@ async def phase_e2e_review(
             files_to_reset = set(state["files"])
         else:
             # Находим зависимые файлы (импортирующие target_files)
-            gi = _safe_contract(state).get("global_imports", {})
+            gi = safe_contract(state).get("global_imports", {})
             target_stems = {Path(t).stem for t in target_files}
             dependent_files = set()
             for f in state["files"]:
@@ -1526,7 +1531,7 @@ async def phase_integration_test(
             if build_success:
                 logger.info("✅ Образ собран.")
                 break
-            logger.error(f"❌ Ошибка сборки:\n{build_err[:400]}")
+            logger.error(f"❌ Ошибка сборки:\n{build_err[:TRUNCATE_ERROR_MSG]}")
             try:
                 devops_ctx  = (
                     f"Ошибка сборки Docker:\n{build_err}\n\n"
@@ -1571,8 +1576,8 @@ async def phase_integration_test(
         (logs_dir / "test.log").write_text(
             f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}", encoding="utf-8"
         )
-        logger.info(f"\n--- STDOUT ---\n{stdout[:2000]}")
-        logger.info(f"\n--- STDERR ---\n{stderr[:2000]}")
+        logger.info(f"\n--- STDOUT ---\n{stdout[:TRUNCATE_LOG]}")
+        logger.info(f"\n--- STDERR ---\n{stderr[:TRUNCATE_LOG]}")
 
         if rc == 0:
             # Проверяем: rc=0 но в stdout/stderr есть traceback → программа
@@ -1586,10 +1591,10 @@ async def phase_integration_test(
                     "Программа поймала исключение через try/except. Считаем как провал."
                 )
                 log_runtime_error(project_path, combined_output)
-                failing_file = _find_failing_file(stderr, stdout, state["files"])
+                failing_file = find_failing_file(stderr, stdout, state["files"])
                 state["feedbacks"][failing_file] = (
                     "ПРОГРАММА ЗАМАСКИРОВАЛА ОШИБКУ (rc=0, но traceback в выводе):\n"
-                    f"{combined_output[-2000:]}\n\n"
+                    f"{combined_output[-TRUNCATE_LOG:]}\n\n"
                     "Исправь причину exception — не ловить его через try/except, а устранить."
                 )
                 if failing_file in state.get("approved_files", []):
@@ -1616,7 +1621,7 @@ async def phase_integration_test(
             logger.info("🔧 Ошибка pip install — исправляю requirements.txt ...")
             req_path = src_path / "requirements.txt"
             if req_path.exists():
-                from code_context import _WRONG_PIP_PACKAGES
+                from code_context import WRONG_PIP_PACKAGES
                 lines = req_path.read_text(encoding="utf-8").splitlines()
                 new_lines = []
                 fixed_wrong = False
@@ -1627,8 +1632,8 @@ async def phase_integration_test(
                         continue
                     # Исправляем невалидные pip-пакеты (opencv → opencv-python-headless)
                     pkg_base = re.split(r'[=<>~!]', stripped)[0].strip()
-                    if pkg_base in _WRONG_PIP_PACKAGES:
-                        correct_pip, _ = _WRONG_PIP_PACKAGES[pkg_base]
+                    if pkg_base in WRONG_PIP_PACKAGES:
+                        correct_pip, _ = WRONG_PIP_PACKAGES[pkg_base]
                         logger.info(f"  → {pkg_base} → {correct_pip} (невалидный pip-пакет)")
                         new_lines.append(correct_pip)
                         fixed_wrong = True
@@ -1646,7 +1651,7 @@ async def phase_integration_test(
                     logger.info("  ✅ requirements.txt обновлён (убраны версии).")
             continue  # Повторяем попытку с обновлёнными зависимостями
 
-        failing_file = _find_failing_file(stderr, stdout, state["files"])
+        failing_file = find_failing_file(stderr, stdout, state["files"])
 
         if any(kw in stderr.lower() for kw in ["lib", ".so", "cannot open shared object", "no such file"]):
             logger.info("🛠️  DevOps анализирует ошибку окружения ...")
@@ -1816,7 +1821,7 @@ async def phase_unit_tests(
     # Контекст для генерации (неизменная часть)
     base_context = (
         f"Спецификации (A2):\n{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}"
-        f"\n\nAPI Контракт (A5):\n{json.dumps(_safe_contract(state), ensure_ascii=False, indent=2)}"
+        f"\n\nAPI Контракт (A5):\n{json.dumps(safe_contract(state), ensure_ascii=False, indent=2)}"
         f"\n\nТест-план (A7):\n{json.dumps(test_plan, ensure_ascii=False, indent=2)}"
         f"\n\nКод проекта:\n{all_code}"
     )
@@ -1842,7 +1847,7 @@ async def phase_unit_tests(
             gen_context += (
                 f"\n\n⚠️ ПРЕДЫДУЩИЕ ТЕСТЫ УПАЛИ. Исправь ТОЧЕЧНО — НЕ переписывай с нуля.\n"
                 f"\nПРЕДЫДУЩИЙ КОД ТЕСТОВ:\n{prev_tests_str}"
-                f"\n\nОШИБКА:\n{prev_error[-2000:]}"
+                f"\n\nОШИБКА:\n{prev_error[-TRUNCATE_LOG:]}"
                 f"\n\nИСПРАВЬ ТОЛЬКО упавшие тесты. Сохрани работающие."
             )
 
@@ -1930,7 +1935,7 @@ async def phase_unit_tests(
         ]):
             logger.warning("  ⚠️  Ошибка окружения Docker, не кода. Файлы не сбрасываем.")
             state["feedbacks"][state.get("entry_point", "main.py")] = (
-                f"ОШИБКА ОКРУЖЕНИЯ DOCKER (не кода):\n{stderr[-1000:]}"
+                f"ОШИБКА ОКРУЖЕНИЯ DOCKER (не кода):\n{stderr[-TRUNCATE_LOG // 2:]}"
             )
             return False
 
@@ -1945,8 +1950,8 @@ async def phase_unit_tests(
                 f"  🐛 Ошибка в коде приложения ({failing_app_file}), не в тестах."
             )
             state["feedbacks"][failing_app_file] = (
-                f"UNIT-ТЕСТЫ ОБНАРУЖИЛИ БАГ В КОДЕ:\n{stderr[-2000:]}"
-                f"\n\nВывод:\n{stdout[-1000:]}"
+                f"UNIT-ТЕСТЫ ОБНАРУЖИЛИ БАГ В КОДЕ:\n{stderr[-TRUNCATE_LOG:]}"
+                f"\n\nВывод:\n{stdout[-TRUNCATE_LOG // 2:]}"
             )
             if failing_app_file in state.get("approved_files", []):
                 state["approved_files"].remove(failing_app_file)
@@ -1968,10 +1973,10 @@ async def phase_unit_tests(
         f"⚠️  Тесты не прошли за {MAX_TEST_ATTEMPTS} попыток генерации. "
         "Де-аппрувим по _find_failing_file."
     )
-    failing_file = _find_failing_file(last_stderr, last_stdout, state["files"])
+    failing_file = find_failing_file(last_stderr, last_stdout, state["files"])
     state["feedbacks"][failing_file] = (
         f"UNIT-ТЕСТЫ НЕ ПРОЙДЕНЫ ПОСЛЕ {MAX_TEST_ATTEMPTS} ПОПЫТОК ГЕНЕРАЦИИ:\n"
-        f"{last_stderr[-2000:]}\n\nВывод:\n{last_stdout[-1000:]}"
+        f"{last_stderr[-TRUNCATE_LOG:]}\n\nВывод:\n{last_stdout[-TRUNCATE_LOG // 2:]}"
     )
     if failing_file in state.get("approved_files", []):
         state["approved_files"].remove(failing_file)
@@ -2060,7 +2065,7 @@ async def revise_spec(
 
         # Каскад: пересчитываем A5
         _stats = stats or ModelStats(project_path)
-        await _refresh_api_contract(logger, project_path, state, cache,
+        await refresh_api_contract(logger, project_path, state, cache,
                                     _stats, randomize)
 
         # Ревью обновлённого A5
@@ -2075,7 +2080,7 @@ async def revise_spec(
             logger.warning("⚠️  Обновлённый A5 не прошёл ревью. Продолжаем с текущим.")
 
         # Определяем, какие файлы затронуты новым контрактом
-        new_contracts     = _safe_contract(state).get("file_contracts", {})
+        new_contracts     = safe_contract(state).get("file_contracts", {})
         previously_approved = list(state.get("approved_files", []))
         affected_files = []
         for fname in previously_approved:

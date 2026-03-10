@@ -8,7 +8,7 @@ from typing import Optional
 from config import FACTORY_DIR, SRC_DIR, MAX_FEEDBACK_HISTORY
 from exceptions import StateError
 from artifacts import save_artifact
-from json_utils import _safe_contract
+from json_utils import safe_contract
 from lang_utils import get_docker_image, get_execution_command, LANG_DISPLAY
 from infra import run_command
 
@@ -56,7 +56,7 @@ def load_state(project_path: Path) -> Optional[dict]:
     return state
 
 
-def _push_feedback(state: dict, filename: str, feedback: str) -> None:
+def push_feedback(state: dict, filename: str, feedback: str) -> None:
     """Добавляет замечание в историю файла. Хранит только последние MAX_FEEDBACK_HISTORY."""
     if not feedback:
         return
@@ -67,7 +67,7 @@ def _push_feedback(state: dict, filename: str, feedback: str) -> None:
     state.setdefault("feedbacks", {})[filename] = feedback
 
 
-def _get_feedback_ctx(state: dict, filename: str) -> str:
+def get_feedback_ctx(state: dict, filename: str) -> str:
     """Формирует блок замечаний для контекста разработчика."""
     history = state.get("feedback_history", {}).get(filename, [])
     if not history:
@@ -95,7 +95,7 @@ def ensure_feedback_keys(state: dict) -> None:
     for f in state.get("files", []):
         state["feedbacks"].setdefault(f, "")
     state.setdefault("feedback_history", {})
-    _safe_contract(state)
+    safe_contract(state)
 
 
 def generate_summary(project_path: Path, state: dict) -> None:
@@ -128,7 +128,7 @@ def update_requirements(src_path: Path, orig: str, alt: str) -> None:
     req_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
-def _sanitize_package_name(pkg: str) -> str:
+def sanitize_package_name(pkg: str) -> str:
     """Санитизация имени пакета: разрешены только безопасные символы."""
     # Разрешены буквы, цифры, дефис, подчёркивание, точка, ==, >=, <=, ~=, [extras]
     clean = re.sub(r"[^\w\-\.\[\]=<>~,!]", "", pkg)
@@ -137,7 +137,7 @@ def _sanitize_package_name(pkg: str) -> str:
 
 def update_dependencies(src_path: Path, language: str, pkg: str) -> None:
     """Зависимости добавляются в src/."""
-    pkg = _sanitize_package_name(pkg)
+    pkg = sanitize_package_name(pkg)
     if not pkg:
         logger.warning("⚠️  Пустое или небезопасное имя пакета — пропускаю.")
         return

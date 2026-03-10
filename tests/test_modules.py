@@ -86,10 +86,10 @@ def test_thread_safe_cache_basic():
 
 
 def test_cache_key_deterministic():
-    from cache import _cache_key
-    k1 = _cache_key("agent", "model", "text", "python")
-    k2 = _cache_key("agent", "model", "text", "python")
-    k3 = _cache_key("agent", "model", "text", "typescript")
+    from cache import cache_key
+    k1 = cache_key("agent", "model", "text", "python")
+    k2 = cache_key("agent", "model", "text", "python")
+    k3 = cache_key("agent", "model", "text", "typescript")
     assert k1 == k2
     assert k1 != k3
     assert len(k1) == 64  # sha256 hex
@@ -148,39 +148,39 @@ def test_sanitize_files_list():
 # 6. json_utils.py
 # ─────────────────────────────────────────────
 
-def test_parse_if_str():
-    from json_utils import _parse_if_str
-    assert _parse_if_str([1, 2], list, []) == [1, 2]
-    assert _parse_if_str("[1,2]", list, []) == [1, 2]
-    assert _parse_if_str("hello", list, [99]) == [99]
-    assert _parse_if_str(None, dict, {}) == {}
+def testparse_if_str():
+    from json_utils import parse_if_str
+    assert parse_if_str([1, 2], list, []) == [1, 2]
+    assert parse_if_str("[1,2]", list, []) == [1, 2]
+    assert parse_if_str("hello", list, [99]) == [99]
+    assert parse_if_str(None, dict, {}) == {}
 
 
-def test_to_str():
-    from json_utils import _to_str
-    assert _to_str("hi") == "hi"
-    assert _to_str(None) == ""
-    assert _to_str({"k": 1}) == '{"k": 1}'
-    assert _to_str(42) == "42"
+def testto_str():
+    from json_utils import to_str
+    assert to_str("hi") == "hi"
+    assert to_str(None) == ""
+    assert to_str({"k": 1}) == '{"k": 1}'
+    assert to_str(42) == "42"
 
 
-def test_safe_contract():
-    from json_utils import _safe_contract
+def testsafe_contract():
+    from json_utils import safe_contract
     state = {"api_contract": {"file_contracts": '{"a.py": "[1,2]"}', "global_imports": {}}}
-    c = _safe_contract(state)
+    c = safe_contract(state)
     assert isinstance(c["file_contracts"], dict)
 
 
-def test_extract_json_from_text():
-    from json_utils import _extract_json_from_text, _repair_json
-    assert _extract_json_from_text('Some text {"key": "value"} more') == {"key": "value"}
-    assert _extract_json_from_text('```json\n{"answer": 42}\n```') == {"answer": 42}
+def testextract_json_from_text():
+    from json_utils import extract_json_from_text, repair_json
+    assert extract_json_from_text('Some text {"key": "value"} more') == {"key": "value"}
+    assert extract_json_from_text('```json\n{"answer": 42}\n```') == {"answer": 42}
 
-    repaired = _repair_json('{"a": 1,}')
+    repaired = repair_json('{"a": 1,}')
     assert json.loads(repaired) == {"a": 1}
 
     with pytest.raises(ValueError):
-        _extract_json_from_text("no json here")
+        extract_json_from_text("no json here")
 
 
 # ─────────────────────────────────────────────
@@ -314,33 +314,33 @@ def test_container_name():
 # ─────────────────────────────────────────────
 
 def test_feedback_push_and_trim():
-    from state import _push_feedback, MAX_FEEDBACK_HISTORY
+    from state import push_feedback, MAX_FEEDBACK_HISTORY
     assert MAX_FEEDBACK_HISTORY == 3
     st = {"files": ["a.py"], "feedbacks": {}, "feedback_history": {}}
-    _push_feedback(st, "a.py", "fix this")
+    push_feedback(st, "a.py", "fix this")
     assert st["feedbacks"]["a.py"] == "fix this"
     assert st["feedback_history"]["a.py"] == ["fix this"]
     for i in range(MAX_FEEDBACK_HISTORY + 1):
-        _push_feedback(st, "a.py", f"feedback {i}")
+        push_feedback(st, "a.py", f"feedback {i}")
     assert len(st["feedback_history"]["a.py"]) == MAX_FEEDBACK_HISTORY
 
 
 def test_feedback_ctx():
-    from state import _get_feedback_ctx
+    from state import get_feedback_ctx
     st = {"feedbacks": {}, "feedback_history": {}}
-    assert _get_feedback_ctx(st, "x.py") == ""
+    assert get_feedback_ctx(st, "x.py") == ""
 
     st2 = {"feedbacks": {"a.py": "last"}, "feedback_history": {"a.py": ["only"]}}
-    ctx = _get_feedback_ctx(st2, "a.py")
+    ctx = get_feedback_ctx(st2, "a.py")
     assert len(ctx) > 0
 
 
-def test_sanitize_package_name():
-    from state import _sanitize_package_name
-    assert _sanitize_package_name("requests") == "requests"
-    assert _sanitize_package_name("requests>=2.0") == "requests>=2.0"
+def testsanitize_package_name():
+    from state import sanitize_package_name
+    assert sanitize_package_name("requests") == "requests"
+    assert sanitize_package_name("requests>=2.0") == "requests>=2.0"
     # Пробел+точка с запятой удаляются
-    cleaned = _sanitize_package_name("pkg; sys_platform")
+    cleaned = sanitize_package_name("pkg; sys_platform")
     assert ";" not in cleaned and " " not in cleaned
 
 
@@ -417,16 +417,16 @@ def test_global_context():
         assert order.index("b.py") < order.index("a.py")
 
 
-def test_find_failing_file():
-    from code_context import _find_failing_file
+def testfind_failing_file():
+    from code_context import find_failing_file
     stderr_py = 'Traceback:\n  File "src/utils.py", line 10\nAttributeError'
-    assert _find_failing_file(stderr_py, "", ["main.py", "utils.py"]) == "utils.py"
+    assert find_failing_file(stderr_py, "", ["main.py", "utils.py"]) == "utils.py"
 
     stderr_ts = "error at (main.ts:5:3)"
-    assert _find_failing_file("", stderr_ts, ["main.ts", "utils.ts"]) == "main.ts"
+    assert find_failing_file("", stderr_ts, ["main.ts", "utils.ts"]) == "main.ts"
 
-    assert _find_failing_file("", "", ["a.py"]) == "a.py"
-    assert _find_failing_file("", "", []) == "main.py"
+    assert find_failing_file("", "", ["a.py"]) == "a.py"
+    assert find_failing_file("", "", []) == "main.py"
 
 
 # ─────────────────────────────────────────────
@@ -434,22 +434,22 @@ def test_find_failing_file():
 # ─────────────────────────────────────────────
 
 def test_pipeline_context():
-    from supervisor import PipelineContext, _bump_phase_fail, _reset_phase_fail, _ctx
+    from supervisor import PipelineContext, bump_phase_fail, reset_phase_fail, ctx
     ctx = PipelineContext()
     assert ctx.state is None
     ctx.save_if_bound()  # no-op when unbound, must not raise
 
     st = {"phase_fail_counts": {}, "phase_total_fails": {}}
-    n1 = _bump_phase_fail(st, "develop")
-    n2 = _bump_phase_fail(st, "develop")
+    n1 = bump_phase_fail(st, "develop")
+    n2 = bump_phase_fail(st, "develop")
     assert n1 == 1 and n2 == 2
     assert st["phase_total_fails"]["develop"] == 2
 
-    _reset_phase_fail(st, "develop")
+    reset_phase_fail(st, "develop")
     assert st["phase_fail_counts"]["develop"] == 0
     assert st["phase_total_fails"]["develop"] == 2
 
-    assert isinstance(_ctx, PipelineContext)
+    assert isinstance(ctx, PipelineContext)
 
 
 # ─────────────────────────────────────────────
@@ -493,7 +493,7 @@ async def test_ask_agent_cache_hit():
 
     # Кладём в кэш заранее
     model = get_model("business_analyst", 0, randomize=False)
-    key = _cache_key("business_analyst", model, "cached text", "python")
+    key = cache_key("business_analyst", model, "cached text", "python")
     cache[key] = {"cached": True}
 
     result = await ask_agent(

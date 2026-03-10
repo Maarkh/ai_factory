@@ -21,11 +21,11 @@ def _strip_garbage_tokens(text: str) -> str:
     text = _GARBAGE_TOKEN_RE.sub("", text)
     return text
 
-from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_NUM_CTX
-from cache import ThreadSafeCache, _cache_key
+from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_NUM_CTX, MAX_LLM_RETRIES
+from cache import ThreadSafeCache, cache_key
 from exceptions import LLMError
 from log_utils import get_model, log_model_choice, log_interaction
-from json_utils import _extract_json_from_text
+from json_utils import extract_json_from_text
 from lang_utils import get_system_prompt
 
 # Ollama native API base (без /v1/)
@@ -153,18 +153,18 @@ async def ask_agent(
     attempt: int = 0,
     randomize: bool = False,
     language: str = "python",
-    max_retries: int = 3,
+    max_retries: int = MAX_LLM_RETRIES,
     client: Optional[httpx.AsyncClient] = None,
 ) -> dict:
     model = get_model(agent, attempt, randomize=randomize)
     log_model_choice(logger, agent, model, attempt)
 
-    cache_key = _cache_key(agent, model, user_text, language) if agent in CACHEABLE_AGENTS and attempt == 0 else None
+    ckey = cache_key(agent, model, user_text, language) if agent in CACHEABLE_AGENTS and attempt == 0 else None
 
-    if cache_key is not None:
-        if cache_key in cache:
+    if ckey is not None:
+        if ckey in cache:
             logger.info(f"[{agent}:{model}] Cache hit")
-            return cache[cache_key]
+            return cache[ckey]
 
     sys_prompt  = get_system_prompt(agent, language)
     temperature = AGENT_TEMPERATURES.get(agent, 0.2)
@@ -197,8 +197,8 @@ async def ask_agent(
                 if not isinstance(result, dict) or not result:
                     raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__} (len={len(result) if isinstance(result, dict) else 'N/A'})")
                 log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
-                if cache_key is not None:
-                    cache[cache_key] = result
+                if ckey is not None:
+                    cache[ckey] = result
                 return result
             except _RETRYABLE_ERRORS as e:
                 last_exc = e
@@ -214,7 +214,7 @@ async def ask_agent(
                         raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
                     if done_reason == "length":
                         logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (done_reason=length)")
-                    result = _extract_json_from_text(raw)
+                    result = extract_json_from_text(raw)
                     if not isinstance(result, dict) or not result:
                         raise ValueError(f"Ожидался непустой dict, получен {type(result).__name__}")
                     log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")

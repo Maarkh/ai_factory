@@ -2,10 +2,12 @@ import json
 import re
 from typing import Any, TypeVar
 
+from config import TRUNCATE_ERROR_MSG
+
 T = TypeVar("T")
 
 
-def _parse_if_str(value: Any, expected_type: type[T], fallback: T) -> T:
+def parse_if_str(value: Any, expected_type: type[T], fallback: T) -> T:
     """Если value — строка, пробует json.loads. Если тип не совпал — возвращает fallback."""
     if isinstance(value, expected_type):
         return value
@@ -19,7 +21,7 @@ def _parse_if_str(value: Any, expected_type: type[T], fallback: T) -> T:
     return fallback
 
 
-def _to_str(value: Any) -> str:
+def to_str(value: Any) -> str:
     """Приводит любое значение к строке — защита от dict/list в полях feedback."""
     if isinstance(value, str):
         return value
@@ -30,7 +32,7 @@ def _to_str(value: Any) -> str:
     return str(value)
 
 
-def _safe_contract(state: dict) -> dict:
+def safe_contract(state: dict) -> dict:
     """
     Возвращает api_contract как правильно типизированный dict.
     Защищает от строк на всех уровнях вложенности — модели иногда
@@ -38,31 +40,31 @@ def _safe_contract(state: dict) -> dict:
     Исправляет state на месте.
     """
     raw = state.get("api_contract")
-    contract = _parse_if_str(raw, dict, {})
+    contract = parse_if_str(raw, dict, {})
 
     # Нормализуем file_contracts: должен быть dict[str, list]
-    fc = _parse_if_str(contract.get("file_contracts"), dict, {})
+    fc = parse_if_str(contract.get("file_contracts"), dict, {})
     for fname in list(fc.keys()):
-        fc[fname] = _parse_if_str(fc[fname], list, [])
+        fc[fname] = parse_if_str(fc[fname], list, [])
     contract["file_contracts"] = fc
 
     # Нормализуем global_imports: должен быть dict[str, list]
-    gi = _parse_if_str(contract.get("global_imports"), dict, {})
+    gi = parse_if_str(contract.get("global_imports"), dict, {})
     for fname in list(gi.keys()):
-        gi[fname] = _parse_if_str(gi[fname], list, [])
+        gi[fname] = parse_if_str(gi[fname], list, [])
     contract["global_imports"] = gi
 
     state["api_contract"] = contract
     return contract
 
 
-def _repair_json(text: str) -> str:
+def repair_json(text: str) -> str:
     text = re.sub(r',\s*([}\]])', r'\1', text)
     text = re.sub(r'//.*?$', '', text, flags=re.MULTILINE)
     return text
 
 
-def _repair_truncated_json(text: str) -> dict | None:
+def repair_truncated_json(text: str) -> dict | None:
     """Пытается починить обрезанный JSON (модель исчерпала max_tokens).
 
     Стратегия: закрыть незавершённую строку, затем закрыть все открытые скобки.
@@ -111,7 +113,7 @@ def _repair_truncated_json(text: str) -> dict | None:
         pass
 
     try:
-        result = json.loads(_repair_json(candidate))
+        result = json.loads(repair_json(candidate))
         if isinstance(result, dict):
             return result
     except json.JSONDecodeError:
@@ -120,7 +122,7 @@ def _repair_truncated_json(text: str) -> dict | None:
     return None
 
 
-def _extract_json_from_text(text: str) -> dict:
+def extract_json_from_text(text: str) -> dict:
     """Надёжный парсер: учитывает строковые литералы с {} внутри и markdown-блоки."""
     text = text.strip()
     if not text:
@@ -133,7 +135,7 @@ def _extract_json_from_text(text: str) -> dict:
             return json.loads(md_match.group(1))
         except json.JSONDecodeError:
             try:
-                return json.loads(_repair_json(md_match.group(1)))
+                return json.loads(repair_json(md_match.group(1)))
             except json.JSONDecodeError:
                 pass
 
@@ -145,7 +147,7 @@ def _extract_json_from_text(text: str) -> dict:
 
     start = text.find("{")
     if start == -1:
-        raise ValueError(f"JSON не найден в ответе: {text[:300]}")
+        raise ValueError(f"JSON не найден в ответе: {text[:TRUNCATE_ERROR_MSG]}")
 
     count = 0
     in_string = False
@@ -175,7 +177,7 @@ def _extract_json_from_text(text: str) -> dict:
     if end == -1:
         # Попытка починить обрезанный JSON (модель исчерпала max_tokens)
         truncated = text[start:]
-        repaired = _repair_truncated_json(truncated)
+        repaired = repair_truncated_json(truncated)
         if repaired is not None:
             return repaired
         raise ValueError("Несбалансированные JSON-скобки")
@@ -188,7 +190,7 @@ def _extract_json_from_text(text: str) -> dict:
         pass
 
     try:
-        return json.loads(_repair_json(candidate))
+        return json.loads(repair_json(candidate))
     except json.JSONDecodeError:
         pass
 
@@ -198,4 +200,4 @@ def _extract_json_from_text(text: str) -> dict:
     except (ImportError, Exception):
         pass
 
-    raise ValueError(f"Не удалось извлечь JSON: {text[:400]}...")
+    raise ValueError(f"Не удалось извлечь JSON: {text[:TRUNCATE_ERROR_MSG]}...")
