@@ -1623,3 +1623,133 @@ class TestExperienceMemory:
         results = self._mod.search_experience("ImportError numpy")
         # First result should be the one with keywords in error field (score 2 per kw vs 1)
         assert "numpy missing" in results[0]["error"]
+
+
+# =====================================================
+# Dynamic File Priority (build_dependency_order)
+# =====================================================
+
+class TestBuildDependencyOrderPriority:
+    def setup_method(self):
+        from code_context import build_dependency_order
+        self.build = build_dependency_order
+
+    def test_more_dependents_first(self):
+        """File with more dependents should come before file with fewer dependents."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            # core.py: no imports (depended on by both a.py and b.py)
+            (src / "core.py").write_text("x = 1", encoding="utf-8")
+            # helpers.py: no imports (depended on by only a.py)
+            (src / "helpers.py").write_text("y = 2", encoding="utf-8")
+            # a.py: imports both core and helpers
+            (src / "a.py").write_text("from core import x\nfrom helpers import y", encoding="utf-8")
+            # b.py: imports only core
+            (src / "b.py").write_text("from core import x", encoding="utf-8")
+
+            files = ["a.py", "b.py", "core.py", "helpers.py"]
+            order = self.build(files, src)
+            # core.py has 2 dependents, helpers.py has 1 → core first
+            assert order.index("core.py") < order.index("helpers.py")
+            # Both come before their dependents
+            assert order.index("core.py") < order.index("a.py")
+            assert order.index("core.py") < order.index("b.py")
+
+    def test_fewer_attempts_first(self):
+        """Files with fewer past rejects should be prioritized when dependents are equal."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            # Two independent files, same dependents (0)
+            (src / "alpha.py").write_text("a = 1", encoding="utf-8")
+            (src / "beta.py").write_text("b = 2", encoding="utf-8")
+
+            files = ["alpha.py", "beta.py"]
+            # alpha has 5 past attempts, beta has 0
+            order = self.build(files, src, file_attempts={"alpha.py": 5, "beta.py": 0})
+            assert order.index("beta.py") < order.index("alpha.py")
+
+    def test_backward_compatible_without_attempts(self):
+        """Calling without file_attempts still works (backward compatibility)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            (src / "a.py").write_text("x = 1", encoding="utf-8")
+            order = self.build(["a.py"], src)
+            assert order == ["a.py"]
+
+
+# =====================================================
+# Deterministic Runtime Debugger (diagnose_runtime_error)
+# =====================================================
+
+class TestDiagnoseRuntimeError:
+    def setup_method(self):
+        from checks import diagnose_runtime_error
+        self.diagnose = diagnose_runtime_error
+
+    def test_module_not_found(self):
+        stderr = 'Traceback (most recent call last):\n  File "main.py", line 1\nModuleNotFoundError: No module named \'numpy\''
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert result["missing_package"] == "numpy"
+        assert "numpy" in result["fix"]
+
+    def test_module_not_found_pip_mapping(self):
+        """cv2 should map to opencv-python-headless pip package."""
+        stderr = "ModuleNotFoundError: No module named 'cv2'"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "opencv" in result["missing_package"]
+
+    def test_cannot_import_name(self):
+        stderr = "ImportError: cannot import name 'Foo' from 'models'"
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            (src / "models.py").write_text("class Bar:\n    pass\n", encoding="utf-8")
+            result = self.diagnose(stderr, "", ["main.py", "models.py"], src)
+        assert result is not None
+        assert "Foo" in result["fix"]
+        assert "Bar" in result["fix"]  # Shows available names
+
+    def test_name_error(self):
+        stderr = "NameError: name 'process_data' is not defined"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "process_data" in result["fix"]
+
+    def test_attribute_error_module(self):
+        stderr = "AttributeError: module 'utils' has no attribute 'helper'"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py", "utils.py"], Path(tmp))
+        assert result is not None
+        assert "helper" in result["fix"]
+        assert "utils" in result["fix"]
+
+    def test_type_error_missing_arg(self):
+        stderr = "TypeError: process() missing 1 required positional argument: 'data'"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "argument" in result["fix"].lower()
+
+    def test_syntax_error(self):
+        stderr = "SyntaxError: invalid syntax"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "синтаксис" in result["fix"].lower() or "Syntax" in result["fix"]
+
+    def test_unknown_error_returns_none(self):
+        stderr = "some random output without exceptions"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is None
+
+    def test_type_error_unexpected_kwarg(self):
+        stderr = "TypeError: foo() got an unexpected keyword argument 'bar'"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "аргумент" in result["fix"].lower() or "argument" in result["fix"].lower()

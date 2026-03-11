@@ -31,6 +31,7 @@
 │   ├────── contract.py
 │   ├────── contract_validation.py
 │   ├────── exceptions.py
+│   ├────── experience.py
 │   ├────── generate_docs.py
 │   ├────── infra.py
 │   ├────── json_utils.py
@@ -94,6 +95,7 @@
 │   │   │   ├── 37/
 │   │   │   ├── b9/
 │   │   │   ├── 56/
+│   │   │   ├── 90/
 │   │   │   ├── 4c/
 │   │   │   ├── 95/
 │   │   │   ├── aa/
@@ -163,6 +165,7 @@
 │   │   │   ├── 04/
 │   │   │   ├── ec/
 │   │   │   ├── 8b/
+│   │   │   ├── 28/
 │   │   │   ├── 4b/
 │   │   │   ├── ee/
 │   │   │   ├── f8/
@@ -342,12 +345,14 @@ def _force_approve_files(state: dict, project_path: Path, files: list[str], reas
     """Принудительно одобряет файлы с непустым кодом на диске."""
     src_path = project_path / SRC_DIR
     approved = state.setdefault("approved_files", [])
+    fa_counter = state.setdefault("force_approved_count", 0)
     for f in files:
         fpath = src_path / f
         if fpath.exists() and fpath.read_text(encoding="utf-8").strip():
             logger.warning(f"⚠️  {f}: {reason} → принудительный APPROVE")
             if f not in approved:
                 approved.append(f)
+                state["force_approved_count"] = state.get("force_approved_count", 0) + 1
             state["feedbacks"][f] = ""
             state["file_attempts"][f] = 0
 
@@ -853,6 +858,9 @@ def _print_success_summary(state: dict, project_path: Path, language: str) -> li
     print(f"🌍 Язык          : {LANG_DISPLAY.get(language, language)}")
     print(f"🔢 Итераций      : {state['iteration']}")
     print(f"📄 Файлов        : {len(state['files'])}")
+    fa_count = state.get("force_approved_count", 0)
+    if fa_count:
+        print(f"⚠️  Force-approved: {fa_count}/{len(state['files'])}")
     if skipped:
         print(f"⚠️  ПРОПУЩЕНО    : {', '.join(skipped)}")
     else:
@@ -1164,6 +1172,46 @@ def sanitize_llm_code(code: str) -> str:
         "", code, flags=re.MULTILINE,
     )
     return code.strip()
+
+
+def apply_search_replace(code: str, changes: list[dict]) -> str | None:
+    """Применяет search/replace патчи к коду.
+
+    Каждый элемент changes: {"search": "...", "replace": "..."}.
+    Возвращает пропатченный код или None если хотя бы один search не найден.
+    """
+    if not changes:
+        return None
+    for change in changes:
+        if not isinstance(change, dict):
+            return None
+        search = change.get("search", "")
+        replace = change.get("replace", "")
+        if not isinstance(search, str) or not search.strip():
+            return None
+        if not isinstance(replace, str):
+            return None
+        # Точный поиск
+        if search in code:
+            code = code.replace(search, replace, 1)
+            continue
+        # Нормализация пробелов: strip каждой строки search и ищем по нормализованным строкам
+        search_lines = [ln.rstrip() for ln in search.splitlines()]
+        code_lines = code.splitlines()
+        found = False
+        for i in range(len(code_lines) - len(search_lines) + 1):
+            if all(
+                code_lines[i + j].rstrip() == search_lines[j]
+                for j in range(len(search_lines))
+            ):
+                replace_lines = replace.splitlines() if replace else [""]
+                code_lines[i:i + len(search_lines)] = replace_lines
+                code = "\n".join(code_lines)
+                found = True
+                break
+        if not found:
+            return None
+    return code
 
 
 def ensure_a5_imports(code: str, global_imports: list[str]) -> str:
@@ -1850,6 +1898,37 @@ def get_full_context(
         parts.append(chunk)
         total += len(chunk)
     return "".join(parts)
+
+
+def get_a5_deps(current_file: str, global_imports: list, files: list[str]) -> list[str]:
+    """Возвращает файлы проекта, от которых зависит current_file по A5 global_imports.
+
+    Из строк типа 'from models import User' извлекает 'models' и ищет
+    соответствующий файл в files. Порядок: сначала зависимости, потом остальные.
+    """
+    file_stems = {Path(f).stem: f for f in files}
+    deps: list[str] = []
+    rest: list[str] = []
+    dep_stems: set[str] = set()
+
+    for imp_line in global_imports:
+        if not isinstance(imp_line, str):
+            continue
+        m = re.match(r"from\s+(\w+)\s+import", imp_line)
+        if m:
+            stem = m.group(1)
+            if stem in file_stems and file_stems[stem] != current_file:
+                dep_stems.add(stem)
+
+    for f in files:
+        if f == current_file:
+            continue
+        if Path(f).stem in dep_stems:
+            deps.append(f)
+        else:
+            rest.append(f)
+
+    return deps + rest
 
 
 def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
@@ -4551,6 +4630,135 @@ class SpecError(FactoryError):
     """Ошибки валидации контракта/спецификации."""
 
 ```
+### 📄 `experience.py`
+
+```python
+"""
+Experience Memory — накопление инженерного опыта между проектами.
+
+Сохраняет пары (error_pattern → fix) из успешных исправлений.
+При генерации кода подгружает релевантный опыт в контекст LLM.
+
+Хранилище: BASE_DIR/.factory_experience.json (общее для всех проектов).
+"""
+
+import json
+import logging
+import re
+from pathlib import Path
+from typing import Any
+
+from config import BASE_DIR
+
+_EXPERIENCE_PATH = BASE_DIR / ".factory_experience.json"
+_MAX_EXPERIENCES = 500
+_MAX_QUERY_RESULTS = 5
+
+logger = logging.getLogger(__name__)
+
+
+def _load() -> list[dict]:
+    if _EXPERIENCE_PATH.exists():
+        try:
+            data = json.loads(_EXPERIENCE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return []
+
+
+def _save(data: list[dict]) -> None:
+    _EXPERIENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _EXPERIENCE_PATH.write_text(
+        json.dumps(data[-_MAX_EXPERIENCES:], indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _normalize(text: str) -> str:
+    """Нормализация для поиска: lowercase, без лишних пробелов."""
+    return re.sub(r"\s+", " ", text.lower().strip())
+
+
+def record_experience(
+    error_pattern: str,
+    fix_description: str,
+    category: str = "develop",
+    file: str = "",
+) -> None:
+    """Сохраняет опыт успешного исправления ошибки."""
+    if not error_pattern.strip() or not fix_description.strip():
+        return
+
+    exp = {
+        "category": category,
+        "error": error_pattern.strip()[:500],
+        "fix": fix_description.strip()[:500],
+        "file": file,
+    }
+
+    data = _load()
+
+    # Дедупликация: если такой же error+fix уже есть, обновляем
+    norm_err = _normalize(exp["error"])
+    for existing in data:
+        if _normalize(existing.get("error", "")) == norm_err:
+            existing["fix"] = exp["fix"]
+            existing["category"] = exp["category"]
+            _save(data)
+            return
+
+    data.append(exp)
+    _save(data)
+    logger.debug(f"[experience] Saved: {category} | {error_pattern[:80]}...")
+
+
+def search_experience(query: str, category: str = "") -> list[dict]:
+    """Ищет релевантный опыт по substring match в error pattern.
+
+    Возвращает до _MAX_QUERY_RESULTS результатов, отсортированных по релевантности.
+    """
+    if not query.strip():
+        return []
+
+    data = _load()
+    if not data:
+        return []
+
+    norm_query = _normalize(query)
+    # Извлекаем ключевые слова (>3 символов) для scoring
+    keywords = [w for w in norm_query.split() if len(w) > 3]
+    if not keywords:
+        return []
+
+    scored: list[tuple[int, dict]] = []
+    for exp in data:
+        if category and exp.get("category") != category:
+            continue
+        norm_err = _normalize(exp.get("error", ""))
+        norm_fix = _normalize(exp.get("fix", ""))
+        # Подсчёт совпадений ключевых слов
+        score = sum(2 for kw in keywords if kw in norm_err)
+        score += sum(1 for kw in keywords if kw in norm_fix)
+        if score > 0:
+            scored.append((score, exp))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [exp for _, exp in scored[:_MAX_QUERY_RESULTS]]
+
+
+def format_experience_context(experiences: list[dict]) -> str:
+    """Форматирует опыт для вставки в промпт разработчика."""
+    if not experiences:
+        return ""
+    parts = ["ОПЫТ ПРОШЛЫХ ПРОЕКТОВ (учти при написании кода):"]
+    for i, exp in enumerate(experiences, 1):
+        parts.append(f"  {i}. Ошибка: {exp['error']}")
+        parts.append(f"     Решение: {exp['fix']}")
+    return "\n".join(parts) + "\n\n"
+
+```
 ### 📄 `generate_docs.py`
 
 ```python
@@ -4813,6 +5021,7 @@ def run_command(
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
             partial_out = (e.stdout or "")[-TRUNCATE_LOG:] if e.stdout else ""
             partial_err = (e.stderr or "")[-TRUNCATE_LOG:] if e.stderr else ""
             return -1, partial_out, f"TIMEOUT: процесс не завершился за {timeout}с.\n{partial_err}"
@@ -5332,6 +5541,7 @@ _backend: LLMBackend = OllamaBackend(LLM_BASE_URL, LLM_NUM_CTX, LLM_TIMEOUT)
 
 AGENT_TEMPERATURES: dict[str, float] = {
     "developer":        0.1,
+    "developer_patch":  0.0,
     "architect":        0.0,
     "system_analyst":   0.2,
     "business_analyst": 0.3,
@@ -5359,6 +5569,8 @@ _RETRYABLE_ERRORS = (
     httpx.TimeoutException,
     asyncio.TimeoutError,
     json.JSONDecodeError,
+    LLMError,
+    ValueError,
 )
 
 
@@ -5559,6 +5771,7 @@ def log_runtime_error(project_path: Path, stderr: str) -> None:
 # ── Пулы моделей по роли ─────────────────────────────────────────────────────
 MODEL_POOLS: dict[str, list[str]] = {
     "developer":        ["deepseek-coder:6.7b"],
+    "developer_patch":  ["deepseek-coder:6.7b"],
     "reviewer":         ["deepseek-coder:6.7b"],
     "e2e_architect":    ["qwen3:latest"],
     "e2e_qa":           ["qwen3:latest"],
@@ -5605,18 +5818,19 @@ from lang_utils import LANG_DISPLAY
 from log_utils import get_model
 from code_context import (
     get_global_context, get_full_context, build_dependency_order,
-    validate_imports, validate_cross_file_names,
+    validate_imports, validate_cross_file_names, get_a5_deps,
 )
 from state import push_feedback, get_feedback_ctx
 from artifacts import update_artifact_a9, save_artifact
 from contract import patch_contract_for_file
 from cache import ThreadSafeCache
 from checks import (
-    sanitize_llm_code, ensure_a5_imports,
+    sanitize_llm_code, ensure_a5_imports, apply_search_replace,
     check_function_preservation, check_class_duplication,
     check_import_shadowing, check_data_only_violations,
     check_stub_functions, check_contract_compliance,
 )
+from experience import record_experience, search_experience, format_experience_context
 
 
 async def _review_file(
@@ -6038,6 +6252,14 @@ def _build_dev_context(
                 + "\n\n"
             )
 
+    # Опыт прошлых проектов (если есть feedback — ищем релевантный опыт)
+    last_fb = state.get("feedbacks", {}).get(current_file, "")
+    if last_fb:
+        experiences = search_experience(last_fb, category="develop")
+        exp_ctx = format_experience_context(experiences)
+        if exp_ctx:
+            dev_ctx += exp_ctx
+
     # Существующий код
     if existing_code:
         max_code_chars = MAX_CONTEXT_CHARS // 2
@@ -6141,11 +6363,14 @@ async def phase_develop(
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         existing_code  = file_path.read_text(encoding="utf-8").strip() if file_path.exists() else ""
-        global_context = get_global_context(src_path, state["files"], exclude=current_file)
 
         # A5: контракт для текущего файла
         file_contract  = safe_contract(state).get("file_contracts", {}).get(current_file, [])
         global_imports = safe_contract(state).get("global_imports", {}).get(current_file, [])
+
+        # Контекст: сначала A5-зависимости, потом остальные (фильтрация по dependency graph)
+        dep_ordered = get_a5_deps(current_file, global_imports, state["files"])
+        global_context = get_global_context(src_path, dep_ordered)
 
         # Патч A5 после 3+ неудачных попыток — контракт может не соответствовать реальности
         # Лимит: не более 2 патч-ресетов на файл (чтобы не откладывать force-approve бесконечно)
@@ -6171,24 +6396,60 @@ async def phase_develop(
             state, current_file, existing_code, file_contract, global_imports, global_context, src_path,
         )
 
-        dev_model = get_model("developer", attempt, randomize=randomize)
-        logger.info(
-            f"💻 [{dev_model}] Разработчик пишет {current_file} (попытка {attempt + 1}/{MAX_FILE_ATTEMPTS}) ..."
-        )
+        # Patch mode: если есть existing_code + feedback + attempt >= 1, пробуем search/replace
+        last_feedback = state.get("feedbacks", {}).get(current_file, "")
+        use_patch = bool(existing_code and last_feedback and attempt >= 1)
+        code = ""
 
-        try:
-            dev_resp = await ask_agent(logger, "developer", dev_ctx, cache, attempt, randomize, language)
-            code     = sanitize_llm_code(dev_resp.get("code", ""))
-        except (LLMError, ValueError) as e:
-            logger.exception(f"Developer упал: {e}")
-            stats.record("developer", dev_model, False)
-            state["feedbacks"][current_file] = f"Агент не вернул код: {e}"
-            file_attempts[current_file] = attempt + 1
-            cumulative_attempts[current_file] = total_attempts + 1
-            continue
+        if use_patch:
+            patch_model = get_model("developer_patch", attempt, randomize=randomize)
+            logger.info(
+                f"🩹 [{patch_model}] Patch mode: {current_file} (попытка {attempt + 1}/{MAX_FILE_ATTEMPTS}) ..."
+            )
+            patch_ctx = (
+                f"Файл: `{current_file}`\n\n"
+                f"ТЕКУЩИЙ КОД:\n{existing_code}\n\n"
+            )
+            if file_contract:
+                patch_ctx += f"API КОНТРАКТ (A5):\n{json.dumps(file_contract, ensure_ascii=False, indent=2)}\n\n"
+            patch_ctx += f"ЗАМЕЧАНИЯ (исправь ТОЛЬКО эти проблемы):\n{last_feedback}\n"
+            try:
+                patch_resp = await ask_agent(logger, "developer_patch", patch_ctx, cache, attempt, randomize, language)
+                changes = patch_resp.get("changes", [])
+                if isinstance(changes, list) and changes:
+                    patched = apply_search_replace(existing_code, changes)
+                    if patched is not None:
+                        code = sanitize_llm_code(patched)
+                        stats.record("developer_patch", patch_model, True)
+                        logger.info(f"  ✅ Patch applied: {len(changes)} change(s)")
+                    else:
+                        stats.record("developer_patch", patch_model, False)
+                        logger.info(f"  ⚠️  Patch не применился (search не найден) → fallback на full regen")
+                else:
+                    stats.record("developer_patch", patch_model, False)
+                    logger.info(f"  ⚠️  Patch пустой → fallback на full regen")
+            except (LLMError, ValueError) as e:
+                stats.record("developer_patch", patch_model, False)
+                logger.info(f"  ⚠️  Patch agent упал: {e} → fallback на full regen")
 
         if not code:
-            stats.record("developer", dev_model, False)
+            dev_model = get_model("developer", attempt, randomize=randomize)
+            logger.info(
+                f"💻 [{dev_model}] Разработчик пишет {current_file} (попытка {attempt + 1}/{MAX_FILE_ATTEMPTS}) ..."
+            )
+            try:
+                dev_resp = await ask_agent(logger, "developer", dev_ctx, cache, attempt, randomize, language)
+                code     = sanitize_llm_code(dev_resp.get("code", ""))
+            except (LLMError, ValueError) as e:
+                logger.exception(f"Developer упал: {e}")
+                stats.record("developer", dev_model, False)
+                state["feedbacks"][current_file] = f"Агент не вернул код: {e}"
+                file_attempts[current_file] = attempt + 1
+                cumulative_attempts[current_file] = total_attempts + 1
+                continue
+
+        if not code:
+            stats.record("developer", get_model("developer", attempt, randomize=randomize), False)
             state["feedbacks"][current_file] = "Агент вернул пустой код."
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
@@ -6299,6 +6560,15 @@ async def phase_develop(
         if rev_status == "APPROVE":
             stats.record("developer", dev_model, True)
             logger.info(f"✅ {current_file} одобрен.")
+            # Записываем опыт: если файл был отклонён, а теперь одобрен → полезный паттерн
+            prev_feedback = state.get("feedbacks", {}).get(current_file, "")
+            if prev_feedback and attempt > 0:
+                record_experience(
+                    error_pattern=prev_feedback[:500],
+                    fix_description=f"Файл {current_file} исправлен на попытке {attempt + 1}",
+                    category="develop",
+                    file=current_file,
+                )
             approved = state.setdefault("approved_files", [])
             if current_file not in approved:
                 approved.append(current_file)
@@ -7460,6 +7730,34 @@ PROMPTS: dict[str, str] = {
 
 # ─────────────────────────────────────────────
 
+"developer_patch": f"""
+Ты — Senior {{lang}} Developer. Исправь КОНКРЕТНЫЕ проблемы в существующем коде.
+
+РЕЖИМ: ТОЧЕЧНОЕ ИСПРАВЛЕНИЕ (patch mode).
+НЕ переписывай весь файл — замени ТОЛЬКО сломанные фрагменты.
+
+ПРАВИЛА:
+1. Каждое изменение — пара search/replace: найди ТОЧНЫЙ фрагмент и замени его.
+2. search — ТОЧНАЯ копия строк из текущего кода (с отступами, пробелами).
+3. replace — исправленный фрагмент. Может быть длиннее/короче search.
+4. Для добавления нового кода (импорт, функция): search = строка ПЕРЕД вставкой, replace = та же строка + новый код.
+5. Порядок changes: сверху вниз по файлу.
+6. НЕ трогай код, который НЕ упомянут в фидбэке.
+7. implementation_hints в A5 — ОБЯЗАТЕЛЬНЫЙ алгоритм.
+8. Импортируй ТОЛЬКО из: файлов проекта, stdlib, файла зависимостей проекта.
+
+{NO_STUBS_RULE}
+{JSON_OUTPUT_RULE}
+
+{{
+  "changes": [
+    {{"search": "точный фрагмент из текущего кода", "replace": "исправленный фрагмент"}}
+  ]
+}}
+""",
+
+# ─────────────────────────────────────────────
+
 "self_reflect": f"""
 Ты — Senior {{lang}} Developer в режиме строгой самопроверки (temperature=0.0).
 Ты только что написал код. Проверь его максимально строго. если надо допиши.
@@ -8273,6 +8571,16 @@ def _fallback_phase(state: dict, reason: str) -> dict:
     return {"next_phase": "success",              "reason": reason}
 
 
+def _is_fallback_unambiguous(state: dict) -> bool:
+    """True если детерминистский fallback — единственный разумный выбор.
+
+    Пропускаем LLM-вызов supervisor когда нет накопленных провалов фаз
+    (LLM supervisor полезен только когда нужно выбрать между escalation/revise_spec).
+    """
+    phase_fails = state.get("phase_fail_counts", {})
+    return not any(v > 0 for v in phase_fails.values())
+
+
 async def ask_supervisor(
     logger: logging.Logger,
     state: dict,
@@ -8280,6 +8588,12 @@ async def ask_supervisor(
     randomize: bool,
     language: str,
 ) -> dict:
+    # Оптимизация: пропускаем LLM когда FSM даёт однозначный ответ
+    if _is_fallback_unambiguous(state):
+        result = _fallback_phase(state, "deterministic: no failures")
+        logger.info(f"[supervisor] Пропуск LLM → {result['next_phase']}")
+        return result
+
     approved = len(state.get("approved_files", []))
     total    = len(state.get("files", []))
     phase_fails = state.get("phase_fail_counts", {})
@@ -9799,6 +10113,189 @@ class TestSyncFilesWithA5:
         self.sync(state, {"a.py", "b.py"}, self.logger)
         assert len(state["files"]) == 2
 
+
+# =====================================================
+# apply_search_replace (checks.py)
+# =====================================================
+
+class TestApplySearchReplace:
+    def setup_method(self):
+        from checks import apply_search_replace
+        self.apply = apply_search_replace
+
+    def test_simple_replace(self):
+        code = "def foo():\n    return 1\n"
+        changes = [{"search": "return 1", "replace": "return 2"}]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "return 2" in result
+        assert "return 1" not in result
+
+    def test_multiple_changes(self):
+        code = "a = 1\nb = 2\nc = 3\n"
+        changes = [
+            {"search": "a = 1", "replace": "a = 10"},
+            {"search": "c = 3", "replace": "c = 30"},
+        ]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "a = 10" in result
+        assert "b = 2" in result
+        assert "c = 30" in result
+
+    def test_search_not_found_returns_none(self):
+        code = "x = 1\n"
+        changes = [{"search": "y = 2", "replace": "y = 3"}]
+        assert self.apply(code, changes) is None
+
+    def test_empty_changes_returns_none(self):
+        assert self.apply("code", []) is None
+
+    def test_multiline_search(self):
+        code = "def foo():\n    x = 1\n    return x\n"
+        changes = [{"search": "    x = 1\n    return x", "replace": "    x = 2\n    return x"}]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "x = 2" in result
+
+    def test_add_code_via_replace(self):
+        code = "import os\n\ndef main():\n    pass\n"
+        changes = [{"search": "import os", "replace": "import os\nimport sys"}]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "import sys" in result
+
+    def test_trailing_whitespace_tolerance(self):
+        code = "def foo():  \n    return 1  \n"
+        changes = [{"search": "def foo():\n    return 1", "replace": "def foo():\n    return 2"}]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "return 2" in result
+
+
+# =====================================================
+# get_a5_deps (code_context.py)
+# =====================================================
+
+class TestGetA5Deps:
+    def setup_method(self):
+        from code_context import get_a5_deps
+        self.get_deps = get_a5_deps
+
+    def test_deps_first_rest_after(self):
+        files = ["main.py", "models.py", "utils.py", "service.py"]
+        imports = ["from models import User", "from utils import helper"]
+        result = self.get_deps("service.py", imports, files)
+        # service.py excluded, deps (models, utils) first, then rest (main)
+        assert result[0] == "models.py"
+        assert result[1] == "utils.py"
+        assert result[2] == "main.py"
+        assert "service.py" not in result
+
+    def test_no_deps(self):
+        files = ["main.py", "models.py"]
+        imports = ["import os", "import sys"]
+        result = self.get_deps("main.py", imports, files)
+        assert result == ["models.py"]
+
+    def test_self_excluded(self):
+        files = ["a.py", "b.py"]
+        imports = ["from a import X"]
+        result = self.get_deps("a.py", imports, files)
+        assert "a.py" not in result
+        assert result == ["b.py"]
+
+    def test_empty_imports(self):
+        files = ["a.py", "b.py"]
+        result = self.get_deps("a.py", [], files)
+        assert result == ["b.py"]
+
+    def test_non_project_imports_ignored(self):
+        files = ["main.py", "utils.py"]
+        imports = ["from flask import Flask", "from utils import helper"]
+        result = self.get_deps("main.py", imports, files)
+        assert result[0] == "utils.py"  # dep first
+
+
+# =====================================================
+# Experience Memory (experience.py)
+# =====================================================
+
+class TestExperienceMemory:
+    def setup_method(self):
+        import experience
+        self._mod = experience
+        self._orig_path = experience._EXPERIENCE_PATH
+        # Use temp file to avoid polluting real experience store
+        import tempfile
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self._tmp.close()
+        experience._EXPERIENCE_PATH = Path(self._tmp.name)
+        # Start clean
+        Path(self._tmp.name).write_text("[]", encoding="utf-8")
+
+    def teardown_method(self):
+        self._mod._EXPERIENCE_PATH = self._orig_path
+        Path(self._tmp.name).unlink(missing_ok=True)
+
+    def test_record_and_search(self):
+        self._mod.record_experience(
+            "ImportError: cannot import name 'Foo' from 'bar'",
+            "Added Foo class to bar.py",
+            category="develop",
+            file="bar.py",
+        )
+        results = self._mod.search_experience("ImportError cannot import Foo bar")
+        assert len(results) == 1
+        assert "Foo" in results[0]["fix"]
+
+    def test_deduplication(self):
+        self._mod.record_experience("SyntaxError: invalid syntax", "Fixed missing colon")
+        self._mod.record_experience("SyntaxError: invalid syntax", "Fixed missing bracket")
+        data = self._mod._load()
+        assert len(data) == 1
+        assert "bracket" in data[0]["fix"]  # Updated to latest fix
+
+    def test_empty_query_returns_nothing(self):
+        self._mod.record_experience("some error", "some fix")
+        assert self._mod.search_experience("") == []
+        assert self._mod.search_experience("   ") == []
+
+    def test_empty_error_not_recorded(self):
+        self._mod.record_experience("", "some fix")
+        self._mod.record_experience("  ", "some fix")
+        assert self._mod._load() == []
+
+    def test_category_filter(self):
+        self._mod.record_experience("error A", "fix A", category="develop")
+        self._mod.record_experience("error B", "fix B", category="test")
+        results = self._mod.search_experience("error", category="develop")
+        assert len(results) == 1
+        assert results[0]["category"] == "develop"
+
+    def test_format_experience_context_empty(self):
+        assert self._mod.format_experience_context([]) == ""
+
+    def test_format_experience_context(self):
+        exps = [{"error": "ImportError X", "fix": "add import X"}]
+        ctx = self._mod.format_experience_context(exps)
+        assert "ImportError X" in ctx
+        assert "add import X" in ctx
+        assert ctx.startswith("ОПЫТ ПРОШЛЫХ ПРОЕКТОВ")
+
+    def test_max_query_results(self):
+        for i in range(10):
+            self._mod.record_experience(f"error keyword_{i}", f"fix_{i}")
+        results = self._mod.search_experience("error keyword")
+        assert len(results) <= 5  # _MAX_QUERY_RESULTS = 5
+
+    def test_scoring_error_field_weighted_higher(self):
+        self._mod.record_experience("ImportError numpy missing", "installed numpy")
+        self._mod.record_experience("fixed something", "ImportError numpy workaround")
+        results = self._mod.search_experience("ImportError numpy")
+        # First result should be the one with keywords in error field (score 2 per kw vs 1)
+        assert "numpy missing" in results[0]["error"]
+
 ```
 ### 📄 `tests/test_modules.py`
 
@@ -10362,8 +10859,8 @@ async def test_ask_agent_fallback_plain_text():
 # ─────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_ask_supervisor_returns_phase():
-    """ask_supervisor должен вернуть dict с next_phase."""
+async def test_ask_supervisor_deterministic_skip():
+    """Без провалов фаз supervisor пропускает LLM и использует FSM."""
     from supervisor import ask_supervisor
     from cache import ThreadSafeCache
     import logging
@@ -10376,6 +10873,31 @@ async def test_ask_supervisor_returns_phase():
         "tests_passed": False, "document_generated": False,
         "feedbacks": {}, "last_phase": "initial",
         "phase_fail_counts": {}, "phase_total_fails": {},
+    }
+
+    mock_agent = AsyncMock(return_value={"next_phase": "develop", "reason": "ok"})
+    with patch("supervisor.ask_agent", new=mock_agent):
+        result = await ask_supervisor(logger, state, cache, False, "python")
+
+    assert result["next_phase"] == "develop"
+    mock_agent.assert_not_called()  # LLM не вызывается — детерминистский путь
+
+
+@pytest.mark.asyncio
+async def test_ask_supervisor_returns_phase():
+    """При наличии провалов supervisor вызывает LLM."""
+    from supervisor import ask_supervisor
+    from cache import ThreadSafeCache
+    import logging
+
+    logger = logging.getLogger("test")
+    cache = ThreadSafeCache({})
+    state = {
+        "iteration": 1, "approved_files": [], "files": ["main.py"],
+        "e2e_passed": False, "integration_passed": False,
+        "tests_passed": False, "document_generated": False,
+        "feedbacks": {}, "last_phase": "initial",
+        "phase_fail_counts": {"develop": 2}, "phase_total_fails": {},
     }
 
     with patch("supervisor.ask_agent", new=AsyncMock(return_value={"next_phase": "develop", "reason": "ok"})):
@@ -10399,7 +10921,7 @@ async def test_ask_supervisor_fallback_on_llm_error():
         "e2e_passed": False, "integration_passed": False,
         "tests_passed": False, "document_generated": False,
         "feedbacks": {}, "last_phase": "initial",
-        "phase_fail_counts": {}, "phase_total_fails": {},
+        "phase_fail_counts": {"develop": 1}, "phase_total_fails": {},
     }
 
     with patch("supervisor.ask_agent", new=AsyncMock(side_effect=LLMError("fail"))):

@@ -134,8 +134,17 @@ def get_a5_deps(current_file: str, global_imports: list, files: list[str]) -> li
     return deps + rest
 
 
-def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
-    """Возвращает файлы в порядке топологической сортировки по импортам."""
+def build_dependency_order(
+    files: list[str],
+    src_path: Path,
+    file_attempts: dict[str, int] | None = None,
+) -> list[str]:
+    """Возвращает файлы в порядке топологической сортировки по импортам.
+
+    При равном indegree (несколько файлов готовы одновременно) приоритет:
+    1. Больше зависимых файлов (dependents) → раньше (разблокирует больше работы)
+    2. Меньше прошлых реджектов → раньше (выше шанс на approve)
+    """
     graph: dict[str, list[str]]  = defaultdict(list)
     indegree: dict[str, int]     = {f: 0 for f in files}
     file_set = set(files)
@@ -161,15 +170,25 @@ def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
                 graph[dep].append(f)
                 indegree[f] += 1
 
-    q: deque[str] = deque(f for f in files if indegree[f] == 0)
+    # Подсчёт зависимых (сколько файлов разблокируется после генерации данного)
+    dependents_count = {f: len(graph.get(f, [])) for f in files}
+    attempts = file_attempts or {}
+
+    # Priority key: (-dependents, +attempts, name) — больше зависимых и меньше реджектов = раньше
+    import heapq
+    heap: list[tuple[int, int, str]] = []
+    for f in files:
+        if indegree[f] == 0:
+            heapq.heappush(heap, (-dependents_count[f], attempts.get(f, 0), f))
+
     order: list[str] = []
-    while q:
-        curr = q.popleft()
+    while heap:
+        _, _, curr = heapq.heappop(heap)
         order.append(curr)
         for dep in graph[curr]:
             indegree[dep] -= 1
             if indegree[dep] == 0:
-                q.append(dep)
+                heapq.heappush(heap, (-dependents_count[dep], attempts.get(dep, 0), dep))
 
     if len(order) < len(files):
         order.extend(f for f in files if f not in order)

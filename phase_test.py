@@ -25,7 +25,7 @@ from code_context import (
 from state import update_dependencies, update_dockerfile, update_requirements
 from infra import run_in_docker, build_docker_image
 from cache import ThreadSafeCache
-from checks import sanitize_llm_code, classify_test_error
+from checks import sanitize_llm_code, classify_test_error, diagnose_runtime_error
 
 # Детекция замаскированных ошибок (rc=0 но traceback в stdout)
 _EXCEPTION_LINE_RE = re.compile(
@@ -421,24 +421,34 @@ async def phase_integration_test(
                 logger.exception(f"DevOps (runtime) упал: {e}")
                 stats.record("devops_runtime", get_model("devops_runtime"), False)
 
-        qa_model = get_model("qa_runtime", run_attempt - 1, randomize)
-        fix         = "Смотри traceback."
-        missing_pkg = ""
-        try:
-            qa_resp     = await ask_agent(
-                logger, "qa_runtime",
-                f"Traceback:\n{stderr}\n\nФайл с ошибкой: {failing_file}",
-                cache, run_attempt - 1, randomize, language,
-            )
-            fix         = qa_resp.get("fix", "Смотри traceback.")
-            missing_pkg = qa_resp.get("missing_package", "").strip()
-            agent_file  = qa_resp.get("file", "").strip()
-            if agent_file and agent_file in state["files"]:
-                failing_file = agent_file
-            stats.record("qa_runtime", qa_model, True)
-        except (LLMError, ValueError) as e:
-            logger.exception(f"QA Runtime упал: {e}")
-            stats.record("qa_runtime", qa_model, False)
+        # Детерминистская диагностика — попытка решить без LLM
+        diag = diagnose_runtime_error(stderr, stdout, state["files"], src_path)
+        if diag:
+            fix = diag["fix"]
+            missing_pkg = diag.get("missing_package", "")
+            if diag["file"] and diag["file"] in state["files"]:
+                failing_file = diag["file"]
+            logger.info(f"🔧 Авто-диагностика (без LLM): {fix[:150]}")
+        else:
+            # LLM-анализ только если детерминистика не справилась
+            qa_model = get_model("qa_runtime", run_attempt - 1, randomize)
+            fix         = "Смотри traceback."
+            missing_pkg = ""
+            try:
+                qa_resp     = await ask_agent(
+                    logger, "qa_runtime",
+                    f"Traceback:\n{stderr}\n\nФайл с ошибкой: {failing_file}",
+                    cache, run_attempt - 1, randomize, language,
+                )
+                fix         = qa_resp.get("fix", "Смотри traceback.")
+                missing_pkg = qa_resp.get("missing_package", "").strip()
+                agent_file  = qa_resp.get("file", "").strip()
+                if agent_file and agent_file in state["files"]:
+                    failing_file = agent_file
+                stats.record("qa_runtime", qa_model, True)
+            except (LLMError, ValueError) as e:
+                logger.exception(f"QA Runtime упал: {e}")
+                stats.record("qa_runtime", qa_model, False)
 
         if missing_pkg:
             if language == "python":

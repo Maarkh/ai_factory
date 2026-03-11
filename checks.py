@@ -640,3 +640,136 @@ def classify_test_error(
     if test_bug_score >= app_bug_score:
         return "test_bug", ""
     return "app_bug", failing_app_file
+
+
+def diagnose_runtime_error(
+    stderr: str, stdout: str, project_files: list[str], src_path: Path,
+) -> dict | None:
+    """Детерминистская диагностика runtime-ошибок БЕЗ вызова LLM.
+
+    Парсит traceback, определяет тип ошибки и генерирует конкретный фидбэк.
+    Возвращает {"file": str, "fix": str, "missing_package": str} или None
+    если ошибка не распознана (нужен LLM).
+    """
+    combined = stderr + "\n" + stdout
+
+    # Извлекаем последнюю строку exception
+    exc_match = re.search(
+        r"^(\w+(?:\.\w+)*(?:Error|Exception|Warning)):\s*(.+)$",
+        combined, re.MULTILINE,
+    )
+    if not exc_match:
+        return None
+
+    exc_type = exc_match.group(1)
+    exc_msg = exc_match.group(2).strip()
+
+    # Файл из traceback (последний файл проекта)
+    from code_context import find_failing_file
+    failing_file = find_failing_file(stderr, stdout, project_files)
+
+    result: dict = {"file": failing_file, "fix": "", "missing_package": ""}
+
+    # ── ModuleNotFoundError / ImportError (отсутствующий пакет) ──
+    if exc_type in ("ModuleNotFoundError", "ImportError"):
+        mod_match = re.search(r"No module named ['\"]?(\w+)", exc_msg)
+        if mod_match:
+            missing_mod = mod_match.group(1)
+            # Маппинг import-имя → pip-пакет
+            from code_context import PIP_TO_IMPORT
+            import_to_pip = {v: k for k, v in PIP_TO_IMPORT.items()}
+            pip_pkg = import_to_pip.get(missing_mod, missing_mod)
+            result["missing_package"] = pip_pkg
+            result["fix"] = (
+                f"Отсутствует модуль '{missing_mod}'. "
+                f"Добавь '{pip_pkg}' в requirements.txt."
+            )
+            return result
+
+        # ImportError: cannot import name 'X' from 'Y'
+        name_match = re.search(
+            r"cannot import name ['\"](\w+)['\"] from ['\"](\w+)['\"]", exc_msg
+        )
+        if name_match:
+            import_name = name_match.group(1)
+            module_name = name_match.group(2)
+            target_file = module_name + ".py"
+            if target_file in project_files:
+                # Проверяем что реально определено в целевом файле
+                target_path = src_path / target_file
+                available = ""
+                if target_path.exists():
+                    try:
+                        from code_context import get_top_level_names
+                        names = get_top_level_names(
+                            target_path.read_text(encoding="utf-8")
+                        )
+                        available = ", ".join(sorted(names - {"__all__"})[:10])
+                    except (OSError, UnicodeDecodeError):
+                        pass
+                result["file"] = failing_file
+                result["fix"] = (
+                    f"ImportError: '{import_name}' не определён в {target_file}. "
+                    f"Доступные имена: {available or '(не удалось прочитать)'}. "
+                    f"Исправь import или добавь '{import_name}' в {target_file}."
+                )
+                return result
+
+    # ── NameError: name 'X' is not defined ──
+    if exc_type == "NameError":
+        name_match = re.search(r"name ['\"](\w+)['\"] is not defined", exc_msg)
+        if name_match:
+            undefined_name = name_match.group(1)
+            result["fix"] = (
+                f"NameError: '{undefined_name}' не определён. "
+                f"Добавь import или определи '{undefined_name}' перед использованием."
+            )
+            return result
+
+    # ── AttributeError: module/object has no attribute 'X' ──
+    if exc_type == "AttributeError":
+        attr_match = re.search(
+            r"(?:module |type object )?['\"]?(\w+)['\"]? has no attribute ['\"](\w+)['\"]",
+            exc_msg,
+        )
+        if attr_match:
+            obj_name = attr_match.group(1)
+            attr_name = attr_match.group(2)
+            # Если obj — файл проекта
+            target_file = obj_name + ".py"
+            if target_file in project_files:
+                result["fix"] = (
+                    f"AttributeError: модуль '{obj_name}' не имеет атрибута '{attr_name}'. "
+                    f"Добавь '{attr_name}' в {target_file} или исправь имя."
+                )
+            else:
+                result["fix"] = (
+                    f"AttributeError: '{obj_name}' не имеет атрибута '{attr_name}'. "
+                    f"Проверь имя метода/атрибута и совместимость API."
+                )
+            return result
+
+    # ── TypeError: missing required argument / got unexpected keyword ──
+    if exc_type == "TypeError":
+        if "missing" in exc_msg and "argument" in exc_msg:
+            result["fix"] = (
+                f"TypeError: {exc_msg}. "
+                f"Проверь сигнатуру вызываемой функции и передай все обязательные аргументы."
+            )
+            return result
+        if "unexpected keyword argument" in exc_msg:
+            result["fix"] = (
+                f"TypeError: {exc_msg}. "
+                f"Убери лишний именованный аргумент или обнови сигнатуру функции."
+            )
+            return result
+
+    # ── SyntaxError ──
+    if exc_type == "SyntaxError":
+        result["fix"] = (
+            f"SyntaxError: {exc_msg}. "
+            f"Проверь синтаксис Python в {failing_file} — скобки, двоеточия, отступы."
+        )
+        return result
+
+    return None

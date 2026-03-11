@@ -495,8 +495,8 @@ async def phase_develop(
     """Возвращает (exhausted_files, spec_blocked_files)."""
     language  = state.get("language", "python")
     src_path  = project_path / SRC_DIR
-    order     = build_dependency_order(state["files"], src_path)
     file_attempts: dict[str, int] = state.setdefault("file_attempts", {})
+    order     = build_dependency_order(state["files"], src_path, file_attempts)
     exhausted_files: list[str] = []
     spec_blocked_files: list[str] = []
     # Суммарные попытки (не сбрасываются при revise_spec) — для предохранителя
