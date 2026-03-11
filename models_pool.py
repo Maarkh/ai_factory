@@ -31,12 +31,22 @@ _BASE_POOLS: dict[str, list[str]] = {
     "a5_contract_reviewer":  ["deepseek-coder:6.7b"],
 }
 
-# Применяем переопределения из .env
+# Применяем переопределения моделей из .env
 MODEL_POOLS: dict[str, list[str]] = {}
-for agent, default_pool in _BASE_POOLS.items():
-    env_key = f"FACTORY_MODEL_{agent.upper()}"
-    env_val = os.getenv(env_key, "").strip()
-    if env_val:
-        MODEL_POOLS[agent] = [env_val]
+for _agent, _default_pool in _BASE_POOLS.items():
+    _env_key = f"FACTORY_MODEL_{_agent.upper()}"
+    _env_val = os.getenv(_env_key, "").strip()
+    if _env_val:
+        MODEL_POOLS[_agent] = [_env_val]
     else:
-        MODEL_POOLS[agent] = default_pool
+        MODEL_POOLS[_agent] = _default_pool
+
+# ── Маппинг агент → бэкенд ───────────────────────────────────────────────────
+# FACTORY_BACKEND_<AGENT>=<backend_name>  (default: "local")
+# Пример: FACTORY_BACKEND_DEVELOPER=remote
+AGENT_BACKENDS: dict[str, str] = {}
+for _agent in _BASE_POOLS:
+    _env_key = f"FACTORY_BACKEND_{_agent.upper()}"
+    _env_val = os.getenv(_env_key, "").strip()
+    if _env_val:
+        AGENT_BACKENDS[_agent] = _env_val.lower()

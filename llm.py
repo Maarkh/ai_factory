@@ -6,12 +6,13 @@ from typing import Protocol, runtime_checkable
 
 import httpx
 
-from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_NUM_CTX, MAX_LLM_RETRIES
+from config import CACHEABLE_AGENTS, LLM_BACKENDS, LLM_MAX_TOKENS, MAX_LLM_RETRIES
 from cache import ThreadSafeCache, cache_key
 from exceptions import LLMError
 from log_utils import get_model, log_model_choice, log_interaction
 from json_utils import extract_json_from_text
 from lang_utils import get_system_prompt
+from models_pool import AGENT_BACKENDS
 
 # Regex для garbage tokens deepseek-coder (begin_of_sentence и т.п.)
 _GARBAGE_TOKEN_RE = re.compile(r"<[｜|][\w▁]+[｜|]>")
@@ -27,7 +28,7 @@ def _strip_garbage_tokens(text: str) -> str:
 
 # ── LLM Backend Protocol ─────────────────────────────────────────────────────
 # Для смены провайдера (Ollama → OpenAI, Anthropic, litellm) достаточно
-# реализовать этот протокол и присвоить экземпляр в _backend.
+# реализовать этот протокол и присвоить экземпляр в _backends.
 
 @runtime_checkable
 class LLMBackend(Protocol):
@@ -46,11 +47,17 @@ class LLMBackend(Protocol):
 class OllamaBackend:
     """Ollama native /api/chat streaming backend."""
 
-    def __init__(self, base_url: str, num_ctx: int, overall_timeout: float) -> None:
+    def __init__(
+        self, base_url: str, num_ctx: int, overall_timeout: float,
+        api_key: str = "",
+    ) -> None:
         ollama_base = base_url.rstrip("/").removesuffix("/v1").removesuffix("/v1/")
         self._chat_url = f"{ollama_base}/api/chat"
         self._num_ctx = num_ctx
         self._overall_timeout = overall_timeout
+        self._headers: dict[str, str] = {}
+        if api_key and api_key != "ollama":
+            self._headers["Authorization"] = f"Bearer {api_key}"
         # read=120с — только между чанками (stream=True)
         self._http_timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
 
@@ -62,7 +69,9 @@ class OllamaBackend:
         max_tokens: int,
         json_mode: bool = False,
     ) -> tuple[str, str]:
-        async with httpx.AsyncClient(timeout=self._http_timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=self._http_timeout, headers=self._headers,
+        ) as client:
             return await asyncio.wait_for(
                 self._stream(client, model, messages, temperature, max_tokens, json_mode),
                 timeout=self._overall_timeout,
@@ -119,9 +128,32 @@ class OllamaBackend:
         return content, done_reason
 
 
-# Бэкенд по умолчанию — Ollama. Для смены:
-#   import llm; llm._backend = MyCloudBackend(...)
-_backend: LLMBackend = OllamaBackend(LLM_BASE_URL, LLM_NUM_CTX, LLM_TIMEOUT)
+# ── Multi-backend registry ───────────────────────────────────────────────────
+# Создаём backend-инстансы из LLM_BACKENDS (config.py)
+# "local" — всегда есть, остальные — через FACTORY_BACKEND_<NAME>_URL в .env
+
+_backends: dict[str, OllamaBackend] = {}
+for _name, _cfg in LLM_BACKENDS.items():
+    _backends[_name] = OllamaBackend(
+        base_url=_cfg["url"],
+        num_ctx=_cfg["num_ctx"],
+        overall_timeout=_cfg["timeout"],
+        api_key=_cfg.get("key", ""),
+    )
+
+_logger = logging.getLogger(__name__)
+if len(_backends) > 1:
+    _logger.info(f"LLM backends: {', '.join(_backends.keys())}")
+    for _a, _b in AGENT_BACKENDS.items():
+        _logger.info(f"  {_a} → {_b}")
+
+
+def _get_backend(agent: str) -> tuple[OllamaBackend, int]:
+    """Возвращает (backend, max_tokens) для агента."""
+    backend_name = AGENT_BACKENDS.get(agent, "local")
+    backend = _backends.get(backend_name, _backends["local"])
+    cfg = LLM_BACKENDS.get(backend_name, LLM_BACKENDS["local"])
+    return backend, cfg["max_tokens"]
 
 
 AGENT_TEMPERATURES: dict[str, float] = {
@@ -181,6 +213,7 @@ async def ask_agent(
 
     sys_prompt  = get_system_prompt(agent, language)
     temperature = AGENT_TEMPERATURES.get(agent, 0.2)
+    backend, max_tokens = _get_backend(agent)
 
     messages = [
         {"role": "system", "content": sys_prompt},
@@ -195,13 +228,13 @@ async def ask_agent(
             await asyncio.sleep(delay)
         raw: str | None = None
         try:
-            raw, done_reason = await _backend.chat(
-                model, messages, temperature, LLM_MAX_TOKENS, json_mode=True,
+            raw, done_reason = await backend.chat(
+                model, messages, temperature, max_tokens, json_mode=True,
             )
             if not raw:
                 raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json)")
             if done_reason == "length":
-                logger.warning(f"[{agent}:{model}] ответ обрезан (done_reason=length, num_predict={LLM_MAX_TOKENS})")
+                logger.warning(f"[{agent}:{model}] ответ обрезан (done_reason=length, num_predict={max_tokens})")
             result = json.loads(raw)
             if not isinstance(result, dict) or not result:
                 raise json.JSONDecodeError(
@@ -218,8 +251,8 @@ async def ask_agent(
                 continue  # retry без fallback на plain text
             logger.warning(f"[{agent}:{model}] json_object failed: {e}, пробую plain text...")
             try:
-                raw, done_reason = await _backend.chat(
-                    model, messages, temperature, LLM_MAX_TOKENS, json_mode=False,
+                raw, done_reason = await backend.chat(
+                    model, messages, temperature, max_tokens, json_mode=False,
                 )
                 if not raw:
                     raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")

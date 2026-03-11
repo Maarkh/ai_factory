@@ -18,6 +18,39 @@ LLM_NUM_CTX    = int(os.getenv("LLM_NUM_CTX", "16384"))
 LOG_LEVEL    = os.getenv("LOG_LEVEL", "INFO")
 
 # ─────────────────────────────────────────────
+# LLM бэкенды (local + доп. через .env)
+# ─────────────────────────────────────────────
+# FACTORY_BACKEND_<NAME>_URL  — URL бэкенда
+# FACTORY_BACKEND_<NAME>_KEY  — API-ключ (default: "ollama")
+# FACTORY_BACKEND_<NAME>_TIMEOUT / _MAX_TOKENS / _NUM_CTX — переопределения
+
+def _parse_llm_backends() -> dict[str, dict]:
+    """Auto-discover LLM backends: 'local' всегда + FACTORY_BACKEND_<NAME>_URL из env."""
+    backends = {
+        "local": {
+            "url": LLM_BASE_URL,
+            "key": LLM_API_KEY,
+            "timeout": LLM_TIMEOUT,
+            "max_tokens": LLM_MAX_TOKENS,
+            "num_ctx": LLM_NUM_CTX,
+        }
+    }
+    for env_key in os.environ:
+        if env_key.startswith("FACTORY_BACKEND_") and env_key.endswith("_URL"):
+            name = env_key[len("FACTORY_BACKEND_"):-len("_URL")].lower()
+            upper = name.upper()
+            backends[name] = {
+                "url": os.environ[env_key],
+                "key": os.getenv(f"FACTORY_BACKEND_{upper}_KEY", "ollama"),
+                "timeout": float(os.getenv(f"FACTORY_BACKEND_{upper}_TIMEOUT", str(LLM_TIMEOUT))),
+                "max_tokens": int(os.getenv(f"FACTORY_BACKEND_{upper}_MAX_TOKENS", str(LLM_MAX_TOKENS))),
+                "num_ctx": int(os.getenv(f"FACTORY_BACKEND_{upper}_NUM_CTX", str(LLM_NUM_CTX))),
+            }
+    return backends
+
+LLM_BACKENDS = _parse_llm_backends()
+
+# ─────────────────────────────────────────────
 # Параметры пайплайна (не секреты — хардкод OK)
 # ─────────────────────────────────────────────
 

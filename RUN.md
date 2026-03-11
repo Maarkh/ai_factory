@@ -81,20 +81,44 @@ python ai_factory.py
 | `FACTORY_DEFAULT_MODEL` | `deepseek-coder:6.7b` | Модель по умолчанию |
 | `FACTORY_MODEL_<AGENT>` | — | Переопределение модели для агента |
 
-### Переопределение моделей по агентам
+### Мульти-бэкенд: локальные + удалённые модели
 
-Каждый из 24 агентов можно настроить отдельно через `.env`:
+Система поддерживает несколько LLM-серверов одновременно. Бэкенд `local` (основной URL)
+создаётся автоматически. Дополнительные бэкенды задаются через `.env`:
 
 ```bash
-# Пример: использовать 32B модель для developer
-FACTORY_MODEL_DEVELOPER=qwen2.5-coder:32b
-FACTORY_MODEL_DEVELOPER_PATCH=qwen2.5-coder:32b
-
-# Использовать другую модель для ревьюера
-FACTORY_MODEL_REVIEWER=deepseek-coder-v2:16b
+# Определяем удалённый бэкенд
+FACTORY_BACKEND_REMOTE_URL=http://work-server:11434/v1/
+FACTORY_BACKEND_REMOTE_KEY=your-api-key
+FACTORY_BACKEND_REMOTE_TIMEOUT=600.0
+FACTORY_BACKEND_REMOTE_MAX_TOKENS=32768
+FACTORY_BACKEND_REMOTE_NUM_CTX=32768
 ```
 
-Список агентов: `developer`, `developer_patch`, `reviewer`, `e2e_architect`, `e2e_qa`,
+Затем назначаем агентов на бэкенды:
+
+```bash
+# Тяжёлые агенты → удалённый сервер с 32B моделью
+FACTORY_MODEL_DEVELOPER=qwen3:32b
+FACTORY_BACKEND_DEVELOPER=remote
+
+FACTORY_MODEL_SELF_REFLECT=qwen3:32b
+FACTORY_BACKEND_SELF_REFLECT=remote
+
+FACTORY_MODEL_CONTRACT_ANALYST=qwen3:32b
+FACTORY_BACKEND_CONTRACT_ANALYST=remote
+
+# Лёгкие агенты → локально (без FACTORY_BACKEND_ = local по умолчанию)
+FACTORY_MODEL_REVIEWER=deepseek-coder:6.7b
+FACTORY_MODEL_SUPERVISOR=qwen3:latest
+```
+
+Каждый бэкенд имеет собственные `timeout`, `max_tokens`, `num_ctx` и `api_key`.
+Если `api_key` отличается от `"ollama"`, он передаётся как `Authorization: Bearer <key>`.
+
+### Список агентов
+
+`developer`, `developer_patch`, `reviewer`, `e2e_architect`, `e2e_qa`,
 `qa_runtime`, `business_analyst`, `system_analyst`, `architect`, `spec_reviewer`,
 `test_generator`, `documenter`, `devops_runtime`, `arch_validator`, `supervisor`,
 `self_reflect`, `contract_analyst`, `a5_validator`, `a5_business_reviewer`,

@@ -468,7 +468,9 @@ async def test_ask_agent_returns_dict():
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    with patch("llm._backend.chat", new=AsyncMock(return_value=('{"result": "ok"}', "stop"))):
+    mock_be = MagicMock()
+    mock_be.chat = AsyncMock(return_value=('{"result": "ok"}', "stop"))
+    with patch("llm._get_backend", return_value=(mock_be, 16384)):
         result = await ask_agent(
             logger, "developer", "test prompt", cache,
             attempt=0, language="python",
@@ -492,14 +494,15 @@ async def test_ask_agent_cache_hit():
     key = cache_key("business_analyst", model, "cached text", "python")
     cache[key] = {"cached": True}
 
-    mock_chat = AsyncMock()
-    with patch("llm._backend.chat", new=mock_chat):
+    mock_be = MagicMock()
+    mock_be.chat = AsyncMock()
+    with patch("llm._get_backend", return_value=(mock_be, 16384)):
         result = await ask_agent(
             logger, "business_analyst", "cached text", cache,
             attempt=0, language="python",
         )
     assert result == {"cached": True}
-    mock_chat.assert_not_called()
+    mock_be.chat.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -514,9 +517,9 @@ async def test_ask_agent_raises_llm_error_on_all_retries():
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    with patch("llm._backend.chat", new=AsyncMock(
-        side_effect=httpx.ReadTimeout("timeout")
-    )):
+    mock_be = MagicMock()
+    mock_be.chat = AsyncMock(side_effect=httpx.ReadTimeout("timeout"))
+    with patch("llm._get_backend", return_value=(mock_be, 16384)):
         with pytest.raises(LLMError):
             await ask_agent(
                 logger, "developer", "fail prompt", cache,
@@ -543,7 +546,9 @@ async def test_ask_agent_fallback_plain_text():
             return ("not valid json", "stop")
         return ('some text {"fallback": true} more text', "stop")
 
-    with patch("llm._backend.chat", new=mock_backend_chat):
+    mock_be = MagicMock()
+    mock_be.chat = mock_backend_chat
+    with patch("llm._get_backend", return_value=(mock_be, 16384)):
         result = await ask_agent(
             logger, "developer", "test", cache,
             attempt=0, max_retries=1,
