@@ -718,10 +718,10 @@ async def main() -> None:
         )
         try:
             handler = _PHASE_HANDLERS.get(next_phase, _handle_unknown)
-            signal = await handler(pc)
-            if signal == "skip":
+            result = await handler(pc)
+            if result == "skip":
                 continue
-            if signal == "exit":
+            if result == "exit":
                 return
         except Exception as _phase_exc:
             logger.exception(f"💥 Необработанная ошибка в фазе '{next_phase}': {_phase_exc}")
