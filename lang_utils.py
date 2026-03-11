@@ -6,6 +6,17 @@ from prompts import PROMPTS
 LANG_DISPLAY = {"python": "Python", "typescript": "TypeScript", "rust": "Rust"}
 LANG_EXT     = {"python": "py",     "typescript": "ts",         "rust": "rs"}
 
+# Per-language feature matrix. AST-based checks (imports, stubs, cross-file
+# validation, contract compliance) implemented ONLY for Python.
+# TS/Rust supported for: project scaffolding, Docker, execution commands.
+# Checks that can't run for a given language are skipped (return []).
+LANG_FEATURES: dict[str, set[str]] = {
+    "python":     {"scaffold", "docker", "execution", "ast_checks", "import_validation",
+                   "stub_detection", "cross_file", "contract_compliance", "unit_tests"},
+    "typescript": {"scaffold", "docker", "execution"},
+    "rust":       {"scaffold", "docker", "execution"},
+}
+
 DOCKER_IMAGES = {
     "python":     "python:3.12-slim",
     "typescript": "node:20-slim",

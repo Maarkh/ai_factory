@@ -21,6 +21,7 @@
 ## 📁 Структура проекта
 
 ├── ai_factory/
+│   ├────── README.md
 │   ├────── ai_factory.py
 │   ├────── artifacts.py
 │   ├────── cache.py
@@ -55,6 +56,7 @@
 │   │   ├────── test_modules.py
 │   │   ├── __pycache__/
 │   ├── .pytest_cache/
+│   ├── documents/
 │   ├── .git/
 │   │   ├── info/
 │   │   ├── refs/
@@ -125,6 +127,7 @@
 │   │   │   ├── cf/
 │   │   │   ├── 92/
 │   │   │   ├── c6/
+│   │   │   ├── b6/
 │   │   │   ├── 00/
 │   │   │   ├── e6/
 │   │   │   ├── 70/
@@ -151,6 +154,7 @@
 │   │   │   ├── ba/
 │   │   │   ├── f0/
 │   │   │   ├── 30/
+│   │   │   ├── 35/
 │   │   │   ├── 83/
 │   │   │   ├── d8/
 │   │   │   ├── 04/
@@ -164,6 +168,7 @@
 │   │   │   ├── ef/
 │   │   │   ├── 34/
 │   │   │   ├── 53/
+│   │   │   ├── 23/
 │   │   │   ├── 07/
 │   │   │   ├── 01/
 │   │   │   ├── ea/
@@ -223,8 +228,10 @@
 │   │   │   ├── 2e/
 │   │   │   ├── bc/
 │   │   │   ├── 2d/
+│   │   │   ├── 5a/
 │   │   │   ├── 52/
 │   │   │   ├── d1/
+│   │   │   ├── dd/
 │   │   │   ├── f7/
 │   │   │   ├── fa/
 │   │   │   ├── 67/
@@ -247,6 +254,7 @@
 │   │   │   ├── 65/
 │   │   │   ├── a2/
 │   │   │   ├── f1/
+│   │   │   ├── 26/
 │   │   │   ├── 88/
 │   │   │   ├── c0/
 │   │   │   ├── f4/
@@ -1142,11 +1150,13 @@ def ensure_a5_imports(code: str, global_imports: list[str]) -> str:
                         # Объединяем в один import
                         all_names = sorted(ex_names | names)
                         new_line = f"from {source} import {', '.join(all_names)}"
-                        # Заменяем в коде (ищем оригинальную строку с любым whitespace)
-                        code = re.sub(
-                            rf"^\s*from\s+{re.escape(source)}\s+import\s+.+$",
-                            new_line, code, count=1, flags=re.MULTILINE,
-                        )
+                        # Ищем конкретную строку в коде, которая нормализуется в ex
+                        lines = code.split("\n")
+                        for li, line in enumerate(lines):
+                            if re.sub(r"\s+", " ", line.strip()) == ex:
+                                lines[li] = new_line
+                                break
+                        code = "\n".join(lines)
                         existing_imports.discard(ex)
                         existing_imports.add(re.sub(r"\s+", " ", new_line))
                     break
@@ -1894,9 +1904,14 @@ PIP_TO_IMPORT: dict[str, str] = {
     "grpcio":                   "grpc",
     "grpcio-tools":             "grpc_tools",
     "Twisted":                  "twisted",
+    "twisted":                  "twisted",
     "Pygments":                 "pygments",
+    "pygments":                 "pygments",
     "Faker":                    "faker",
+    "faker":                    "faker",
     "Cython":                   "cython",
+    "cython":                   "cython",
+    "PyJWT":                    "jwt",
 }
 
 # Невалидные pip-пакеты, которые LLM часто галлюцинирует.
@@ -2184,7 +2199,6 @@ def _check_circular_imports(
 def _check_undefined_refs(
     code: str,
     filename: str,
-    from_imports: list[str],
     direct_imports: list[str],
     stdlib: set[str],
     pip_packages: set[str],
@@ -2342,7 +2356,7 @@ def validate_imports(
             )
 
     # Проверка undefined module references
-    warnings.extend(_check_undefined_refs(code, filename, from_imports, direct_imports, stdlib, pip_packages))
+    warnings.extend(_check_undefined_refs(code, filename, direct_imports, stdlib, pip_packages))
 
     return warnings
 
@@ -3650,6 +3664,8 @@ def _validate_import_consistency(
             raw_parts = [p.strip() for p in m_imp.group(1).split(",")] if m_imp else []
             valid_parts = []
             for part in raw_parts:
+                if not part.strip():
+                    continue
                 name = part.split()[0].strip()
                 if name in defined_names[source_stem]:
                     valid_parts.append(part)
@@ -4272,6 +4288,8 @@ def _move_classes_to_models(
         source_file = next((f for f in files if Path(f).stem == source_stem), None)
         if not source_file:
             continue
+        if source_file == models_file:
+            continue  # Уже в models — не перемещаем сами в себя
         if source_file not in fc:
             continue
         source_items = fc[source_file]
@@ -4738,8 +4756,8 @@ def run_command(
             partial_out = (e.stdout or "")[-TRUNCATE_LOG:] if e.stdout else ""
             partial_err = (e.stderr or "")[-TRUNCATE_LOG:] if e.stderr else ""
             return -1, partial_out, f"TIMEOUT: процесс не завершился за {timeout}с.\n{partial_err}"
-    except FileNotFoundError as e:
-        return -1, "", f"Команда не найдена: {e}"
+    except OSError as e:
+        return -1, "", f"Команда не найдена или недоступна: {e}"
 
 
 def _make_container_name(src_path: Path) -> str:
@@ -8117,7 +8135,6 @@ from exceptions import LLMError, StateError
 from llm import ask_agent
 from state import save_state
 from config import MAX_SPEC_REVISIONS
-from log_utils import get_model
 
 logger = logging.getLogger(__name__)
 
@@ -9519,10 +9536,13 @@ class TestValidateSignatureTypes:
             "global_imports": {"models.py": [], "main.py": []},
         }
         result = self.validate(contract, ["models.py", "main.py"], self.logger)
-        # Camera is defined, no models.py creation needed
-        models_items = result["file_contracts"].get("models.py", [])
-        assert not any(i.get("name") == "Camera" and "авто-создан" in i.get("description", "")
-                       for i in models_items if isinstance(i, dict))
+        # Camera already defined in models.py — no auto-created duplicate should appear
+        models_items = result["file_contracts"]["models.py"]
+        auto_created = [i for i in models_items if isinstance(i, dict)
+                        and i.get("name") == "Camera" and "авто-создан" in i.get("description", "")]
+        assert auto_created == [], f"Camera was auto-created despite already existing: {auto_created}"
+        # Original Camera item should still be there
+        assert any(i.get("name") == "Camera" for i in models_items if isinstance(i, dict))
 
     def test_undefined_type_creates_class(self):
         contract = {
@@ -9556,9 +9576,12 @@ class TestValidateSignatureTypes:
         }
         result = self.validate(contract, ["main.py"], self.logger)
         # Flask is imported from pip, should NOT be created in models.py
-        if "models.py" in result["file_contracts"]:
-            names = [i["name"] for i in result["file_contracts"]["models.py"] if isinstance(i, dict)]
-            assert "Flask" not in names
+        fc = result["file_contracts"]
+        if "models.py" in fc:
+            names = [i["name"] for i in fc["models.py"] if isinstance(i, dict)]
+            assert "Flask" not in names, f"Flask was auto-created in models.py despite being a pip import: {names}"
+        # Either way, main.py should still have create_app
+        assert any(i.get("name") == "create_app" for i in fc["main.py"] if isinstance(i, dict))
 
 
 # =====================================================
@@ -10156,7 +10179,9 @@ def test_pipeline_context():
     assert st["phase_fail_counts"]["develop"] == 0
     assert st["phase_total_fails"]["develop"] == 2
 
-    assert isinstance(ctx, PipelineContext)
+    # bind() привязывает state и project_path
+    ctx.bind(Path("/tmp/test"), st)
+    assert ctx.state is st
 
 
 # ─────────────────────────────────────────────
@@ -10270,11 +10295,6 @@ async def test_ask_supervisor_returns_phase():
     from cache import ThreadSafeCache
     import logging
 
-    mock_client = AsyncMock()
-    mock_resp = MagicMock()
-    mock_resp.choices[0].message.content = '{"next_phase": "develop", "reason": "test", "confidence": 90}'
-    mock_client.chat.completions.create.return_value = mock_resp
-
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
     state = {
@@ -10288,7 +10308,7 @@ async def test_ask_supervisor_returns_phase():
     with patch("supervisor.ask_agent", new=AsyncMock(return_value={"next_phase": "develop", "reason": "ok"})):
         result = await ask_supervisor(logger, state, cache, False, "python")
 
-    assert "next_phase" in result
+    assert result["next_phase"] == "develop"
 
 
 @pytest.mark.asyncio

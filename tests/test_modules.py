@@ -460,7 +460,7 @@ def test_pipeline_context():
 
 @pytest.mark.asyncio
 async def test_ask_agent_returns_dict():
-    """ask_agent должен вернуть dict при успешном ответе от _ollama_chat."""
+    """ask_agent должен вернуть dict при успешном ответе от backend.chat."""
     from llm import ask_agent
     from cache import ThreadSafeCache
     import logging
@@ -468,7 +468,7 @@ async def test_ask_agent_returns_dict():
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    with patch("llm._ollama_chat", new=AsyncMock(return_value=('{"result": "ok"}', "stop"))):
+    with patch("llm._backend.chat", new=AsyncMock(return_value=('{"result": "ok"}', "stop"))):
         result = await ask_agent(
             logger, "developer", "test prompt", cache,
             attempt=0, language="python",
@@ -478,7 +478,7 @@ async def test_ask_agent_returns_dict():
 
 @pytest.mark.asyncio
 async def test_ask_agent_cache_hit():
-    """При cache hit _ollama_chat не должен вызываться."""
+    """При cache hit backend.chat не должен вызываться."""
     from llm import ask_agent
     from cache import ThreadSafeCache, cache_key
     from log_utils import get_model
@@ -493,7 +493,7 @@ async def test_ask_agent_cache_hit():
     cache[key] = {"cached": True}
 
     mock_chat = AsyncMock()
-    with patch("llm._ollama_chat", new=mock_chat):
+    with patch("llm._backend.chat", new=mock_chat):
         result = await ask_agent(
             logger, "business_analyst", "cached text", cache,
             attempt=0, language="python",
@@ -514,7 +514,7 @@ async def test_ask_agent_raises_llm_error_on_all_retries():
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    with patch("llm._ollama_chat", new=AsyncMock(
+    with patch("llm._backend.chat", new=AsyncMock(
         side_effect=httpx.ReadTimeout("timeout")
     )):
         with pytest.raises(LLMError):
@@ -536,16 +536,14 @@ async def test_ask_agent_fallback_plain_text():
 
     call_count = 0
 
-    async def mock_ollama_chat(client, model, messages, temp, max_tok, json_mode=False):
+    async def mock_backend_chat(model, messages, temp, max_tok, json_mode=False):
         nonlocal call_count
         call_count += 1
         if json_mode:
-            # json mode возвращает невалидный json → ValueError в json.loads
             return ("not valid json", "stop")
-        # plain text → extract_json_from_text найдёт JSON
         return ('some text {"fallback": true} more text', "stop")
 
-    with patch("llm._ollama_chat", new=mock_ollama_chat):
+    with patch("llm._backend.chat", new=mock_backend_chat):
         result = await ask_agent(
             logger, "developer", "test", cache,
             attempt=0, max_retries=1,
