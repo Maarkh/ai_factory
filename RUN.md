@@ -78,51 +78,29 @@ python ai_factory.py
 | `LLM_TIMEOUT` | `300.0` | Таймаут LLM запроса (секунды) |
 | `LLM_MAX_TOKENS` | `16384` | Макс. токенов в ответе |
 | `LOG_LEVEL` | `INFO` | Уровень логирования |
-| `FACTORY_DEFAULT_MODEL` | `deepseek-coder:6.7b` | Модель по умолчанию |
-| `FACTORY_MODEL_<AGENT>` | — | Переопределение модели для агента |
 
-### Мульти-бэкенд: локальные + удалённые модели
+### Настройка моделей и серверов
 
-Система поддерживает несколько LLM-серверов одновременно. Бэкенд `local` (основной URL)
-создаётся автоматически. Дополнительные бэкенды задаются через `.env`:
+Вся конфигурация моделей — в файле `models_pool.py`. Каждый агент имеет запись
+с моделью, URL сервера, ключом и параметрами.
 
-```bash
-# Определяем удалённый бэкенд
-FACTORY_BACKEND_REMOTE_URL=http://work-server:11434/v1/
-FACTORY_BACKEND_REMOTE_KEY=your-api-key
-FACTORY_BACKEND_REMOTE_TIMEOUT=600.0
-FACTORY_BACKEND_REMOTE_MAX_TOKENS=32768
-FACTORY_BACKEND_REMOTE_NUM_CTX=32768
+Для локальной модели:
+```python
+"developer": [_local("deepseek-coder:6.7b")],
 ```
 
-Затем назначаем агентов на бэкенды:
-
-```bash
-# Тяжёлые агенты → удалённый сервер с 32B моделью
-FACTORY_MODEL_DEVELOPER=qwen3:32b
-FACTORY_BACKEND_DEVELOPER=remote
-
-FACTORY_MODEL_SELF_REFLECT=qwen3:32b
-FACTORY_BACKEND_SELF_REFLECT=remote
-
-FACTORY_MODEL_CONTRACT_ANALYST=qwen3:32b
-FACTORY_BACKEND_CONTRACT_ANALYST=remote
-
-# Лёгкие агенты → локально (без FACTORY_BACKEND_ = local по умолчанию)
-FACTORY_MODEL_REVIEWER=deepseek-coder:6.7b
-FACTORY_MODEL_SUPERVISOR=qwen3:latest
+Для модели на удалённом сервере:
+```python
+"developer": [_remote("qwen3:32b",
+                       url="http://work-server:11434/v1/",
+                       key="secret",
+                       timeout=600,
+                       max_tokens=32768,
+                       num_ctx=32768)],
 ```
 
-Каждый бэкенд имеет собственные `timeout`, `max_tokens`, `num_ctx` и `api_key`.
-Если `api_key` отличается от `"ollama"`, он передаётся как `Authorization: Bearer <key>`.
-
-### Список агентов
-
-`developer`, `developer_patch`, `reviewer`, `e2e_architect`, `e2e_qa`,
-`qa_runtime`, `business_analyst`, `system_analyst`, `architect`, `spec_reviewer`,
-`test_generator`, `documenter`, `devops_runtime`, `arch_validator`, `supervisor`,
-`self_reflect`, `contract_analyst`, `a5_validator`, `a5_business_reviewer`,
-`a5_architect_reviewer`, `a5_contract_reviewer`.
+Откройте `models_pool.py` и замените `_local()` на `_remote()` для нужных агентов.
+Агенты с одинаковым URL переиспользуют одно соединение.
 
 ## Структура проекта на выходе
 

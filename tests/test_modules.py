@@ -470,7 +470,7 @@ async def test_ask_agent_returns_dict():
 
     mock_be = MagicMock()
     mock_be.chat = AsyncMock(return_value=('{"result": "ok"}', "stop"))
-    with patch("llm._get_backend", return_value=(mock_be, 16384)):
+    with patch("llm._get_or_create_backend", return_value=mock_be):
         result = await ask_agent(
             logger, "developer", "test prompt", cache,
             attempt=0, language="python",
@@ -496,7 +496,7 @@ async def test_ask_agent_cache_hit():
 
     mock_be = MagicMock()
     mock_be.chat = AsyncMock()
-    with patch("llm._get_backend", return_value=(mock_be, 16384)):
+    with patch("llm._get_or_create_backend", return_value=mock_be):
         result = await ask_agent(
             logger, "business_analyst", "cached text", cache,
             attempt=0, language="python",
@@ -519,7 +519,7 @@ async def test_ask_agent_raises_llm_error_on_all_retries():
 
     mock_be = MagicMock()
     mock_be.chat = AsyncMock(side_effect=httpx.ReadTimeout("timeout"))
-    with patch("llm._get_backend", return_value=(mock_be, 16384)):
+    with patch("llm._get_or_create_backend", return_value=mock_be):
         with pytest.raises(LLMError):
             await ask_agent(
                 logger, "developer", "fail prompt", cache,
@@ -548,7 +548,7 @@ async def test_ask_agent_fallback_plain_text():
 
     mock_be = MagicMock()
     mock_be.chat = mock_backend_chat
-    with patch("llm._get_backend", return_value=(mock_be, 16384)):
+    with patch("llm._get_or_create_backend", return_value=mock_be):
         result = await ask_agent(
             logger, "developer", "test", cache,
             attempt=0, max_retries=1,

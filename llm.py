@@ -6,13 +6,12 @@ from typing import Protocol, runtime_checkable
 
 import httpx
 
-from config import CACHEABLE_AGENTS, LLM_BACKENDS, LLM_MAX_TOKENS, MAX_LLM_RETRIES
+from config import CACHEABLE_AGENTS, MAX_LLM_RETRIES
 from cache import ThreadSafeCache, cache_key
 from exceptions import LLMError
-from log_utils import get_model, log_model_choice, log_interaction
+from log_utils import get_model_config, log_model_choice, log_interaction
 from json_utils import extract_json_from_text
 from lang_utils import get_system_prompt
-from models_pool import AGENT_BACKENDS
 
 # Regex для garbage tokens deepseek-coder (begin_of_sentence и т.п.)
 _GARBAGE_TOKEN_RE = re.compile(r"<[｜|][\w▁]+[｜|]>")
@@ -27,8 +26,6 @@ def _strip_garbage_tokens(text: str) -> str:
 
 
 # ── LLM Backend Protocol ─────────────────────────────────────────────────────
-# Для смены провайдера (Ollama → OpenAI, Anthropic, litellm) достаточно
-# реализовать этот протокол и присвоить экземпляр в _backends.
 
 @runtime_checkable
 class LLMBackend(Protocol):
@@ -128,32 +125,25 @@ class OllamaBackend:
         return content, done_reason
 
 
-# ── Multi-backend registry ───────────────────────────────────────────────────
-# Создаём backend-инстансы из LLM_BACKENDS (config.py)
-# "local" — всегда есть, остальные — через FACTORY_BACKEND_<NAME>_URL в .env
+# ── Backend cache ─────────────────────────────────────────────────────────────
+# Бэкенды кэшируются по (url, num_ctx, timeout, key) — один инстанс на уникальный сервер.
 
-_backends: dict[str, OllamaBackend] = {}
-for _name, _cfg in LLM_BACKENDS.items():
-    _backends[_name] = OllamaBackend(
-        base_url=_cfg["url"],
-        num_ctx=_cfg["num_ctx"],
-        overall_timeout=_cfg["timeout"],
-        api_key=_cfg.get("key", ""),
-    )
-
-_logger = logging.getLogger(__name__)
-if len(_backends) > 1:
-    _logger.info(f"LLM backends: {', '.join(_backends.keys())}")
-    for _a, _b in AGENT_BACKENDS.items():
-        _logger.info(f"  {_a} → {_b}")
+_backend_cache: dict[tuple, OllamaBackend] = {}
 
 
-def _get_backend(agent: str) -> tuple[OllamaBackend, int]:
-    """Возвращает (backend, max_tokens) для агента."""
-    backend_name = AGENT_BACKENDS.get(agent, "local")
-    backend = _backends.get(backend_name, _backends["local"])
-    cfg = LLM_BACKENDS.get(backend_name, LLM_BACKENDS["local"])
-    return backend, cfg["max_tokens"]
+def _get_or_create_backend(config: dict) -> OllamaBackend:
+    """Возвращает OllamaBackend для конфига, создаёт если нет в кэше."""
+    cache_key_tuple = (config["url"], config["num_ctx"], config["timeout"], config["key"])
+    backend = _backend_cache.get(cache_key_tuple)
+    if backend is None:
+        backend = OllamaBackend(
+            base_url=config["url"],
+            num_ctx=config["num_ctx"],
+            overall_timeout=config["timeout"],
+            api_key=config.get("key", ""),
+        )
+        _backend_cache[cache_key_tuple] = backend
+    return backend
 
 
 AGENT_TEMPERATURES: dict[str, float] = {
@@ -201,7 +191,11 @@ async def ask_agent(
     language: str = "python",
     max_retries: int = MAX_LLM_RETRIES,
 ) -> dict:
-    model = get_model(agent, attempt, randomize=randomize)
+    config = get_model_config(agent, attempt, randomize=randomize)
+    model = config["model"]
+    max_tokens = config["max_tokens"]
+    backend = _get_or_create_backend(config)
+
     log_model_choice(logger, agent, model, attempt)
 
     ckey = cache_key(agent, model, user_text, language) if agent in CACHEABLE_AGENTS and attempt == 0 else None
@@ -213,7 +207,6 @@ async def ask_agent(
 
     sys_prompt  = get_system_prompt(agent, language)
     temperature = AGENT_TEMPERATURES.get(agent, 0.2)
-    backend, max_tokens = _get_backend(agent)
 
     messages = [
         {"role": "system", "content": sys_prompt},

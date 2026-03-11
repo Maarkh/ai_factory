@@ -8,14 +8,18 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from config import FACTORY_DIR, LOGS_DIR, LOG_LEVEL, LOG_FILE_MAX_BYTES, LOG_INTERACTION_CHARS
-from models_pool import MODEL_POOLS, DEFAULT_MODEL
+from models_pool import MODEL_POOLS, DEFAULT_CONFIG
+
+
+def get_model_config(agent: str, attempt: int = 0, randomize: bool = False) -> dict:
+    """Возвращает полный конфиг: {model, url, key, timeout, max_tokens, num_ctx}."""
+    pool = MODEL_POOLS.get(agent, [DEFAULT_CONFIG])
+    return random.choice(pool) if randomize else pool[attempt % len(pool)]
 
 
 def get_model(agent: str, attempt: int = 0, randomize: bool = False) -> str:
-    pool = MODEL_POOLS.get(agent, [DEFAULT_MODEL])
-    if randomize:
-        return random.choice(pool)
-    return pool[attempt % len(pool)]
+    """Возвращает имя модели (для логов и статистики)."""
+    return get_model_config(agent, attempt, randomize)["model"]
 
 
 def log_model_choice(logger: logging.Logger, agent: str, model: str, attempt: int) -> None:
