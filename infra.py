@@ -29,6 +29,7 @@ def run_command(
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
             partial_out = (e.stdout or "")[-TRUNCATE_LOG:] if e.stdout else ""
             partial_err = (e.stderr or "")[-TRUNCATE_LOG:] if e.stderr else ""
             return -1, partial_out, f"TIMEOUT: процесс не завершился за {timeout}с.\n{partial_err}"

@@ -71,12 +71,14 @@
 │   │   │   ├── 60/
 │   │   │   ├── d6/
 │   │   │   ├── 16/
+│   │   │   ├── 77/
 │   │   │   ├── 6a/
 │   │   │   ├── a6/
 │   │   │   ├── info/
 │   │   │   ├── fc/
 │   │   │   ├── ac/
 │   │   │   ├── 44/
+│   │   │   ├── c9/
 │   │   │   ├── 42/
 │   │   │   ├── 2a/
 │   │   │   ├── 21/
@@ -92,6 +94,7 @@
 │   │   │   ├── 37/
 │   │   │   ├── b9/
 │   │   │   ├── 56/
+│   │   │   ├── 4c/
 │   │   │   ├── 95/
 │   │   │   ├── aa/
 │   │   │   ├── da/
@@ -248,6 +251,7 @@
 │   │   │   ├── d5/
 │   │   │   ├── 6f/
 │   │   │   ├── 89/
+│   │   │   ├── 02/
 │   │   │   ├── c5/
 │   │   │   ├── 2b/
 │   │   │   ├── c4/
@@ -278,7 +282,9 @@ import asyncio
 import json
 import re
 import signal
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Awaitable
 
 from config import (
     BASE_DIR,
@@ -453,6 +459,250 @@ def _init_project_files(
     save_artifact(project_path, "A3", arch_text)
 
     return files_list, entry_point
+
+
+# ── Phase Registry ────────────────────────────────────────────────────────────
+# Каждый handler: async (_LoopCtx) -> str | None
+#   None   = обычный поток (save_cache, iteration++, save_state)
+#   "skip" = handler уже сделал save/increment, перейти к следующей итерации
+#   "exit" = выход из main()
+
+@dataclass
+class _LoopCtx:
+    """Контекст итерации главного цикла."""
+    logger: object
+    project_path: Path
+    state: dict
+    cache: object
+    stats: ModelStats
+    randomize: bool
+    language: str
+
+
+async def _handle_develop(pc: _LoopCtx) -> str | None:
+    state = pc.state
+    approved_before = set(state.get("approved_files", []))
+    exhausted, spec_blocked = await phase_develop(
+        pc.logger, pc.project_path, state, pc.cache, pc.stats, randomize=pc.randomize)
+    approved_after = set(state.get("approved_files", []))
+    made_progress = len(approved_after) > len(approved_before)
+
+    if made_progress:
+        reset_phase_fail(state, "develop")
+
+    if spec_blocked:
+        problem = (
+            f"Reviewer определил проблемы уровня СПЕЦИФИКАЦИИ в файлах: {', '.join(spec_blocked)}. "
+            "Разработчик НЕ может исправить это без изменения A2/A3/A5. "
+            "Последние замечания: "
+            + "; ".join(f"{f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}" for f in spec_blocked)
+        )
+        if _can_revise_spec(state, pc.logger, "develop"):
+            print(f"📋 Проблема спецификации: {', '.join(spec_blocked)} → revise_spec")
+            await revise_spec(pc.logger, pc.project_path, state, pc.cache, problem, pc.randomize, pc.stats)
+            state["max_iters"] += ITERS_BUMP_REVISE
+            for f in spec_blocked:
+                state["file_attempts"][f] = 0
+        else:
+            _force_approve_files(state, pc.project_path, spec_blocked, "spec исчерпана + spec_blocked", pc.logger)
+    elif exhausted:
+        problem = (
+            f"Файлы не удалось написать за {MAX_FILE_ATTEMPTS} попыток: {', '.join(exhausted)}. "
+            "Последние замечания: "
+            + "; ".join(f"{f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}" for f in exhausted)
+        )
+        if _can_revise_spec(state, pc.logger, "develop"):
+            print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
+            await revise_spec(pc.logger, pc.project_path, state, pc.cache, problem, pc.randomize, pc.stats)
+            state["max_iters"] += ITERS_BUMP_REVISE
+            for f in exhausted:
+                state["file_attempts"][f] = 0
+        else:
+            _force_approve_files(state, pc.project_path, exhausted, "spec исчерпана + exhausted", pc.logger)
+    elif not made_progress:
+        fails = bump_phase_fail(state, "develop")
+        if fails >= DEVELOP_STALL_THRESHOLD:
+            unapproved = [f for f in state["files"] if f not in state.get("approved_files", [])]
+            problem = (
+                f"Разработка застопорилась на {fails} итераций подряд. "
+                f"Файлы без прогресса: {', '.join(unapproved)}. "
+                "Последние замечания: "
+                + "; ".join(f"{f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}" for f in unapproved)
+            )
+            if _can_revise_spec(state, pc.logger, "develop"):
+                print(f"⚠️  Разработка не продвигается {fails} итераций → revise_spec ({', '.join(unapproved)})")
+                await revise_spec(pc.logger, pc.project_path, state, pc.cache, problem, pc.randomize, pc.stats)
+                state["max_iters"] += ITERS_BUMP_REVISE
+                for f in unapproved:
+                    state["file_attempts"][f] = 0
+            else:
+                _force_approve_files(state, pc.project_path, unapproved, "spec исчерпана + stalled", pc.logger)
+    return None
+
+
+async def _handle_e2e_review(pc: _LoopCtx) -> str | None:
+    state = pc.state
+    total_e2e_fails = state.get("phase_total_fails", {}).get("e2e_review", 0)
+    if total_e2e_fails >= E2E_TOTAL_SKIP:
+        pc.logger.warning(f"⚠️  E2E падал {E2E_TOTAL_SKIP}+ раз суммарно → ПРОПУСК (e2e_skipped=true), переход к integration_test.")
+        state["e2e_passed"] = True
+        state["e2e_skipped"] = True
+        state["e2e_attempt"] = 0
+        reset_phase_fail(state, "e2e_review")
+    elif not phase_cross_file_check(pc.logger, pc.project_path, state):
+        bump_phase_fail(state, "cross_file_check")
+        save_state(pc.project_path, state)
+        save_cache(pc.project_path, pc.cache)
+        pc.stats.flush()
+        state["iteration"] += 1
+        return "skip"
+    elif not await phase_e2e_review(pc.logger, pc.project_path, state, pc.cache, pc.stats, state["e2e_attempt"], randomize=pc.randomize):
+        fails = bump_phase_fail(state, "e2e_review")
+        state["e2e_attempt"] += 1
+        if fails >= E2E_CONSECUTIVE_REVISE and _can_revise_spec(state, pc.logger, "e2e_review"):
+            print(f"⚠️  E2E падает {E2E_CONSECUTIVE_REVISE} раз подряд → принудительный revise_spec.")
+            feedbacks = [
+                f"  {f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
+                for f in state["files"] if state["feedbacks"].get(f, "")
+            ]
+            problem = (
+                f"E2E Review отклоняет проект {fails} раз подряд.\n"
+                "Конкретные замечания ревьюеров:\n" + "\n".join(feedbacks)
+            )
+            await revise_spec(pc.logger, pc.project_path, state, pc.cache, problem, pc.randomize, pc.stats)
+            state["max_iters"] += ITERS_BUMP_SMALL
+    else:
+        state["e2e_passed"] = True
+        state["e2e_attempt"] = 0
+        reset_phase_fail(state, "e2e_review")
+    return None
+
+
+async def _handle_integration_test(pc: _LoopCtx) -> str | None:
+    state = pc.state
+    total_int_fails = state.get("phase_total_fails", {}).get("integration_test", 0)
+    if total_int_fails >= INTEGRATION_TOTAL_SKIP:
+        pc.logger.warning(f"⚠️  Integration test падал {INTEGRATION_TOTAL_SKIP}+ раз суммарно → ПРОПУСК, переход к unit_tests.")
+        state["integration_passed"] = True
+        state["integration_skipped"] = True
+        reset_phase_fail(state, "integration_test")
+    elif not await phase_integration_test(pc.logger, pc.project_path, state, pc.cache, pc.stats, randomize=pc.randomize):
+        bump_phase_fail(state, "integration_test")
+    else:
+        state["integration_passed"] = True
+        reset_phase_fail(state, "integration_test")
+    return None
+
+
+async def _handle_unit_tests(pc: _LoopCtx) -> str | None:
+    state = pc.state
+    total_ut_fails = state.get("phase_total_fails", {}).get("unit_tests", 0)
+    if total_ut_fails >= UNIT_TEST_TOTAL_SKIP:
+        pc.logger.warning(f"⚠️  Unit tests падал {UNIT_TEST_TOTAL_SKIP}+ раз суммарно → ПРОПУСК, переход к document.")
+        state["tests_passed"] = True
+        state["tests_skipped"] = True
+        reset_phase_fail(state, "unit_tests")
+    elif not await phase_unit_tests(pc.logger, pc.project_path, state, pc.cache, pc.stats, randomize=pc.randomize):
+        bump_phase_fail(state, "unit_tests")
+    else:
+        state["tests_passed"] = True
+        reset_phase_fail(state, "unit_tests")
+    return None
+
+
+async def _handle_document(pc: _LoopCtx) -> str | None:
+    await phase_document(pc.logger, pc.project_path, pc.state, pc.cache, randomize=pc.randomize)
+    pc.state["document_generated"] = True
+    return None
+
+
+async def _handle_revise_spec(pc: _LoopCtx) -> str | None:
+    if _can_revise_spec(pc.state, pc.logger, "revise_spec"):
+        problem = input_with_timeout(
+            "Опишите противоречие (или Enter для авто): ", 10,
+            "Авто-эскалация от Supervisor"
+        ).strip() or "Авто-эскалация от Supervisor"
+        await revise_spec(pc.logger, pc.project_path, pc.state, pc.cache, problem, pc.randomize, pc.stats)
+        pc.state["max_iters"] += ITERS_BUMP_REVISE
+    return None
+
+
+def _clear_skip_flags(state: dict) -> None:
+    """Сбрасывает skip-флаги и phase counters для повторного запуска тестов."""
+    state["e2e_passed"] = state["integration_passed"] = \
+        state["tests_passed"] = state["document_generated"] = False
+    for sk in ("e2e_skipped", "integration_skipped", "tests_skipped"):
+        state.pop(sk, None)
+
+
+async def _handle_success(pc: _LoopCtx) -> str | None:
+    state, language = pc.state, pc.language
+    git_commit(pc.project_path, f"Successful build: iteration {state['iteration']}")
+    print_iteration_table(state)
+    generate_summary(pc.project_path, state)
+    _print_success_summary(state, pc.project_path, language)
+    pc.stats.print_report()
+
+    act = input_with_timeout(
+        f"\nЧто дальше?\n  Enter — принять\n  r — доработать файл\n  spec — пересмотреть спецификацию\n"
+        f"👉 [авто через {WAIT_TIMEOUT}с]: ",
+        WAIT_TIMEOUT, ""
+    ).lower()
+
+    if act == "r":
+        target   = input("Файл (main.py): ").strip() or state.get("entry_point", "main.py")
+        feedback = input(f"Правки для {target}: ").strip()
+        if not feedback:
+            print("Пустые правки — пропускаю.")
+        else:
+            if target not in state["files"]:
+                state["files"].append(target)
+                state["feedbacks"][target] = ""
+            if target in state.get("approved_files", []):
+                state["approved_files"].remove(target)
+            state["feedbacks"][target] = f"Требование заказчика: {feedback}"
+            state["file_attempts"][target] = 0
+            _clear_skip_flags(state)
+            state["phase_total_fails"] = {}
+            state["phase_fail_counts"] = {}
+            state["max_iters"] += ITERS_BUMP_SMALL
+            save_state(pc.project_path, state)
+    elif act == "spec":
+        if _can_revise_spec(state, pc.logger, "success"):
+            problem = input("Опишите противоречие: ").strip() or "Запрос заказчика"
+            await revise_spec(pc.logger, pc.project_path, state, pc.cache, problem, pc.randomize, pc.stats)
+            _clear_skip_flags(state)
+            state["max_iters"] += ITERS_BUMP_REVISE
+            save_state(pc.project_path, state)
+        else:
+            print("⚠️  Лимит ревизий спецификации исчерпан (3/3).")
+    else:
+        print("✅ Готово. Можно пить кофе ☕")
+        return "exit"
+    return None
+
+
+async def _handle_unknown(pc: _LoopCtx) -> str | None:
+    pc.logger.warning(f"Неизвестная фаза от Supervisor. Fallback → develop.")
+    exhausted, spec_blocked = await phase_develop(
+        pc.logger, pc.project_path, pc.state, pc.cache, pc.stats, randomize=pc.randomize)
+    if spec_blocked or exhausted:
+        _force_approve_files(pc.state, pc.project_path, spec_blocked + exhausted, "unknown phase fallback", pc.logger)
+    return None
+
+
+# Реестр: имя фазы → обработчик
+PhaseHandler = Callable[[_LoopCtx], Awaitable[str | None]]
+
+_PHASE_HANDLERS: dict[str, PhaseHandler] = {
+    "develop":          _handle_develop,
+    "e2e_review":       _handle_e2e_review,
+    "integration_test": _handle_integration_test,
+    "unit_tests":       _handle_unit_tests,
+    "document":         _handle_document,
+    "revise_spec":      _handle_revise_spec,
+    "success":          _handle_success,
+}
 
 
 async def _run_initial_pipeline(
@@ -731,207 +981,17 @@ async def main() -> None:
         save_state(project_path, state)
 
         # ── Диспетчер фаз ────────────────────────────────────────────────────
+        pc = _LoopCtx(
+            logger=logger, project_path=project_path, state=state,
+            cache=cache, stats=stats, randomize=randomize_models, language=language,
+        )
         try:
-            if next_phase == "develop":
-                approved_before = set(state.get("approved_files", []))
-                exhausted, spec_blocked = await phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
-                approved_after = set(state.get("approved_files", []))
-                made_progress = len(approved_after) > len(approved_before)
-
-                if made_progress:
-                    reset_phase_fail(state, "develop")
-
-                # Немедленная эскалация: reviewer сказал что проблема в спецификации
-                if spec_blocked:
-                    problem = (
-                        f"Reviewer определил проблемы уровня СПЕЦИФИКАЦИИ в файлах: {', '.join(spec_blocked)}. "
-                        "Разработчик НЕ может исправить это без изменения A2/A3/A5. "
-                        "Последние замечания: "
-                        + "; ".join(
-                            f"{f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
-                            for f in spec_blocked
-                        )
-                    )
-                    if _can_revise_spec(state, logger, "develop"):
-                        print(f"📋 Проблема спецификации: {', '.join(spec_blocked)} → revise_spec")
-                        await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                        state["max_iters"] += ITERS_BUMP_REVISE
-                        for f in spec_blocked:
-                            state["file_attempts"][f] = 0
-                    else:
-                        _force_approve_files(state, project_path, spec_blocked, "spec исчерпана + spec_blocked", logger)
-                elif exhausted:
-                    problem = (
-                        f"Файлы не удалось написать за {MAX_FILE_ATTEMPTS} попыток: {', '.join(exhausted)}. "
-                        "Последние замечания: "
-                        + "; ".join(
-                            f"{f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
-                            for f in exhausted
-                        )
-                    )
-                    if _can_revise_spec(state, logger, "develop"):
-                        print(f"🔁 Автоэскалация: {', '.join(exhausted)} → revise_spec")
-                        await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                        state["max_iters"] += ITERS_BUMP_REVISE
-                        for f in exhausted:
-                            state["file_attempts"][f] = 0
-                    else:
-                        _force_approve_files(state, project_path, exhausted, "spec исчерпана + exhausted", logger)
-                elif not made_progress:
-                    fails = bump_phase_fail(state, "develop")
-                    if fails >= DEVELOP_STALL_THRESHOLD:
-                        unapproved = [f for f in state["files"]
-                                      if f not in state.get("approved_files", [])]
-                        problem = (
-                            f"Разработка застопорилась на {fails} итераций подряд. "
-                            f"Файлы без прогресса: {', '.join(unapproved)}. "
-                            "Последние замечания: "
-                            + "; ".join(
-                                f"{f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
-                                for f in unapproved
-                            )
-                        )
-                        if _can_revise_spec(state, logger, "develop"):
-                            print(f"⚠️  Разработка не продвигается {fails} итераций → revise_spec ({', '.join(unapproved)})")
-                            await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                            state["max_iters"] += ITERS_BUMP_REVISE
-                            for f in unapproved:
-                                state["file_attempts"][f] = 0
-                        else:
-                            _force_approve_files(state, project_path, unapproved, "spec исчерпана + stalled", logger)
-
-            elif next_phase == "e2e_review":
-                total_e2e_fails = state.get("phase_total_fails", {}).get("e2e_review", 0)
-                # Предохранитель: после 6+ суммарных E2E отказов — пропускаем к integration_test
-                if total_e2e_fails >= E2E_TOTAL_SKIP:
-                    logger.warning(f"⚠️  E2E падал {E2E_TOTAL_SKIP}+ раз суммарно → ПРОПУСК (e2e_skipped=true), переход к integration_test.")
-                    state["e2e_passed"] = True
-                    state["e2e_skipped"] = True
-                    state["e2e_attempt"] = 0
-                    reset_phase_fail(state, "e2e_review")
-                elif not phase_cross_file_check(logger, project_path, state):
-                    bump_phase_fail(state, "cross_file_check")
-                    save_state(project_path, state)
-                    save_cache(project_path, cache)
-                    stats.flush()
-                    state["iteration"] += 1
-                    continue
-                elif not await phase_e2e_review(logger, project_path, state, cache, stats, state["e2e_attempt"], randomize=randomize_models):
-                    fails = bump_phase_fail(state, "e2e_review")
-                    state["e2e_attempt"] += 1
-                    if fails >= E2E_CONSECUTIVE_REVISE and _can_revise_spec(state, logger, "e2e_review"):
-                        print(f"⚠️  E2E падает {E2E_CONSECUTIVE_REVISE} раз подряд → принудительный revise_spec.")
-                        feedbacks = [
-                            f"  {f}: {state['feedbacks'].get(f, '')[:TRUNCATE_FEEDBACK]}"
-                            for f in state["files"] if state["feedbacks"].get(f, "")
-                        ]
-                        problem = (
-                            f"E2E Review отклоняет проект {fails} раз подряд.\n"
-                            "Конкретные замечания ревьюеров:\n" + "\n".join(feedbacks)
-                        )
-                        await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                        state["max_iters"] += ITERS_BUMP_SMALL
-                else:
-                    state["e2e_passed"] = True
-                    state["e2e_attempt"] = 0
-                    reset_phase_fail(state, "e2e_review")
-
-            elif next_phase == "integration_test":
-                total_int_fails = state.get("phase_total_fails", {}).get("integration_test", 0)
-                if total_int_fails >= INTEGRATION_TOTAL_SKIP:
-                    logger.warning(f"⚠️  Integration test падал {INTEGRATION_TOTAL_SKIP}+ раз суммарно → ПРОПУСК, переход к unit_tests.")
-                    state["integration_passed"] = True
-                    state["integration_skipped"] = True
-                    reset_phase_fail(state, "integration_test")
-                elif not await phase_integration_test(logger, project_path, state, cache, stats, randomize=randomize_models):
-                    bump_phase_fail(state, "integration_test")
-                else:
-                    state["integration_passed"] = True
-                    reset_phase_fail(state, "integration_test")
-
-            elif next_phase == "unit_tests":
-                total_ut_fails = state.get("phase_total_fails", {}).get("unit_tests", 0)
-                if total_ut_fails >= UNIT_TEST_TOTAL_SKIP:
-                    logger.warning(f"⚠️  Unit tests падал {UNIT_TEST_TOTAL_SKIP}+ раз суммарно → ПРОПУСК, переход к document.")
-                    state["tests_passed"] = True
-                    state["tests_skipped"] = True
-                    reset_phase_fail(state, "unit_tests")
-                elif not await phase_unit_tests(logger, project_path, state, cache, stats, randomize=randomize_models):
-                    bump_phase_fail(state, "unit_tests")
-                else:
-                    state["tests_passed"] = True
-                    reset_phase_fail(state, "unit_tests")
-
-            elif next_phase == "document":
-                await phase_document(logger, project_path, state, cache, randomize=randomize_models)
-                state["document_generated"] = True
-
-            elif next_phase == "revise_spec":
-                if _can_revise_spec(state, logger, "revise_spec"):
-                    problem = input_with_timeout(
-                        "Опишите противоречие (или Enter для авто): ", 10,
-                        "Авто-эскалация от Supervisor"
-                    ).strip() or "Авто-эскалация от Supervisor"
-                    await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                    state["max_iters"] += ITERS_BUMP_REVISE
-
-            elif next_phase == "success":
-                git_commit(project_path, f"Successful build: iteration {state['iteration']}")
-                print_iteration_table(state)
-                generate_summary(project_path, state)
-                skipped = _print_success_summary(state, project_path, language)
-                stats.print_report()
-
-                act = input_with_timeout(
-                    f"\nЧто дальше?\n  Enter — принять\n  r — доработать файл\n  spec — пересмотреть спецификацию\n"
-                    f"👉 [авто через {WAIT_TIMEOUT}с]: ",
-                    WAIT_TIMEOUT, ""
-                ).lower()
-
-                if act == "r":
-                    target   = input("Файл (main.py): ").strip() or state.get("entry_point", "main.py")
-                    feedback = input(f"Правки для {target}: ").strip()
-                    if not feedback:
-                        print("Пустые правки — пропускаю.")
-                    else:
-                        if target not in state["files"]:
-                            state["files"].append(target)
-                            state["feedbacks"][target] = ""
-                        if target in state.get("approved_files", []):
-                            state["approved_files"].remove(target)
-                        state["feedbacks"][target] = f"Требование заказчика: {feedback}"
-                        state["file_attempts"][target] = 0
-                        state["e2e_passed"] = state["integration_passed"] = \
-                            state["tests_passed"] = state["document_generated"] = False
-                        # Сброс skip-флагов чтобы повторные тесты реально запустились
-                        for _sk in ("e2e_skipped", "integration_skipped", "tests_skipped"):
-                            state.pop(_sk, None)
-                        # Сброс phase counters чтобы safety valves не блокировали re-test
-                        state["phase_total_fails"] = {}
-                        state["phase_fail_counts"] = {}
-                        state["max_iters"] += ITERS_BUMP_SMALL
-                        save_state(project_path, state)
-                elif act == "spec":
-                    if _can_revise_spec(state, logger, "success"):
-                        problem = input("Опишите противоречие: ").strip() or "Запрос заказчика"
-                        await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
-                        state["e2e_passed"] = state["integration_passed"] = \
-                            state["tests_passed"] = state["document_generated"] = False
-                        for _sk in ("e2e_skipped", "integration_skipped", "tests_skipped"):
-                            state.pop(_sk, None)
-                        state["max_iters"] += ITERS_BUMP_REVISE
-                        save_state(project_path, state)
-                    else:
-                        print("⚠️  Лимит ревизий спецификации исчерпан (3/3).")
-                else:
-                    print("✅ Готово. Можно пить кофе ☕")
-                    return
-
-            else:
-                logger.warning(f"Неизвестная фаза от Supervisor: '{next_phase}'. Fallback → develop.")
-                exhausted, spec_blocked = await phase_develop(logger, project_path, state, cache, stats, randomize=randomize_models)
-                if spec_blocked or exhausted:
-                    _force_approve_files(state, project_path, spec_blocked + exhausted, "unknown phase fallback", logger)
+            handler = _PHASE_HANDLERS.get(next_phase, _handle_unknown)
+            signal = await handler(pc)
+            if signal == "skip":
+                continue
+            if signal == "exit":
+                return
         except Exception as _phase_exc:
             logger.exception(f"💥 Необработанная ошибка в фазе '{next_phase}': {_phase_exc}")
             save_state(project_path, state)
@@ -5060,6 +5120,17 @@ from prompts import PROMPTS
 LANG_DISPLAY = {"python": "Python", "typescript": "TypeScript", "rust": "Rust"}
 LANG_EXT     = {"python": "py",     "typescript": "ts",         "rust": "rs"}
 
+# Per-language feature matrix. AST-based checks (imports, stubs, cross-file
+# validation, contract compliance) implemented ONLY for Python.
+# TS/Rust supported for: project scaffolding, Docker, execution commands.
+# Checks that can't run for a given language are skipped (return []).
+LANG_FEATURES: dict[str, set[str]] = {
+    "python":     {"scaffold", "docker", "execution", "ast_checks", "import_validation",
+                   "stub_detection", "cross_file", "contract_compliance", "unit_tests"},
+    "typescript": {"scaffold", "docker", "execution"},
+    "rust":       {"scaffold", "docker", "execution"},
+}
+
 DOCKER_IMAGES = {
     "python":     "python:3.12-slim",
     "typescript": "node:20-slim",
@@ -5137,24 +5208,9 @@ import asyncio
 import json
 import logging
 import re
-from typing import Optional
+from typing import Protocol, runtime_checkable
 
 import httpx
-
-# Regex для garbage tokens deepseek-coder (begin_of_sentence и т.п.)
-_GARBAGE_TOKEN_RE = re.compile(r"<[｜|][\w▁]+[｜|]>")
-_GARBAGE_DEDUP_RE = re.compile(r"(\w+)" + r"<[｜|][\w▁]+[｜|]>" + r"\1")
-
-
-def _strip_garbage_tokens(text: str) -> str:
-    """Убирает garbage tokens LLM (deepseek-coder) из любого текста.
-
-    Сначала дедупликация: img<token>img_bytes → img_bytes,
-    затем удаление оставшихся токенов: gcv<token>_image → gcv_image.
-    """
-    text = _GARBAGE_DEDUP_RE.sub(r"\1", text)
-    text = _GARBAGE_TOKEN_RE.sub("", text)
-    return text
 
 from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_NUM_CTX, MAX_LLM_RETRIES
 from cache import ThreadSafeCache, cache_key
@@ -5163,18 +5219,116 @@ from log_utils import get_model, log_model_choice, log_interaction
 from json_utils import extract_json_from_text
 from lang_utils import get_system_prompt
 
-# Ollama native API base (без /v1/)
-_OLLAMA_BASE = LLM_BASE_URL.rstrip("/").removesuffix("/v1").removesuffix("/v1/")
-_CHAT_URL = f"{_OLLAMA_BASE}/api/chat"
+# Regex для garbage tokens deepseek-coder (begin_of_sentence и т.п.)
+_GARBAGE_TOKEN_RE = re.compile(r"<[｜|][\w▁]+[｜|]>")
+_GARBAGE_DEDUP_RE = re.compile(r"(\w+)" + r"<[｜|][\w▁]+[｜|]>" + r"\1")
 
-# Таймаут для httpx: read=120с — только между чанками при streaming,
-# НЕ общий таймаут генерации (stream=True решает эту проблему)
-_HTTPX_TIMEOUT = httpx.Timeout(
-    connect=30.0,
-    read=120.0,
-    write=30.0,
-    pool=30.0,
-)
+
+def _strip_garbage_tokens(text: str) -> str:
+    """Убирает garbage tokens LLM (deepseek-coder) из любого текста."""
+    text = _GARBAGE_DEDUP_RE.sub(r"\1", text)
+    text = _GARBAGE_TOKEN_RE.sub("", text)
+    return text
+
+
+# ── LLM Backend Protocol ─────────────────────────────────────────────────────
+# Для смены провайдера (Ollama → OpenAI, Anthropic, litellm) достаточно
+# реализовать этот протокол и присвоить экземпляр в _backend.
+
+@runtime_checkable
+class LLMBackend(Protocol):
+    async def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool = False,
+    ) -> tuple[str, str]:
+        """Возвращает (content, done_reason). done_reason='length' если обрезано."""
+        ...
+
+
+class OllamaBackend:
+    """Ollama native /api/chat streaming backend."""
+
+    def __init__(self, base_url: str, num_ctx: int, overall_timeout: float) -> None:
+        ollama_base = base_url.rstrip("/").removesuffix("/v1").removesuffix("/v1/")
+        self._chat_url = f"{ollama_base}/api/chat"
+        self._num_ctx = num_ctx
+        self._overall_timeout = overall_timeout
+        # read=120с — только между чанками (stream=True)
+        self._http_timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+
+    async def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool = False,
+    ) -> tuple[str, str]:
+        async with httpx.AsyncClient(timeout=self._http_timeout) as client:
+            return await asyncio.wait_for(
+                self._stream(client, model, messages, temperature, max_tokens, json_mode),
+                timeout=self._overall_timeout,
+            )
+
+    async def _stream(
+        self,
+        client: httpx.AsyncClient,
+        model: str,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> tuple[str, str]:
+        payload: dict = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "options": {
+                "num_ctx": self._num_ctx,
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
+        }
+        if json_mode:
+            payload["format"] = "json"
+
+        content_parts: list[str] = []
+        done_reason = "stop"
+
+        async with client.stream("POST", self._chat_url, json=payload) as resp:
+            if resp.status_code >= 400:
+                body = await resp.aread()
+                raise httpx.HTTPStatusError(
+                    f"Ollama {resp.status_code}: {body[:500].decode(errors='replace')}",
+                    request=resp.request,
+                    response=resp,
+                )
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = chunk.get("message", {})
+                if msg.get("content"):
+                    content_parts.append(msg["content"])
+                if chunk.get("done"):
+                    done_reason = chunk.get("done_reason", "stop")
+                    break
+
+        content = _strip_garbage_tokens("".join(content_parts))
+        return content, done_reason
+
+
+# Бэкенд по умолчанию — Ollama. Для смены:
+#   import llm; llm._backend = MyCloudBackend(...)
+_backend: LLMBackend = OllamaBackend(LLM_BASE_URL, LLM_NUM_CTX, LLM_TIMEOUT)
+
 
 AGENT_TEMPERATURES: dict[str, float] = {
     "developer":        0.1,
@@ -5208,77 +5362,6 @@ _RETRYABLE_ERRORS = (
 )
 
 
-async def _ollama_chat(
-    client: httpx.AsyncClient,
-    model: str,
-    messages: list[dict],
-    temperature: float,
-    max_tokens: int,
-    json_mode: bool = False,
-) -> tuple[str, str]:
-    """Вызывает Ollama native /api/chat со streaming.
-
-    Streaming решает проблему ReadTimeout: чанки приходят каждые ~1с,
-    таймаут 120с только между чанками (не общий таймаут генерации).
-    Overall timeout (LLM_TIMEOUT) предотвращает бесконечное зависание.
-    """
-    return await asyncio.wait_for(
-        _ollama_chat_inner(client, model, messages, temperature, max_tokens, json_mode),
-        timeout=LLM_TIMEOUT,  # 600с overall — предотвращает зависание
-    )
-
-
-async def _ollama_chat_inner(
-    client: httpx.AsyncClient,
-    model: str,
-    messages: list[dict],
-    temperature: float,
-    max_tokens: int,
-    json_mode: bool = False,
-) -> tuple[str, str]:
-    payload: dict = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "options": {
-            "num_ctx": LLM_NUM_CTX,
-            "temperature": temperature,
-            "num_predict": max_tokens,
-        },
-    }
-    if json_mode:
-        payload["format"] = "json"
-
-    content_parts: list[str] = []
-    done_reason = "stop"
-
-    async with client.stream("POST", _CHAT_URL, json=payload) as resp:
-        if resp.status_code >= 400:
-            body = await resp.aread()
-            raise httpx.HTTPStatusError(
-                f"Ollama {resp.status_code}: {body[:500].decode(errors='replace')}",
-                request=resp.request,
-                response=resp,
-            )
-        async for line in resp.aiter_lines():
-            if not line.strip():
-                continue
-            try:
-                chunk = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            # Каждый chunk: {"message": {"content": "..."}, "done": false}
-            msg = chunk.get("message", {})
-            if msg.get("content"):
-                content_parts.append(msg["content"])
-            if chunk.get("done"):
-                done_reason = chunk.get("done_reason", "stop")
-                break
-
-    content = _strip_garbage_tokens("".join(content_parts))
-    return content, done_reason
-
-
 async def ask_agent(
     logger: logging.Logger,
     agent: str,
@@ -5288,7 +5371,6 @@ async def ask_agent(
     randomize: bool = False,
     language: str = "python",
     max_retries: int = MAX_LLM_RETRIES,
-    client: Optional[httpx.AsyncClient] = None,
 ) -> dict:
     model = get_model(agent, attempt, randomize=randomize)
     log_model_choice(logger, agent, model, attempt)
@@ -5308,26 +5390,45 @@ async def ask_agent(
         {"role": "user",   "content": user_text},
     ]
 
-    _client = client or httpx.AsyncClient(timeout=_HTTPX_TIMEOUT)
-    _own_client = client is None
-
     last_exc: Exception = LLMError("Нет попыток")
-    try:
-        for retry in range(max_retries):
-            if retry > 0:
-                delay = 2 ** retry
-                logger.info(f"[{agent}:{model}] Backoff {delay}с (retry={retry})")
-                await asyncio.sleep(delay)
-            raw: str | None = None
+    for retry in range(max_retries):
+        if retry > 0:
+            delay = 2 ** retry
+            logger.info(f"[{agent}:{model}] Backoff {delay}с (retry={retry})")
+            await asyncio.sleep(delay)
+        raw: str | None = None
+        try:
+            raw, done_reason = await _backend.chat(
+                model, messages, temperature, LLM_MAX_TOKENS, json_mode=True,
+            )
+            if not raw:
+                raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json)")
+            if done_reason == "length":
+                logger.warning(f"[{agent}:{model}] ответ обрезан (done_reason=length, num_predict={LLM_MAX_TOKENS})")
+            result = json.loads(raw)
+            if not isinstance(result, dict) or not result:
+                raise json.JSONDecodeError(
+                    f"Ожидался непустой dict, получен {type(result).__name__}", raw or "", 0
+                )
+            log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
+            if ckey is not None:
+                cache[ckey] = result
+            return result
+        except _RETRYABLE_ERRORS as e:
+            last_exc = e
+            if isinstance(e, (httpx.TimeoutException, asyncio.TimeoutError)):
+                logger.warning(f"[{agent}:{model}] таймаут ({type(e).__name__}), retry {retry+1}/{max_retries}")
+                continue  # retry без fallback на plain text
+            logger.warning(f"[{agent}:{model}] json_object failed: {e}, пробую plain text...")
             try:
-                raw, done_reason = await _ollama_chat(
-                    _client, model, messages, temperature, LLM_MAX_TOKENS, json_mode=True,
+                raw, done_reason = await _backend.chat(
+                    model, messages, temperature, LLM_MAX_TOKENS, json_mode=False,
                 )
                 if not raw:
-                    raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json)")
+                    raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
                 if done_reason == "length":
-                    logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (done_reason=length, num_predict={LLM_MAX_TOKENS})")
-                result = json.loads(raw)
+                    logger.warning(f"[{agent}:{model}] ответ обрезан (done_reason=length)")
+                result = extract_json_from_text(raw)
                 if not isinstance(result, dict) or not result:
                     raise json.JSONDecodeError(
                         f"Ожидался непустой dict, получен {type(result).__name__}", raw or "", 0
@@ -5336,37 +5437,11 @@ async def ask_agent(
                 if ckey is not None:
                     cache[ckey] = result
                 return result
-            except _RETRYABLE_ERRORS as e:
-                last_exc = e
-                if isinstance(e, (httpx.TimeoutException, asyncio.TimeoutError)):
-                    logger.warning(f"[{agent}:{model}] таймаут ({type(e).__name__}), retry {retry+1}/{max_retries}")
-                    continue  # retry без fallback на plain text
-                logger.warning(f"[{agent}:{model}] json_object failed: {e}, пробую plain text...")
-                try:
-                    raw, done_reason = await _ollama_chat(
-                        _client, model, messages, temperature, LLM_MAX_TOKENS, json_mode=False,
-                    )
-                    if not raw:
-                        raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
-                    if done_reason == "length":
-                        logger.warning(f"[{agent}:{model}] ⚠️ ответ обрезан (done_reason=length)")
-                    result = extract_json_from_text(raw)
-                    if not isinstance(result, dict) or not result:
-                        raise json.JSONDecodeError(
-                            f"Ожидался непустой dict, получен {type(result).__name__}", raw or "", 0
-                        )
-                    log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
-                    if ckey is not None:
-                        cache[ckey] = result
-                    return result
-                except _RETRYABLE_ERRORS as e2:
-                    last_exc = e2
-                    logger.warning(f"[{agent}:{model}] plain text fallback failed: {e2}")
+            except _RETRYABLE_ERRORS as e2:
+                last_exc = e2
+                logger.warning(f"[{agent}:{model}] plain text fallback failed: {e2}")
 
-        raise LLMError(f"[{agent}:{model}] все попытки исчерпаны") from last_exc
-    finally:
-        if _own_client:
-            await _client.aclose()
+    raise LLMError(f"[{agent}:{model}] все попытки исчерпаны") from last_exc
 
 ```
 ### 📄 `log_utils.py`
@@ -10190,7 +10265,7 @@ def test_pipeline_context():
 
 @pytest.mark.asyncio
 async def test_ask_agent_returns_dict():
-    """ask_agent должен вернуть dict при успешном ответе от _ollama_chat."""
+    """ask_agent должен вернуть dict при успешном ответе от backend.chat."""
     from llm import ask_agent
     from cache import ThreadSafeCache
     import logging
@@ -10198,7 +10273,7 @@ async def test_ask_agent_returns_dict():
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    with patch("llm._ollama_chat", new=AsyncMock(return_value=('{"result": "ok"}', "stop"))):
+    with patch("llm._backend.chat", new=AsyncMock(return_value=('{"result": "ok"}', "stop"))):
         result = await ask_agent(
             logger, "developer", "test prompt", cache,
             attempt=0, language="python",
@@ -10208,7 +10283,7 @@ async def test_ask_agent_returns_dict():
 
 @pytest.mark.asyncio
 async def test_ask_agent_cache_hit():
-    """При cache hit _ollama_chat не должен вызываться."""
+    """При cache hit backend.chat не должен вызываться."""
     from llm import ask_agent
     from cache import ThreadSafeCache, cache_key
     from log_utils import get_model
@@ -10223,7 +10298,7 @@ async def test_ask_agent_cache_hit():
     cache[key] = {"cached": True}
 
     mock_chat = AsyncMock()
-    with patch("llm._ollama_chat", new=mock_chat):
+    with patch("llm._backend.chat", new=mock_chat):
         result = await ask_agent(
             logger, "business_analyst", "cached text", cache,
             attempt=0, language="python",
@@ -10244,7 +10319,7 @@ async def test_ask_agent_raises_llm_error_on_all_retries():
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    with patch("llm._ollama_chat", new=AsyncMock(
+    with patch("llm._backend.chat", new=AsyncMock(
         side_effect=httpx.ReadTimeout("timeout")
     )):
         with pytest.raises(LLMError):
@@ -10266,16 +10341,14 @@ async def test_ask_agent_fallback_plain_text():
 
     call_count = 0
 
-    async def mock_ollama_chat(client, model, messages, temp, max_tok, json_mode=False):
+    async def mock_backend_chat(model, messages, temp, max_tok, json_mode=False):
         nonlocal call_count
         call_count += 1
         if json_mode:
-            # json mode возвращает невалидный json → ValueError в json.loads
             return ("not valid json", "stop")
-        # plain text → extract_json_from_text найдёт JSON
         return ('some text {"fallback": true} more text', "stop")
 
-    with patch("llm._ollama_chat", new=mock_ollama_chat):
+    with patch("llm._backend.chat", new=mock_backend_chat):
         result = await ask_agent(
             logger, "developer", "test", cache,
             attempt=0, max_retries=1,

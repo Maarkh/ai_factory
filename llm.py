@@ -153,6 +153,8 @@ _RETRYABLE_ERRORS = (
     httpx.TimeoutException,
     asyncio.TimeoutError,
     json.JSONDecodeError,
+    LLMError,
+    ValueError,
 )
 
 
