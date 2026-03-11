@@ -215,9 +215,14 @@ PIP_TO_IMPORT: dict[str, str] = {
     "grpcio":                   "grpc",
     "grpcio-tools":             "grpc_tools",
     "Twisted":                  "twisted",
+    "twisted":                  "twisted",
     "Pygments":                 "pygments",
+    "pygments":                 "pygments",
     "Faker":                    "faker",
+    "faker":                    "faker",
     "Cython":                   "cython",
+    "cython":                   "cython",
+    "PyJWT":                    "jwt",
 }
 
 # Невалидные pip-пакеты, которые LLM часто галлюцинирует.
@@ -505,7 +510,6 @@ def _check_circular_imports(
 def _check_undefined_refs(
     code: str,
     filename: str,
-    from_imports: list[str],
     direct_imports: list[str],
     stdlib: set[str],
     pip_packages: set[str],
@@ -663,7 +667,7 @@ def validate_imports(
             )
 
     # Проверка undefined module references
-    warnings.extend(_check_undefined_refs(code, filename, from_imports, direct_imports, stdlib, pip_packages))
+    warnings.extend(_check_undefined_refs(code, filename, direct_imports, stdlib, pip_packages))
 
     return warnings
 

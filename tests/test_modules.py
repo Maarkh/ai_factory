@@ -449,7 +449,9 @@ def test_pipeline_context():
     assert st["phase_fail_counts"]["develop"] == 0
     assert st["phase_total_fails"]["develop"] == 2
 
-    assert isinstance(ctx, PipelineContext)
+    # bind() привязывает state и project_path
+    ctx.bind(Path("/tmp/test"), st)
+    assert ctx.state is st
 
 
 # ─────────────────────────────────────────────
@@ -563,11 +565,6 @@ async def test_ask_supervisor_returns_phase():
     from cache import ThreadSafeCache
     import logging
 
-    mock_client = AsyncMock()
-    mock_resp = MagicMock()
-    mock_resp.choices[0].message.content = '{"next_phase": "develop", "reason": "test", "confidence": 90}'
-    mock_client.chat.completions.create.return_value = mock_resp
-
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
     state = {
@@ -581,7 +578,7 @@ async def test_ask_supervisor_returns_phase():
     with patch("supervisor.ask_agent", new=AsyncMock(return_value={"next_phase": "develop", "reason": "ok"})):
         result = await ask_supervisor(logger, state, cache, False, "python")
 
-    assert "next_phase" in result
+    assert result["next_phase"] == "develop"
 
 
 @pytest.mark.asyncio

@@ -1253,10 +1253,13 @@ class TestValidateSignatureTypes:
             "global_imports": {"models.py": [], "main.py": []},
         }
         result = self.validate(contract, ["models.py", "main.py"], self.logger)
-        # Camera is defined, no models.py creation needed
-        models_items = result["file_contracts"].get("models.py", [])
-        assert not any(i.get("name") == "Camera" and "авто-создан" in i.get("description", "")
-                       for i in models_items if isinstance(i, dict))
+        # Camera already defined in models.py — no auto-created duplicate should appear
+        models_items = result["file_contracts"]["models.py"]
+        auto_created = [i for i in models_items if isinstance(i, dict)
+                        and i.get("name") == "Camera" and "авто-создан" in i.get("description", "")]
+        assert auto_created == [], f"Camera was auto-created despite already existing: {auto_created}"
+        # Original Camera item should still be there
+        assert any(i.get("name") == "Camera" for i in models_items if isinstance(i, dict))
 
     def test_undefined_type_creates_class(self):
         contract = {
@@ -1290,9 +1293,12 @@ class TestValidateSignatureTypes:
         }
         result = self.validate(contract, ["main.py"], self.logger)
         # Flask is imported from pip, should NOT be created in models.py
-        if "models.py" in result["file_contracts"]:
-            names = [i["name"] for i in result["file_contracts"]["models.py"] if isinstance(i, dict)]
-            assert "Flask" not in names
+        fc = result["file_contracts"]
+        if "models.py" in fc:
+            names = [i["name"] for i in fc["models.py"] if isinstance(i, dict)]
+            assert "Flask" not in names, f"Flask was auto-created in models.py despite being a pip import: {names}"
+        # Either way, main.py should still have create_app
+        assert any(i.get("name") == "create_app" for i in fc["main.py"] if isinstance(i, dict))
 
 
 # =====================================================

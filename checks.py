@@ -68,11 +68,13 @@ def ensure_a5_imports(code: str, global_imports: list[str]) -> str:
                         # Объединяем в один import
                         all_names = sorted(ex_names | names)
                         new_line = f"from {source} import {', '.join(all_names)}"
-                        # Заменяем в коде (ищем оригинальную строку с любым whitespace)
-                        code = re.sub(
-                            rf"^\s*from\s+{re.escape(source)}\s+import\s+.+$",
-                            new_line, code, count=1, flags=re.MULTILINE,
-                        )
+                        # Ищем конкретную строку в коде, которая нормализуется в ex
+                        lines = code.split("\n")
+                        for li, line in enumerate(lines):
+                            if re.sub(r"\s+", " ", line.strip()) == ex:
+                                lines[li] = new_line
+                                break
+                        code = "\n".join(lines)
                         existing_imports.discard(ex)
                         existing_imports.add(re.sub(r"\s+", " ", new_line))
                     break

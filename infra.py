@@ -32,8 +32,8 @@ def run_command(
             partial_out = (e.stdout or "")[-TRUNCATE_LOG:] if e.stdout else ""
             partial_err = (e.stderr or "")[-TRUNCATE_LOG:] if e.stderr else ""
             return -1, partial_out, f"TIMEOUT: процесс не завершился за {timeout}с.\n{partial_err}"
-    except FileNotFoundError as e:
-        return -1, "", f"Команда не найдена: {e}"
+    except OSError as e:
+        return -1, "", f"Команда не найдена или недоступна: {e}"
 
 
 def _make_container_name(src_path: Path) -> str:

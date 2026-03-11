@@ -9,7 +9,6 @@ from exceptions import LLMError, StateError
 from llm import ask_agent
 from state import save_state
 from config import MAX_SPEC_REVISIONS
-from log_utils import get_model
 
 logger = logging.getLogger(__name__)
 

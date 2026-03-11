@@ -95,7 +95,7 @@ def sync_files_with_a5(state: dict, a5_files: set[str], logger: logging.Logger) 
 
     Добавляет новые файлы из A5, удаляет файлы-призраки (есть в state но нет в A5).
     """
-    files_list = state.get("files", [])
+    files_list = state.setdefault("files", [])
     # Добавляем новые файлы из A5
     for f in a5_files:
         if f not in files_list:

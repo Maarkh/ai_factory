@@ -633,6 +633,9 @@ async def main() -> None:
                         state["file_attempts"][target] = 0
                         state["e2e_passed"] = state["integration_passed"] = \
                             state["tests_passed"] = state["document_generated"] = False
+                        # Сброс skip-флагов чтобы повторные тесты реально запустились
+                        for _sk in ("e2e_skipped", "integration_skipped", "tests_skipped"):
+                            state.pop(_sk, None)
                         # Сброс phase counters чтобы safety valves не блокировали re-test
                         state["phase_total_fails"] = {}
                         state["phase_fail_counts"] = {}
@@ -644,6 +647,8 @@ async def main() -> None:
                         await revise_spec(logger, project_path, state, cache, problem, randomize_models, stats)
                         state["e2e_passed"] = state["integration_passed"] = \
                             state["tests_passed"] = state["document_generated"] = False
+                        for _sk in ("e2e_skipped", "integration_skipped", "tests_skipped"):
+                            state.pop(_sk, None)
                         state["max_iters"] += ITERS_BUMP_REVISE
                         save_state(project_path, state)
                     else:

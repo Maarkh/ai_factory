@@ -487,6 +487,8 @@ def _validate_import_consistency(
             raw_parts = [p.strip() for p in m_imp.group(1).split(",")] if m_imp else []
             valid_parts = []
             for part in raw_parts:
+                if not part.strip():
+                    continue
                 name = part.split()[0].strip()
                 if name in defined_names[source_stem]:
                     valid_parts.append(part)
@@ -1109,6 +1111,8 @@ def _move_classes_to_models(
         source_file = next((f for f in files if Path(f).stem == source_stem), None)
         if not source_file:
             continue
+        if source_file == models_file:
+            continue  # Уже в models — не перемещаем сами в себя
         if source_file not in fc:
             continue
         source_items = fc[source_file]
