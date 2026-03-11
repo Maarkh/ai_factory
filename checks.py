@@ -24,6 +24,46 @@ def sanitize_llm_code(code: str) -> str:
     return code.strip()
 
 
+def apply_search_replace(code: str, changes: list[dict]) -> str | None:
+    """Применяет search/replace патчи к коду.
+
+    Каждый элемент changes: {"search": "...", "replace": "..."}.
+    Возвращает пропатченный код или None если хотя бы один search не найден.
+    """
+    if not changes:
+        return None
+    for change in changes:
+        if not isinstance(change, dict):
+            return None
+        search = change.get("search", "")
+        replace = change.get("replace", "")
+        if not isinstance(search, str) or not search.strip():
+            return None
+        if not isinstance(replace, str):
+            return None
+        # Точный поиск
+        if search in code:
+            code = code.replace(search, replace, 1)
+            continue
+        # Нормализация пробелов: strip каждой строки search и ищем по нормализованным строкам
+        search_lines = [ln.rstrip() for ln in search.splitlines()]
+        code_lines = code.splitlines()
+        found = False
+        for i in range(len(code_lines) - len(search_lines) + 1):
+            if all(
+                code_lines[i + j].rstrip() == search_lines[j]
+                for j in range(len(search_lines))
+            ):
+                replace_lines = replace.splitlines() if replace else [""]
+                code_lines[i:i + len(search_lines)] = replace_lines
+                code = "\n".join(code_lines)
+                found = True
+                break
+        if not found:
+            return None
+    return code
+
+
 def ensure_a5_imports(code: str, global_imports: list[str]) -> str:
     """Гарантирует что все A5 global_imports присутствуют в коде.
 

@@ -68,12 +68,14 @@ def _force_approve_files(state: dict, project_path: Path, files: list[str], reas
     """Принудительно одобряет файлы с непустым кодом на диске."""
     src_path = project_path / SRC_DIR
     approved = state.setdefault("approved_files", [])
+    fa_counter = state.setdefault("force_approved_count", 0)
     for f in files:
         fpath = src_path / f
         if fpath.exists() and fpath.read_text(encoding="utf-8").strip():
             logger.warning(f"⚠️  {f}: {reason} → принудительный APPROVE")
             if f not in approved:
                 approved.append(f)
+                state["force_approved_count"] = state.get("force_approved_count", 0) + 1
             state["feedbacks"][f] = ""
             state["file_attempts"][f] = 0
 
@@ -579,6 +581,9 @@ def _print_success_summary(state: dict, project_path: Path, language: str) -> li
     print(f"🌍 Язык          : {LANG_DISPLAY.get(language, language)}")
     print(f"🔢 Итераций      : {state['iteration']}")
     print(f"📄 Файлов        : {len(state['files'])}")
+    fa_count = state.get("force_approved_count", 0)
+    if fa_count:
+        print(f"⚠️  Force-approved: {fa_count}/{len(state['files'])}")
     if skipped:
         print(f"⚠️  ПРОПУЩЕНО    : {', '.join(skipped)}")
     else:

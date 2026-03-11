@@ -72,6 +72,16 @@ def _fallback_phase(state: dict, reason: str) -> dict:
     return {"next_phase": "success",              "reason": reason}
 
 
+def _is_fallback_unambiguous(state: dict) -> bool:
+    """True если детерминистский fallback — единственный разумный выбор.
+
+    Пропускаем LLM-вызов supervisor когда нет накопленных провалов фаз
+    (LLM supervisor полезен только когда нужно выбрать между escalation/revise_spec).
+    """
+    phase_fails = state.get("phase_fail_counts", {})
+    return not any(v > 0 for v in phase_fails.values())
+
+
 async def ask_supervisor(
     logger: logging.Logger,
     state: dict,
@@ -79,6 +89,12 @@ async def ask_supervisor(
     randomize: bool,
     language: str,
 ) -> dict:
+    # Оптимизация: пропускаем LLM когда FSM даёт однозначный ответ
+    if _is_fallback_unambiguous(state):
+        result = _fallback_phase(state, "deterministic: no failures")
+        logger.info(f"[supervisor] Пропуск LLM → {result['next_phase']}")
+        return result
+
     approved = len(state.get("approved_files", []))
     total    = len(state.get("files", []))
     phase_fails = state.get("phase_fail_counts", {})

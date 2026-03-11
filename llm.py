@@ -126,6 +126,7 @@ _backend: LLMBackend = OllamaBackend(LLM_BASE_URL, LLM_NUM_CTX, LLM_TIMEOUT)
 
 AGENT_TEMPERATURES: dict[str, float] = {
     "developer":        0.1,
+    "developer_patch":  0.0,
     "architect":        0.0,
     "system_analyst":   0.2,
     "business_analyst": 0.3,

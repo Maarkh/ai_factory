@@ -103,6 +103,37 @@ def get_full_context(
     return "".join(parts)
 
 
+def get_a5_deps(current_file: str, global_imports: list, files: list[str]) -> list[str]:
+    """Возвращает файлы проекта, от которых зависит current_file по A5 global_imports.
+
+    Из строк типа 'from models import User' извлекает 'models' и ищет
+    соответствующий файл в files. Порядок: сначала зависимости, потом остальные.
+    """
+    file_stems = {Path(f).stem: f for f in files}
+    deps: list[str] = []
+    rest: list[str] = []
+    dep_stems: set[str] = set()
+
+    for imp_line in global_imports:
+        if not isinstance(imp_line, str):
+            continue
+        m = re.match(r"from\s+(\w+)\s+import", imp_line)
+        if m:
+            stem = m.group(1)
+            if stem in file_stems and file_stems[stem] != current_file:
+                dep_stems.add(stem)
+
+    for f in files:
+        if f == current_file:
+            continue
+        if Path(f).stem in dep_stems:
+            deps.append(f)
+        else:
+            rest.append(f)
+
+    return deps + rest
+
+
 def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
     """Возвращает файлы в порядке топологической сортировки по импортам."""
     graph: dict[str, list[str]]  = defaultdict(list)

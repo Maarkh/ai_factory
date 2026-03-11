@@ -1,6 +1,7 @@
 # ── Пулы моделей по роли ─────────────────────────────────────────────────────
 MODEL_POOLS: dict[str, list[str]] = {
     "developer":        ["deepseek-coder:6.7b"],
+    "developer_patch":  ["deepseek-coder:6.7b"],
     "reviewer":         ["deepseek-coder:6.7b"],
     "e2e_architect":    ["qwen3:latest"],
     "e2e_qa":           ["qwen3:latest"],

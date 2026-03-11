@@ -1440,3 +1440,186 @@ class TestSyncFilesWithA5:
         state = {"files": ["a.py", "b.py"], "feedbacks": {"a.py": "", "b.py": ""}}
         self.sync(state, {"a.py", "b.py"}, self.logger)
         assert len(state["files"]) == 2
+
+
+# =====================================================
+# apply_search_replace (checks.py)
+# =====================================================
+
+class TestApplySearchReplace:
+    def setup_method(self):
+        from checks import apply_search_replace
+        self.apply = apply_search_replace
+
+    def test_simple_replace(self):
+        code = "def foo():\n    return 1\n"
+        changes = [{"search": "return 1", "replace": "return 2"}]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "return 2" in result
+        assert "return 1" not in result
+
+    def test_multiple_changes(self):
+        code = "a = 1\nb = 2\nc = 3\n"
+        changes = [
+            {"search": "a = 1", "replace": "a = 10"},
+            {"search": "c = 3", "replace": "c = 30"},
+        ]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "a = 10" in result
+        assert "b = 2" in result
+        assert "c = 30" in result
+
+    def test_search_not_found_returns_none(self):
+        code = "x = 1\n"
+        changes = [{"search": "y = 2", "replace": "y = 3"}]
+        assert self.apply(code, changes) is None
+
+    def test_empty_changes_returns_none(self):
+        assert self.apply("code", []) is None
+
+    def test_multiline_search(self):
+        code = "def foo():\n    x = 1\n    return x\n"
+        changes = [{"search": "    x = 1\n    return x", "replace": "    x = 2\n    return x"}]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "x = 2" in result
+
+    def test_add_code_via_replace(self):
+        code = "import os\n\ndef main():\n    pass\n"
+        changes = [{"search": "import os", "replace": "import os\nimport sys"}]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "import sys" in result
+
+    def test_trailing_whitespace_tolerance(self):
+        code = "def foo():  \n    return 1  \n"
+        changes = [{"search": "def foo():\n    return 1", "replace": "def foo():\n    return 2"}]
+        result = self.apply(code, changes)
+        assert result is not None
+        assert "return 2" in result
+
+
+# =====================================================
+# get_a5_deps (code_context.py)
+# =====================================================
+
+class TestGetA5Deps:
+    def setup_method(self):
+        from code_context import get_a5_deps
+        self.get_deps = get_a5_deps
+
+    def test_deps_first_rest_after(self):
+        files = ["main.py", "models.py", "utils.py", "service.py"]
+        imports = ["from models import User", "from utils import helper"]
+        result = self.get_deps("service.py", imports, files)
+        # service.py excluded, deps (models, utils) first, then rest (main)
+        assert result[0] == "models.py"
+        assert result[1] == "utils.py"
+        assert result[2] == "main.py"
+        assert "service.py" not in result
+
+    def test_no_deps(self):
+        files = ["main.py", "models.py"]
+        imports = ["import os", "import sys"]
+        result = self.get_deps("main.py", imports, files)
+        assert result == ["models.py"]
+
+    def test_self_excluded(self):
+        files = ["a.py", "b.py"]
+        imports = ["from a import X"]
+        result = self.get_deps("a.py", imports, files)
+        assert "a.py" not in result
+        assert result == ["b.py"]
+
+    def test_empty_imports(self):
+        files = ["a.py", "b.py"]
+        result = self.get_deps("a.py", [], files)
+        assert result == ["b.py"]
+
+    def test_non_project_imports_ignored(self):
+        files = ["main.py", "utils.py"]
+        imports = ["from flask import Flask", "from utils import helper"]
+        result = self.get_deps("main.py", imports, files)
+        assert result[0] == "utils.py"  # dep first
+
+
+# =====================================================
+# Experience Memory (experience.py)
+# =====================================================
+
+class TestExperienceMemory:
+    def setup_method(self):
+        import experience
+        self._mod = experience
+        self._orig_path = experience._EXPERIENCE_PATH
+        # Use temp file to avoid polluting real experience store
+        import tempfile
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self._tmp.close()
+        experience._EXPERIENCE_PATH = Path(self._tmp.name)
+        # Start clean
+        Path(self._tmp.name).write_text("[]", encoding="utf-8")
+
+    def teardown_method(self):
+        self._mod._EXPERIENCE_PATH = self._orig_path
+        Path(self._tmp.name).unlink(missing_ok=True)
+
+    def test_record_and_search(self):
+        self._mod.record_experience(
+            "ImportError: cannot import name 'Foo' from 'bar'",
+            "Added Foo class to bar.py",
+            category="develop",
+            file="bar.py",
+        )
+        results = self._mod.search_experience("ImportError cannot import Foo bar")
+        assert len(results) == 1
+        assert "Foo" in results[0]["fix"]
+
+    def test_deduplication(self):
+        self._mod.record_experience("SyntaxError: invalid syntax", "Fixed missing colon")
+        self._mod.record_experience("SyntaxError: invalid syntax", "Fixed missing bracket")
+        data = self._mod._load()
+        assert len(data) == 1
+        assert "bracket" in data[0]["fix"]  # Updated to latest fix
+
+    def test_empty_query_returns_nothing(self):
+        self._mod.record_experience("some error", "some fix")
+        assert self._mod.search_experience("") == []
+        assert self._mod.search_experience("   ") == []
+
+    def test_empty_error_not_recorded(self):
+        self._mod.record_experience("", "some fix")
+        self._mod.record_experience("  ", "some fix")
+        assert self._mod._load() == []
+
+    def test_category_filter(self):
+        self._mod.record_experience("error A", "fix A", category="develop")
+        self._mod.record_experience("error B", "fix B", category="test")
+        results = self._mod.search_experience("error", category="develop")
+        assert len(results) == 1
+        assert results[0]["category"] == "develop"
+
+    def test_format_experience_context_empty(self):
+        assert self._mod.format_experience_context([]) == ""
+
+    def test_format_experience_context(self):
+        exps = [{"error": "ImportError X", "fix": "add import X"}]
+        ctx = self._mod.format_experience_context(exps)
+        assert "ImportError X" in ctx
+        assert "add import X" in ctx
+        assert ctx.startswith("ОПЫТ ПРОШЛЫХ ПРОЕКТОВ")
+
+    def test_max_query_results(self):
+        for i in range(10):
+            self._mod.record_experience(f"error keyword_{i}", f"fix_{i}")
+        results = self._mod.search_experience("error keyword")
+        assert len(results) <= 5  # _MAX_QUERY_RESULTS = 5
+
+    def test_scoring_error_field_weighted_higher(self):
+        self._mod.record_experience("ImportError numpy missing", "installed numpy")
+        self._mod.record_experience("fixed something", "ImportError numpy workaround")
+        results = self._mod.search_experience("ImportError numpy")
+        # First result should be the one with keywords in error field (score 2 per kw vs 1)
+        assert "numpy missing" in results[0]["error"]

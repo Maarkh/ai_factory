@@ -557,8 +557,8 @@ async def test_ask_agent_fallback_plain_text():
 # ─────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_ask_supervisor_returns_phase():
-    """ask_supervisor должен вернуть dict с next_phase."""
+async def test_ask_supervisor_deterministic_skip():
+    """Без провалов фаз supervisor пропускает LLM и использует FSM."""
     from supervisor import ask_supervisor
     from cache import ThreadSafeCache
     import logging
@@ -571,6 +571,31 @@ async def test_ask_supervisor_returns_phase():
         "tests_passed": False, "document_generated": False,
         "feedbacks": {}, "last_phase": "initial",
         "phase_fail_counts": {}, "phase_total_fails": {},
+    }
+
+    mock_agent = AsyncMock(return_value={"next_phase": "develop", "reason": "ok"})
+    with patch("supervisor.ask_agent", new=mock_agent):
+        result = await ask_supervisor(logger, state, cache, False, "python")
+
+    assert result["next_phase"] == "develop"
+    mock_agent.assert_not_called()  # LLM не вызывается — детерминистский путь
+
+
+@pytest.mark.asyncio
+async def test_ask_supervisor_returns_phase():
+    """При наличии провалов supervisor вызывает LLM."""
+    from supervisor import ask_supervisor
+    from cache import ThreadSafeCache
+    import logging
+
+    logger = logging.getLogger("test")
+    cache = ThreadSafeCache({})
+    state = {
+        "iteration": 1, "approved_files": [], "files": ["main.py"],
+        "e2e_passed": False, "integration_passed": False,
+        "tests_passed": False, "document_generated": False,
+        "feedbacks": {}, "last_phase": "initial",
+        "phase_fail_counts": {"develop": 2}, "phase_total_fails": {},
     }
 
     with patch("supervisor.ask_agent", new=AsyncMock(return_value={"next_phase": "develop", "reason": "ok"})):
@@ -594,7 +619,7 @@ async def test_ask_supervisor_fallback_on_llm_error():
         "e2e_passed": False, "integration_passed": False,
         "tests_passed": False, "document_generated": False,
         "feedbacks": {}, "last_phase": "initial",
-        "phase_fail_counts": {}, "phase_total_fails": {},
+        "phase_fail_counts": {"develop": 1}, "phase_total_fails": {},
     }
 
     with patch("supervisor.ask_agent", new=AsyncMock(side_effect=LLMError("fail"))):

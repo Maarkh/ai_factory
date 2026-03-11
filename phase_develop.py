@@ -20,18 +20,19 @@ from lang_utils import LANG_DISPLAY
 from log_utils import get_model
 from code_context import (
     get_global_context, get_full_context, build_dependency_order,
-    validate_imports, validate_cross_file_names,
+    validate_imports, validate_cross_file_names, get_a5_deps,
 )
 from state import push_feedback, get_feedback_ctx
 from artifacts import update_artifact_a9, save_artifact
 from contract import patch_contract_for_file
 from cache import ThreadSafeCache
 from checks import (
-    sanitize_llm_code, ensure_a5_imports,
+    sanitize_llm_code, ensure_a5_imports, apply_search_replace,
     check_function_preservation, check_class_duplication,
     check_import_shadowing, check_data_only_violations,
     check_stub_functions, check_contract_compliance,
 )
+from experience import record_experience, search_experience, format_experience_context
 
 
 async def _review_file(
@@ -453,6 +454,14 @@ def _build_dev_context(
                 + "\n\n"
             )
 
+    # Опыт прошлых проектов (если есть feedback — ищем релевантный опыт)
+    last_fb = state.get("feedbacks", {}).get(current_file, "")
+    if last_fb:
+        experiences = search_experience(last_fb, category="develop")
+        exp_ctx = format_experience_context(experiences)
+        if exp_ctx:
+            dev_ctx += exp_ctx
+
     # Существующий код
     if existing_code:
         max_code_chars = MAX_CONTEXT_CHARS // 2
@@ -556,11 +565,14 @@ async def phase_develop(
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         existing_code  = file_path.read_text(encoding="utf-8").strip() if file_path.exists() else ""
-        global_context = get_global_context(src_path, state["files"], exclude=current_file)
 
         # A5: контракт для текущего файла
         file_contract  = safe_contract(state).get("file_contracts", {}).get(current_file, [])
         global_imports = safe_contract(state).get("global_imports", {}).get(current_file, [])
+
+        # Контекст: сначала A5-зависимости, потом остальные (фильтрация по dependency graph)
+        dep_ordered = get_a5_deps(current_file, global_imports, state["files"])
+        global_context = get_global_context(src_path, dep_ordered)
 
         # Патч A5 после 3+ неудачных попыток — контракт может не соответствовать реальности
         # Лимит: не более 2 патч-ресетов на файл (чтобы не откладывать force-approve бесконечно)
@@ -586,24 +598,60 @@ async def phase_develop(
             state, current_file, existing_code, file_contract, global_imports, global_context, src_path,
         )
 
-        dev_model = get_model("developer", attempt, randomize=randomize)
-        logger.info(
-            f"💻 [{dev_model}] Разработчик пишет {current_file} (попытка {attempt + 1}/{MAX_FILE_ATTEMPTS}) ..."
-        )
+        # Patch mode: если есть existing_code + feedback + attempt >= 1, пробуем search/replace
+        last_feedback = state.get("feedbacks", {}).get(current_file, "")
+        use_patch = bool(existing_code and last_feedback and attempt >= 1)
+        code = ""
 
-        try:
-            dev_resp = await ask_agent(logger, "developer", dev_ctx, cache, attempt, randomize, language)
-            code     = sanitize_llm_code(dev_resp.get("code", ""))
-        except (LLMError, ValueError) as e:
-            logger.exception(f"Developer упал: {e}")
-            stats.record("developer", dev_model, False)
-            state["feedbacks"][current_file] = f"Агент не вернул код: {e}"
-            file_attempts[current_file] = attempt + 1
-            cumulative_attempts[current_file] = total_attempts + 1
-            continue
+        if use_patch:
+            patch_model = get_model("developer_patch", attempt, randomize=randomize)
+            logger.info(
+                f"🩹 [{patch_model}] Patch mode: {current_file} (попытка {attempt + 1}/{MAX_FILE_ATTEMPTS}) ..."
+            )
+            patch_ctx = (
+                f"Файл: `{current_file}`\n\n"
+                f"ТЕКУЩИЙ КОД:\n{existing_code}\n\n"
+            )
+            if file_contract:
+                patch_ctx += f"API КОНТРАКТ (A5):\n{json.dumps(file_contract, ensure_ascii=False, indent=2)}\n\n"
+            patch_ctx += f"ЗАМЕЧАНИЯ (исправь ТОЛЬКО эти проблемы):\n{last_feedback}\n"
+            try:
+                patch_resp = await ask_agent(logger, "developer_patch", patch_ctx, cache, attempt, randomize, language)
+                changes = patch_resp.get("changes", [])
+                if isinstance(changes, list) and changes:
+                    patched = apply_search_replace(existing_code, changes)
+                    if patched is not None:
+                        code = sanitize_llm_code(patched)
+                        stats.record("developer_patch", patch_model, True)
+                        logger.info(f"  ✅ Patch applied: {len(changes)} change(s)")
+                    else:
+                        stats.record("developer_patch", patch_model, False)
+                        logger.info(f"  ⚠️  Patch не применился (search не найден) → fallback на full regen")
+                else:
+                    stats.record("developer_patch", patch_model, False)
+                    logger.info(f"  ⚠️  Patch пустой → fallback на full regen")
+            except (LLMError, ValueError) as e:
+                stats.record("developer_patch", patch_model, False)
+                logger.info(f"  ⚠️  Patch agent упал: {e} → fallback на full regen")
 
         if not code:
-            stats.record("developer", dev_model, False)
+            dev_model = get_model("developer", attempt, randomize=randomize)
+            logger.info(
+                f"💻 [{dev_model}] Разработчик пишет {current_file} (попытка {attempt + 1}/{MAX_FILE_ATTEMPTS}) ..."
+            )
+            try:
+                dev_resp = await ask_agent(logger, "developer", dev_ctx, cache, attempt, randomize, language)
+                code     = sanitize_llm_code(dev_resp.get("code", ""))
+            except (LLMError, ValueError) as e:
+                logger.exception(f"Developer упал: {e}")
+                stats.record("developer", dev_model, False)
+                state["feedbacks"][current_file] = f"Агент не вернул код: {e}"
+                file_attempts[current_file] = attempt + 1
+                cumulative_attempts[current_file] = total_attempts + 1
+                continue
+
+        if not code:
+            stats.record("developer", get_model("developer", attempt, randomize=randomize), False)
             state["feedbacks"][current_file] = "Агент вернул пустой код."
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
@@ -714,6 +762,15 @@ async def phase_develop(
         if rev_status == "APPROVE":
             stats.record("developer", dev_model, True)
             logger.info(f"✅ {current_file} одобрен.")
+            # Записываем опыт: если файл был отклонён, а теперь одобрен → полезный паттерн
+            prev_feedback = state.get("feedbacks", {}).get(current_file, "")
+            if prev_feedback and attempt > 0:
+                record_experience(
+                    error_pattern=prev_feedback[:500],
+                    fix_description=f"Файл {current_file} исправлен на попытке {attempt + 1}",
+                    category="develop",
+                    file=current_file,
+                )
             approved = state.setdefault("approved_files", [])
             if current_file not in approved:
                 approved.append(current_file)
