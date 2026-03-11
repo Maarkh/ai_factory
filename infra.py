@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import subprocess
@@ -15,6 +16,7 @@ def run_command(
     cwd: Optional[Path] = None,
     timeout: Optional[int] = None,
 ) -> tuple[int, str, str]:
+    """Синхронный запуск команды. Используется для быстрых операций (git, docker version)."""
     try:
         proc = subprocess.Popen(
             args, cwd=cwd,
@@ -37,6 +39,37 @@ def run_command(
         return -1, "", f"Команда не найдена или недоступна: {e}"
 
 
+async def run_command_async(
+    args: list[str],
+    cwd: Optional[Path] = None,
+    timeout: Optional[int] = None,
+) -> tuple[int, str, str]:
+    """Асинхронный запуск команды. Не блокирует event loop."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout,
+            )
+            stdout = (stdout_bytes or b"").decode("utf-8", errors="replace")
+            stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
+            return proc.returncode or 0, stdout, stderr
+        except asyncio.TimeoutError:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            return -1, "", f"TIMEOUT: процесс не завершился за {timeout}с."
+    except OSError as e:
+        return -1, "", f"Команда не найдена или недоступна: {e}"
+
+
 def _make_container_name(src_path: Path) -> str:
     """Генерирует детерминированное имя контейнера по пути src_path."""
     return "factory_" + hashlib.sha256(str(src_path).encode()).hexdigest()[:12]
@@ -47,7 +80,7 @@ def _cleanup_docker_container(container_name: str) -> None:
     run_command(["docker", "rm", "-f", container_name])
 
 
-def run_in_docker(
+async def run_in_docker(
     src_path: Path,
     command: str,
     timeout: int,
@@ -61,7 +94,7 @@ def run_in_docker(
     image          = get_docker_image(language)
     container_name = _make_container_name(src_path)
     volume_spec    = f"{src_path}:/app:ro" if read_only else f"{src_path}:/app"
-    result = run_command(
+    result = await run_command_async(
         [
             "docker", "run", "--rm",
             "--name", container_name,
@@ -80,9 +113,9 @@ def run_in_docker(
     return result
 
 
-def build_docker_image(src_path: Path, tag: str) -> tuple[bool, str, str]:
+async def build_docker_image(src_path: Path, tag: str) -> tuple[bool, str, str]:
     """Dockerfile должен лежать в src/."""
-    rc, stdout, stderr = run_command(
+    rc, stdout, stderr = await run_command_async(
         ["docker", "build", "-t", tag, "."],
         cwd=src_path, timeout=RUN_TIMEOUT,
     )

@@ -5,12 +5,10 @@ import re
 from pathlib import Path
 
 from config import (
-    MAX_FILE_ATTEMPTS, MAX_TEST_ATTEMPTS, MIN_COVERAGE,
+    MAX_FILE_ATTEMPTS, MAX_CUMULATIVE, MAX_TEST_ATTEMPTS, MIN_COVERAGE,
     FACTORY_DIR, LOGS_DIR, SRC_DIR, RUN_TIMEOUT,
     TRUNCATE_FEEDBACK, TRUNCATE_LOG, TRUNCATE_ERROR_MSG,
 )
-
-MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3
 
 from exceptions import LLMError
 from llm import ask_agent
@@ -282,7 +280,7 @@ async def phase_integration_test(
         build_success = False
         for build_attempt in range(1, 4):
             logger.info(f"\n🏗️ Сборка Docker-образа (попытка {build_attempt}/3) ...")
-            build_success, _, build_err = build_docker_image(src_path, image_tag)
+            build_success, _, build_err = await build_docker_image(src_path, image_tag)
             if build_success:
                 logger.info("✅ Образ собран.")
                 break
@@ -322,7 +320,7 @@ async def phase_integration_test(
             for orig, alt in (env_fixes.get("package_alternatives") or env_fixes.get("pip_alternatives") or {}).items():
                 update_requirements(src_path, orig, alt)
 
-        rc, stdout, stderr = run_in_docker(src_path, cmd, RUN_TIMEOUT, language)
+        rc, stdout, stderr = await run_in_docker(src_path, cmd, RUN_TIMEOUT, language)
 
         # Логи рантайма — в .factory/logs/
         logs_dir = project_path / FACTORY_DIR / LOGS_DIR
@@ -567,7 +565,7 @@ async def phase_unit_tests(
 
         logger.info("🚀 Запуск тестов в Docker ...")
         cmd = get_test_command(language)
-        rc, stdout, stderr = run_in_docker(src_path, cmd, RUN_TIMEOUT * 2, language)
+        rc, stdout, stderr = await run_in_docker(src_path, cmd, RUN_TIMEOUT * 2, language)
         last_stderr = stderr
         last_stdout = stdout
 

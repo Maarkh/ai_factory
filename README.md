@@ -183,6 +183,7 @@
 │   │   │   ├── eb/
 │   │   │   ├── 0e/
 │   │   │   ├── 66/
+│   │   │   ├── 03/
 │   │   │   ├── 18/
 │   │   │   ├── 4a/
 │   │   │   ├── 8d/
@@ -996,10 +997,10 @@ async def main() -> None:
         )
         try:
             handler = _PHASE_HANDLERS.get(next_phase, _handle_unknown)
-            signal = await handler(pc)
-            if signal == "skip":
+            result = await handler(pc)
+            if result == "skip":
                 continue
-            if signal == "exit":
+            if result == "exit":
                 return
         except Exception as _phase_exc:
             logger.exception(f"💥 Необработанная ошибка в фазе '{next_phase}': {_phase_exc}")
@@ -1129,6 +1130,8 @@ def load_cache(project_path: Path) -> ThreadSafeCache:
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             import logging
             logging.getLogger(__name__).warning(f"⚠️  Повреждённый кэш {p}, начинаю с пустого.")
@@ -1699,6 +1702,8 @@ def check_contract_compliance(code: str, file_contract: list) -> list[str]:
 
     missing = []
     for item in file_contract:
+        if not isinstance(item, dict):
+            continue
         if not item.get("required", False):
             continue
         sig = item.get("signature", "")
@@ -2261,8 +2266,8 @@ def parse_requirements(path: Path) -> set[str]:
             continue
         pkg_lower = pkg.lower()
         # Пропускаем невалидные pip-пакеты (LLM-галлюцинации)
-        if pkg in WRONG_PIP_PACKAGES:
-            correct_pip, correct_import = WRONG_PIP_PACKAGES[pkg]
+        if pkg_lower in WRONG_PIP_PACKAGES:
+            correct_pip, correct_import = WRONG_PIP_PACKAGES[pkg_lower]
             result.add(correct_import.lower())
             result.add(correct_pip.lower().replace("-", "_"))
             continue
@@ -6553,6 +6558,7 @@ async def phase_develop(
         last_feedback = state.get("feedbacks", {}).get(current_file, "")
         use_patch = bool(existing_code and last_feedback and attempt >= 1)
         code = ""
+        dev_model = get_model("developer", attempt, randomize=randomize)
 
         if use_patch:
             patch_model = get_model("developer_patch", attempt, randomize=randomize)

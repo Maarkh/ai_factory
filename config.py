@@ -27,6 +27,7 @@ MAX_CONTEXT_CHARS   = 60_000
 MIN_COVERAGE        = 40
 MAX_ABSOLUTE_ITERS  = 500
 MAX_FILE_ATTEMPTS   = 15
+MAX_CUMULATIVE      = MAX_FILE_ATTEMPTS * 3  # Суммарных попыток до force-approve
 MAX_TEST_ATTEMPTS   = 6      # Попытки регенерации тестов перед де-аппрувом кода
 MAX_PHASE_TOTAL_FAILS = 90   # Абсолютный потолок фейлов одной фазы за весь проект
 MAX_SPEC_REVISIONS    = 9    # Максимум пересмотров спецификации за проект

@@ -8,11 +8,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from config import FACTORY_DIR, LOGS_DIR, LOG_LEVEL, LOG_FILE_MAX_BYTES, LOG_INTERACTION_CHARS
-from models_pool import MODEL_POOLS
+from models_pool import MODEL_POOLS, DEFAULT_MODEL
 
 
 def get_model(agent: str, attempt: int = 0, randomize: bool = False) -> str:
-    pool = MODEL_POOLS.get(agent, ["qwen3:latest"])
+    pool = MODEL_POOLS.get(agent, [DEFAULT_MODEL])
     if randomize:
         return random.choice(pool)
     return pool[attempt % len(pool)]

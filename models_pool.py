@@ -1,5 +1,13 @@
+import os
+
 # ── Пулы моделей по роли ─────────────────────────────────────────────────────
-MODEL_POOLS: dict[str, list[str]] = {
+# Переопределяются через .env: FACTORY_MODEL_<AGENT>=model_name
+# Пример: FACTORY_MODEL_DEVELOPER=qwen3:latest
+# DEFAULT_MODEL — fallback если модель не задана ни в пуле, ни в .env
+
+DEFAULT_MODEL = os.getenv("FACTORY_DEFAULT_MODEL", "deepseek-coder:6.7b")
+
+_BASE_POOLS: dict[str, list[str]] = {
     "developer":        ["deepseek-coder:6.7b"],
     "developer_patch":  ["deepseek-coder:6.7b"],
     "reviewer":         ["deepseek-coder:6.7b"],
@@ -22,3 +30,13 @@ MODEL_POOLS: dict[str, list[str]] = {
     "a5_architect_reviewer": ["qwen3:latest"],
     "a5_contract_reviewer":  ["deepseek-coder:6.7b"],
 }
+
+# Применяем переопределения из .env
+MODEL_POOLS: dict[str, list[str]] = {}
+for agent, default_pool in _BASE_POOLS.items():
+    env_key = f"FACTORY_MODEL_{agent.upper()}"
+    env_val = os.getenv(env_key, "").strip()
+    if env_val:
+        MODEL_POOLS[agent] = [env_val]
+    else:
+        MODEL_POOLS[agent] = default_pool

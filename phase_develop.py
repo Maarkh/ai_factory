@@ -6,11 +6,9 @@ from pathlib import Path
 from typing import Optional
 
 from config import (
-    MAX_FILE_ATTEMPTS, MAX_CONTEXT_CHARS, SRC_DIR,
+    MAX_FILE_ATTEMPTS, MAX_CUMULATIVE, MAX_CONTEXT_CHARS, SRC_DIR,
     MAX_A5_PATCHES_PER_FILE, SELF_REFLECT_RETRIES, TRUNCATE_FEEDBACK,
 )
-
-MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3  # После 15 суммарных попыток — принудительный APPROVE
 
 from exceptions import LLMError
 from llm import ask_agent
@@ -484,6 +482,147 @@ def _build_dev_context(
     return dev_ctx
 
 
+def _try_force_approve(
+    logger: logging.Logger,
+    state: dict,
+    src_path: Path,
+    current_file: str,
+    total_attempts: int,
+    file_attempts: dict[str, int],
+) -> str:
+    """Проверяет force-approve mode. Возвращает: 'approved', 'write_without_checks', 'normal'."""
+    if total_attempts < MAX_CUMULATIVE:
+        return "normal"
+
+    file_path = src_path / current_file
+    if file_path.exists() and file_path.read_text(encoding="utf-8").strip():
+        gi = safe_contract(state).get("global_imports", {}).get(current_file, [])
+        if gi:
+            existing = file_path.read_text(encoding="utf-8")
+            patched = ensure_a5_imports(existing, gi)
+            if patched != existing:
+                file_path.write_text(patched, encoding="utf-8")
+                logger.info(f"  📎 {current_file}: A5 imports авто-инжектированы при force-approve")
+        logger.warning(
+            f"⚠️  {current_file} не прошёл ревью за {total_attempts} суммарных попыток "
+            f"→ принудительный APPROVE (код есть, проверим при интеграции)."
+        )
+        approved = state.setdefault("approved_files", [])
+        if current_file not in approved:
+            approved.append(current_file)
+        state["feedbacks"][current_file] = ""
+        file_attempts[current_file] = 0
+        return "approved"
+    else:
+        logger.warning(
+            f"⚠️  {current_file}: cumulative={total_attempts} но файла нет на диске "
+            f"→ пишем код без проверок."
+        )
+        file_attempts[current_file] = 0
+        return "write_without_checks"
+
+
+def _generate_skeleton(
+    logger: logging.Logger,
+    file_contract: list,
+    global_imports: list,
+    file_path: Path,
+    current_file: str,
+) -> str:
+    """Генерирует скелет из A5 контракта. Возвращает код скелета."""
+    logger.warning(f"  ⚠️  {current_file}: developer вернул код без функций/классов — генерирую скелет из A5")
+    skeleton_parts: list[str] = []
+    if global_imports:
+        for imp in global_imports:
+            if isinstance(imp, str):
+                skeleton_parts.append(imp)
+        skeleton_parts.append("")
+    for item in file_contract:
+        if not isinstance(item, dict):
+            continue
+        sig = item.get("signature", "")
+        hints = item.get("implementation_hints", "")
+        desc = item.get("description", "")
+        if sig.strip().startswith("class "):
+            skeleton_parts.append(f"{sig}:")
+            skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
+            skeleton_parts.append(f"    # TODO: {hints}")
+            skeleton_parts.append(f"    pass")
+            skeleton_parts.append("")
+        elif sig.strip().startswith(("def ", "async def ")):
+            skeleton_parts.append(f"{sig}:")
+            skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
+            skeleton_parts.append(f"    # Алгоритм: {hints}")
+            skeleton_parts.append(f"    pass")
+            skeleton_parts.append("")
+    skeleton_code = "\n".join(skeleton_parts)
+    file_path.write_text(skeleton_code, encoding="utf-8")
+    return skeleton_code
+
+
+async def _self_reflect_with_rollback(
+    logger: logging.Logger,
+    cache: ThreadSafeCache,
+    src_path: Path,
+    current_file: str,
+    code: str,
+    state: dict,
+    stats: ModelStats,
+    randomize: bool,
+    file_path: Path,
+    file_contract: list,
+    global_context: str,
+    global_imports: list,
+    language: str,
+) -> tuple[str, str]:
+    """Self-Reflect с откатом при ошибках. Возвращает (итоговый_код, sr_feedback)."""
+    sr_status, sr_feedback = await do_self_reflect(
+        logger, cache, src_path, current_file, code, state, stats, randomize
+    )
+    if sr_status == "NEEDS_IMPROVEMENT":
+        new_code = file_path.read_text(encoding="utf-8")
+        sr_check = _run_checks(
+            new_code, code, current_file, state, file_contract,
+            global_context, global_imports, language, src_path,
+        )
+        if sr_check:
+            logger.warning(f"  ⚠️  Self-reflect ввёл ошибки ({sr_check[0]}) → откат")
+            file_path.write_text(code, encoding="utf-8")
+        else:
+            code = new_code
+    return code, sr_feedback
+
+
+def _approve_file(
+    logger: logging.Logger,
+    state: dict,
+    project_path: Path,
+    current_file: str,
+    attempt: int,
+    dev_model: str,
+    stats: ModelStats,
+    file_attempts: dict[str, int],
+) -> None:
+    """Одобряет файл: обновляет статистику, state, записывает опыт."""
+    stats.record("developer", dev_model, True)
+    logger.info(f"✅ {current_file} одобрен.")
+    prev_feedback = state.get("feedbacks", {}).get(current_file, "")
+    if prev_feedback and attempt > 0:
+        record_experience(
+            error_pattern=prev_feedback[:500],
+            fix_description=f"Файл {current_file} исправлен на попытке {attempt + 1}",
+            category="develop",
+            file=current_file,
+        )
+    approved = state.setdefault("approved_files", [])
+    if current_file not in approved:
+        approved.append(current_file)
+    state["feedbacks"][current_file] = ""
+    state.setdefault("feedback_history", {})[current_file] = []
+    file_attempts[current_file] = 0
+    update_artifact_a9(project_path, current_file, f"Одобрен на попытке {attempt + 1}. Модель: {dev_model}.")
+
+
 async def phase_develop(
     logger: logging.Logger,
     project_path: Path,
@@ -513,36 +652,12 @@ async def phase_develop(
         total_attempts = cumulative_attempts.get(current_file, 0)
 
         # Предохранитель: файл не проходит ревью после множества попыток → принудительный approve
-        force_approve_mode = total_attempts >= MAX_CUMULATIVE
-        if force_approve_mode:
-            file_path = src_path / current_file
-            if file_path.exists() and file_path.read_text(encoding="utf-8").strip():
-                # Перед force-approve: инжектируем A5 imports в код на диске
-                gi = safe_contract(state).get("global_imports", {}).get(current_file, [])
-                if gi:
-                    existing = file_path.read_text(encoding="utf-8")
-                    patched = ensure_a5_imports(existing, gi)
-                    if patched != existing:
-                        file_path.write_text(patched, encoding="utf-8")
-                        logger.info(f"  📎 {current_file}: A5 imports авто-инжектированы при force-approve")
-                logger.warning(
-                    f"⚠️  {current_file} не прошёл ревью за {total_attempts} суммарных попыток "
-                    f"→ принудительный APPROVE (код есть, проверим при интеграции)."
-                )
-                approved = state.setdefault("approved_files", [])
-                if current_file not in approved:
-                    approved.append(current_file)
-                state["feedbacks"][current_file] = ""
-                file_attempts[current_file] = 0
-                continue
-            else:
-                # Файл не на диске — даём developer ещё попытку, approve после записи
-                logger.warning(
-                    f"⚠️  {current_file}: cumulative={total_attempts} но файла нет на диске "
-                    f"→ пишем код без проверок."
-                )
-                file_attempts[current_file] = 0
-                attempt = 0
+        fa_result = _try_force_approve(logger, state, src_path, current_file, total_attempts, file_attempts)
+        force_approve_mode = fa_result != "normal"
+        if fa_result == "approved":
+            continue
+        if fa_result == "write_without_checks":
+            attempt = 0
 
         if attempt >= MAX_FILE_ATTEMPTS:
             logger.warning(
@@ -663,41 +778,12 @@ async def phase_develop(
         code_lines = [ln for ln in code.splitlines() if ln.strip() and not ln.strip().startswith("#")]
         has_functions = any(ln.strip().startswith(("def ", "class ", "async def ")) for ln in code_lines)
         if not has_functions and file_contract and attempt < MAX_FILE_ATTEMPTS - 1:
-            logger.warning(
-                f"  ⚠️  {current_file}: developer вернул код без функций/классов — генерирую скелет из A5"
-            )
-            skeleton_parts = []
-            if global_imports:
-                for imp in global_imports:
-                    if isinstance(imp, str):
-                        skeleton_parts.append(imp)
-                skeleton_parts.append("")
-            for item in file_contract:
-                if not isinstance(item, dict):
-                    continue
-                sig = item.get("signature", "")
-                hints = item.get("implementation_hints", "")
-                desc = item.get("description", "")
-                if sig.strip().startswith("class "):
-                    skeleton_parts.append(f"{sig}:")
-                    skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
-                    skeleton_parts.append(f"    # TODO: {hints}")
-                    skeleton_parts.append(f"    pass")
-                    skeleton_parts.append("")
-                elif sig.strip().startswith(("def ", "async def ")):
-                    skeleton_parts.append(f"{sig}:")
-                    skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
-                    skeleton_parts.append(f"    # Алгоритм: {hints}")
-                    skeleton_parts.append(f"    pass")
-                    skeleton_parts.append("")
-            skeleton_code = "\n".join(skeleton_parts)
+            _generate_skeleton(logger, file_contract, global_imports, file_path, current_file)
             state["feedbacks"][current_file] = (
                 f"Ты вернул код БЕЗ функций/классов — только импорты.\n"
                 f"НИЖЕ — СКЕЛЕТ из A5 контракта. Заполни ВСЕ функции/классы реальным кодом.\n"
                 f"Убери pass и TODO, напиши ПОЛНУЮ рабочую реализацию по алгоритму в комментариях.\n"
             )
-            # Записываем скелет как existing_code для следующей попытки
-            file_path.write_text(skeleton_code, encoding="utf-8")
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             stats.record("developer", dev_model, False)
@@ -736,23 +822,11 @@ async def phase_develop(
 
         file_path.write_text(code, encoding="utf-8")
 
-        # Self-Reflect с проверкой A5
-        sr_status, sr_feedback = await do_self_reflect(
-            logger, cache, src_path, current_file, code, state, stats, randomize
+        # Self-Reflect с откатом при ошибках
+        code, sr_feedback = await _self_reflect_with_rollback(
+            logger, cache, src_path, current_file, code, state, stats, randomize,
+            file_path, file_contract, global_context, global_imports, language,
         )
-        if sr_status == "NEEDS_IMPROVEMENT":
-            # Перечитываем файл — self-reflect мог записать улучшенный код
-            new_code = file_path.read_text(encoding="utf-8")
-            # Повторяем проверки — если self-reflect ввёл ошибки, откатываем
-            sr_check = _run_checks(
-                new_code, code, current_file, state, file_contract,
-                global_context, global_imports, language, src_path,
-            )
-            if sr_check:
-                logger.warning(f"  ⚠️  Self-reflect ввёл ошибки ({sr_check[0]}) → откат")
-                file_path.write_text(code, encoding="utf-8")
-            else:
-                code = new_code
 
         # Внешний ревью
         rev_status, rev_feedback, needs_spec = await _review_file(
@@ -761,25 +835,7 @@ async def phase_develop(
         )
 
         if rev_status == "APPROVE":
-            stats.record("developer", dev_model, True)
-            logger.info(f"✅ {current_file} одобрен.")
-            # Записываем опыт: если файл был отклонён, а теперь одобрен → полезный паттерн
-            prev_feedback = state.get("feedbacks", {}).get(current_file, "")
-            if prev_feedback and attempt > 0:
-                record_experience(
-                    error_pattern=prev_feedback[:500],
-                    fix_description=f"Файл {current_file} исправлен на попытке {attempt + 1}",
-                    category="develop",
-                    file=current_file,
-                )
-            approved = state.setdefault("approved_files", [])
-            if current_file not in approved:
-                approved.append(current_file)
-            state["feedbacks"][current_file] = ""
-            state.setdefault("feedback_history", {})[current_file] = []
-            file_attempts[current_file] = 0
-            # Обновляем A9 (Implementation Logs)
-            update_artifact_a9(project_path, current_file, f"Одобрен на попытке {attempt + 1}. Модель: {dev_model}.")
+            _approve_file(logger, state, project_path, current_file, attempt, dev_model, stats, file_attempts)
         else:
             stats.record("developer", dev_model, False)
             combined = "\n".join(filter(None, [to_str(sr_feedback), to_str(rev_feedback)]))
