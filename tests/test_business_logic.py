@@ -6,6 +6,7 @@ and safety valves. Run: source .venv_factory/bin/activate && pytest tests/test_b
 import json
 import logging
 import tempfile
+import unittest
 from pathlib import Path
 
 import pytest
@@ -1753,3 +1754,238 @@ class TestDiagnoseRuntimeError:
             result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
         assert result is not None
         assert "аргумент" in result["fix"].lower() or "argument" in result["fix"].lower()
+
+
+# ─────────────────────────────────────────────
+# check_truncated_code
+# ─────────────────────────────────────────────
+
+class TestCheckTruncatedCode(unittest.TestCase):
+    def setUp(self):
+        from checks import check_truncated_code
+        self.check = check_truncated_code
+
+    def test_normal_code_passes(self):
+        code = "def foo():\n    return 42\n"
+        assert self.check(code) == ""
+
+    def test_trailing_ellipsis_comment(self):
+        code = "def foo():\n    x = 1\n    # ..."
+        result = self.check(code)
+        assert result != ""
+        assert "обрезан" in result
+
+    def test_trailing_bare_ellipsis(self):
+        code = "def foo():\n    x = 1\n..."
+        result = self.check(code)
+        assert result != ""
+
+    def test_empty_code(self):
+        assert self.check("") == ""
+        assert self.check("   ") == ""
+
+    def test_syntax_error_at_end(self):
+        code = "import os\nimport sys\n\ndef foo():\n    x = 1\n    y = 2\n    if x"
+        result = self.check(code)
+        assert "обрезан" in result or "Код" in result
+
+    def test_syntax_error_not_at_end_passes(self):
+        # SyntaxError in the middle — not truncation
+        code = "x = (\ndef foo():\n    return 1\n\ndef bar():\n    return 2\n"
+        result = self.check(code)
+        assert result == ""  # error is on line 2 of 6, not near end
+
+
+# ─────────────────────────────────────────────
+# _normalize_file_contracts — class signature cleanup
+# ─────────────────────────────────────────────
+
+class TestNormalizeClassSignatures(unittest.TestCase):
+    def setUp(self):
+        from contract_validation import _normalize_file_contracts
+        self.normalize = _normalize_file_contracts
+
+    def test_strips_ellipsis_from_class(self):
+        contract = {
+            "file_contracts": {
+                "foo.py": [
+                    {"name": "Foo", "signature": "class Foo: ... "},
+                ]
+            }
+        }
+        result = self.normalize(contract)
+        sig = result["file_contracts"]["foo.py"][0]["signature"]
+        assert sig == "class Foo", f"Expected 'class Foo', got '{sig}'"
+
+    def test_strips_bare_dots(self):
+        contract = {
+            "file_contracts": {
+                "foo.py": [
+                    {"name": "Bar", "signature": "class Bar ..."},
+                ]
+            }
+        }
+        result = self.normalize(contract)
+        sig = result["file_contracts"]["foo.py"][0]["signature"]
+        assert sig == "class Bar", f"Expected 'class Bar', got '{sig}'"
+
+    def test_preserves_class_with_base(self):
+        contract = {
+            "file_contracts": {
+                "foo.py": [
+                    {"name": "Child", "signature": "class Child(Base)"},
+                ]
+            }
+        }
+        result = self.normalize(contract)
+        sig = result["file_contracts"]["foo.py"][0]["signature"]
+        assert sig == "class Child(Base)"
+
+    def test_preserves_def_signature(self):
+        contract = {
+            "file_contracts": {
+                "foo.py": [
+                    {"name": "run", "signature": "def run() -> None"},
+                ]
+            }
+        }
+        result = self.normalize(contract)
+        sig = result["file_contracts"]["foo.py"][0]["signature"]
+        assert sig == "def run() -> None"
+
+
+# ─────────────────────────────────────────────
+# _generate_skeleton — methods inside class
+# ─────────────────────────────────────────────
+
+class TestGenerateSkeleton(unittest.TestCase):
+    def test_method_inside_class(self):
+        """send_event(self, ...) should be indented inside ExternalSystem."""
+        from phase_develop import _generate_skeleton
+        import logging
+        logger = logging.getLogger("test")
+        file_contract = [
+            {
+                "name": "ExternalSystem",
+                "signature": "class ExternalSystem",
+                "description": "External system class",
+                "implementation_hints": "Use requests",
+            },
+            {
+                "name": "send_event",
+                "signature": "def send_event(self, event: dict) -> None",
+                "description": "Send event",
+                "implementation_hints": "Use requests.post",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            fp = Path(td) / "external_system.py"
+            code = _generate_skeleton(logger, file_contract, [], fp, "external_system.py")
+        # send_event should be indented (method of class)
+        assert "    def send_event(self" in code, f"Method not indented:\n{code}"
+        # class should NOT have literal ...
+        assert "class ExternalSystem: ..." not in code
+
+    def test_module_function_not_indented(self):
+        """A function without self should stay at module level."""
+        from phase_develop import _generate_skeleton
+        import logging
+        logger = logging.getLogger("test")
+        file_contract = [
+            {
+                "name": "helper",
+                "signature": "def helper(x: int) -> int",
+                "description": "Helper function",
+                "implementation_hints": "",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            fp = Path(td) / "utils.py"
+            code = _generate_skeleton(logger, file_contract, [], fp, "utils.py")
+        assert "def helper(x: int)" in code
+        # Should NOT be indented
+        lines = [l for l in code.splitlines() if "def helper" in l]
+        assert lines[0].startswith("def "), f"Should not be indented: {lines[0]}"
+
+    def test_ellipsis_cleaned_from_class(self):
+        """class ExternalSystem: ... should become class ExternalSystem:"""
+        from phase_develop import _generate_skeleton
+        import logging
+        logger = logging.getLogger("test")
+        file_contract = [
+            {
+                "name": "Foo",
+                "signature": "class Foo: ... ",
+                "description": "Foo class",
+                "implementation_hints": "",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            fp = Path(td) / "foo.py"
+            code = _generate_skeleton(logger, file_contract, [], fp, "foo.py")
+        assert "class Foo:" in code
+        assert "class Foo: ..." not in code
+
+
+# ─────────────────────────────────────────────
+# _dedup_global_imports
+# ─────────────────────────────────────────────
+
+class TestDedupGlobalImports(unittest.TestCase):
+    def setUp(self):
+        from contract_validation import _dedup_global_imports
+        import logging
+        self.dedup = _dedup_global_imports
+        self.logger = logging.getLogger("test")
+
+    def test_removes_exact_duplicates(self):
+        contract = {
+            "global_imports": {
+                "foo.py": ["import os", "import os", "import sys"],
+            }
+        }
+        result = self.dedup(contract, self.logger)
+        assert result["global_imports"]["foo.py"] == ["import os", "import sys"]
+
+    def test_removes_bare_import_when_from_exists(self):
+        contract = {
+            "global_imports": {
+                "foo.py": [
+                    "from cv2 import VideoCapture",
+                    "import cv2",
+                ],
+            }
+        }
+        result = self.dedup(contract, self.logger)
+        imports = result["global_imports"]["foo.py"]
+        assert "import cv2" not in imports
+        assert "from cv2 import VideoCapture" in imports
+
+    def test_keeps_different_from_imports(self):
+        contract = {
+            "global_imports": {
+                "foo.py": [
+                    "from typing import List",
+                    "from typing import Dict",
+                ],
+            }
+        }
+        result = self.dedup(contract, self.logger)
+        imports = result["global_imports"]["foo.py"]
+        assert len(imports) == 2
+
+
+# ─────────────────────────────────────────────
+# WRONG_PIP_PACKAGES — opencv_python
+# ─────────────────────────────────────────────
+
+class TestWrongPipPackagesOpencv(unittest.TestCase):
+    def test_opencv_python_variant_exists(self):
+        from code_context import WRONG_PIP_PACKAGES
+        assert "opencv_python" in WRONG_PIP_PACKAGES
+        assert WRONG_PIP_PACKAGES["opencv_python"][1] == "cv2"
+
+    def test_opencv_python_headless_variant_exists(self):
+        from code_context import WRONG_PIP_PACKAGES
+        assert "opencv_python_headless" in WRONG_PIP_PACKAGES
+        assert WRONG_PIP_PACKAGES["opencv_python_headless"][1] == "cv2"

@@ -24,6 +24,35 @@ def sanitize_llm_code(code: str) -> str:
     return code.strip()
 
 
+def check_truncated_code(code: str) -> str:
+    """Проверяет код на признаки усечения (LLM исчерпал max_tokens).
+
+    Возвращает сообщение об ошибке или пустую строку если всё ок.
+    """
+    if not code or not code.strip():
+        return ""
+    lines = code.rstrip().splitlines()
+    if not lines:
+        return ""
+    # Признак 1: последняя строка — незакрытый комментарий-заглушка (# ...)
+    last = lines[-1].strip()
+    if last in ("# ...", "# …", "...", "…"):
+        return (
+            "Код обрезан — последняя строка '# ...' указывает на незавершённый код. "
+            "Сократи реализацию или разбей на части."
+        )
+    # Признак 2: SyntaxError на последних строках — вероятно обрезка
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        if e.lineno and len(lines) > 3 and e.lineno >= len(lines) - 2:
+            return (
+                f"Код обрезан на строке {e.lineno}: {e.msg}. "
+                f"Вероятно исчерпан лимит токенов. Сократи реализацию."
+            )
+    return ""
+
+
 def apply_search_replace(code: str, changes: list[dict]) -> str | None:
     """Применяет search/replace патчи к коду.
 

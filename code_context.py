@@ -279,6 +279,8 @@ PIP_TO_IMPORT: dict[str, str] = {
 # wrong_pip_name → (correct_pip_name, correct_import_name)
 WRONG_PIP_PACKAGES: dict[str, tuple[str, str]] = {
     "opencv":                    ("opencv-python-headless", "cv2"),
+    "opencv_python":             ("opencv-python-headless", "cv2"),
+    "opencv_python_headless":    ("opencv-python-headless", "cv2"),
     "cv2":                       ("opencv-python-headless", "cv2"),
     "tensorflow-gpu":            ("tensorflow",             "tensorflow"),
     "sklearn":                   ("scikit-learn",           "sklearn"),

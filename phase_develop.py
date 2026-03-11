@@ -25,7 +25,8 @@ from artifacts import update_artifact_a9, save_artifact
 from contract import patch_contract_for_file
 from cache import ThreadSafeCache
 from checks import (
-    sanitize_llm_code, ensure_a5_imports, apply_search_replace,
+    sanitize_llm_code, check_truncated_code, ensure_a5_imports,
+    apply_search_replace,
     check_function_preservation, check_class_duplication,
     check_import_shadowing, check_data_only_violations,
     check_stub_functions, check_contract_compliance,
@@ -266,6 +267,20 @@ def _run_checks(
     Возвращает (check_name, feedback) при первом провале, или None если все проверки пройдены.
     """
     req_path = src_path / "requirements.txt"
+
+    # 0. Синтаксическая валидность (ast.parse) — код с SyntaxError пройдёт ВСЕ
+    # остальные проверки молча (они ловят SyntaxError и возвращают [])
+    if language == "python":
+        try:
+            import ast as _ast
+            _ast.parse(code)
+        except SyntaxError as e:
+            line_info = f" (строка {e.lineno})" if e.lineno else ""
+            return "syntax", (
+                f"АВТОМАТИЧЕСКИЙ REJECT — SyntaxError{line_info}: {e.msg}\n\n"
+                f"Код содержит синтаксическую ошибку и не может быть выполнен.\n"
+                f"Исправь синтаксис и верни ПОЛНЫЙ рабочий файл."
+            )
 
     # 1. Потеря функций из предыдущей версии
     if existing_code:
@@ -537,24 +552,36 @@ def _generate_skeleton(
             if isinstance(imp, str):
                 skeleton_parts.append(imp)
         skeleton_parts.append("")
+    in_class = False  # Трекаем: следующие методы (self/cls) — внутри класса
     for item in file_contract:
         if not isinstance(item, dict):
             continue
-        sig = item.get("signature", "")
+        sig = item.get("signature", "").strip()
         hints = item.get("implementation_hints", "")
         desc = item.get("description", "")
-        if sig.strip().startswith("class "):
-            skeleton_parts.append(f"{sig}:")
+        if sig.startswith("class "):
+            # Чистим остатки "class X: ..." → "class X"
+            clean_sig = re.sub(r"\s*:\s*\.{3,}\s*$", "", sig)
+            clean_sig = re.sub(r"\s*\.{3,}\s*$", "", clean_sig).rstrip(": ")
+            in_class = True
+            skeleton_parts.append(f"{clean_sig}:")
             skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
-            skeleton_parts.append(f"    # TODO: {hints}")
+            if hints:
+                skeleton_parts.append(f"    # TODO: {hints}")
             skeleton_parts.append(f"    pass")
             skeleton_parts.append("")
-        elif sig.strip().startswith(("def ", "async def ")):
-            skeleton_parts.append(f"{sig}:")
-            skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
-            skeleton_parts.append(f"    # Алгоритм: {hints}")
-            skeleton_parts.append(f"    pass")
+        elif sig.startswith(("def ", "async def ")):
+            # Определяем: это метод класса (self/cls) или модульная функция?
+            is_method = in_class and re.search(r"\(\s*(?:self|cls)\b", sig)
+            indent = "    " if is_method else ""
+            skeleton_parts.append(f"{indent}{sig}:")
+            skeleton_parts.append(f"{indent}    \"\"\"{desc}\"\"\"")
+            if hints:
+                skeleton_parts.append(f"{indent}    # Алгоритм: {hints}")
+            skeleton_parts.append(f"{indent}    pass")
             skeleton_parts.append("")
+            if not is_method:
+                in_class = False  # Модульная функция — выходим из контекста класса
     skeleton_code = "\n".join(skeleton_parts)
     file_path.write_text(skeleton_code, encoding="utf-8")
     return skeleton_code
@@ -771,6 +798,14 @@ async def phase_develop(
             state["feedbacks"][current_file] = "Агент вернул пустой код."
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
+            continue
+
+        # Проверка усечения: LLM мог исчерпать max_tokens и обрезать код
+        truncation_msg = check_truncated_code(code)
+        if truncation_msg:
+            logger.warning(f"  ⚠️  {current_file}: {truncation_msg}")
+            _reject_file(state, file_attempts, cumulative_attempts, current_file,
+                         attempt, total_attempts, truncation_msg, stats, dev_model, logger)
             continue
 
         # Проверка: если код — только imports + пустые строки (модель не написала тело функций),

@@ -1,4 +1,4 @@
-# 📄 Проект "Ситуационный центр"
+# 📄 Проект "Фабрика_разработки"
 
 ## 📝 Описание
 
@@ -22,6 +22,7 @@
 
 ├── ai_factory/
 │   ├────── README.md
+│   ├────── RUN.md
 │   ├────── ai_factory.py
 │   ├────── artifacts.py
 │   ├────── cache.py
@@ -59,221 +60,133 @@
 │   ├── .pytest_cache/
 │   ├── documents/
 │   ├── .git/
-│   │   ├── info/
-│   │   ├── refs/
-│   │   │   ├── remotes/
-│   │   │   │   ├── origin/
-│   │   │   ├── tags/
-│   │   │   ├── heads/
-│   │   ├── objects/
-│   │   │   ├── 14/
-│   │   │   ├── 5e/
-│   │   │   ├── e1/
-│   │   │   ├── 60/
-│   │   │   ├── d6/
-│   │   │   ├── 16/
-│   │   │   ├── 77/
-│   │   │   ├── 6a/
-│   │   │   ├── a6/
-│   │   │   ├── info/
-│   │   │   ├── fc/
-│   │   │   ├── ac/
-│   │   │   ├── 44/
-│   │   │   ├── c9/
-│   │   │   ├── 42/
-│   │   │   ├── 2a/
-│   │   │   ├── 21/
-│   │   │   ├── ff/
-│   │   │   ├── 3f/
-│   │   │   ├── 4d/
-│   │   │   ├── 7e/
-│   │   │   ├── 4f/
-│   │   │   ├── cb/
-│   │   │   ├── 8e/
-│   │   │   ├── 82/
-│   │   │   ├── f9/
-│   │   │   ├── 37/
-│   │   │   ├── b9/
-│   │   │   ├── 56/
-│   │   │   ├── 90/
-│   │   │   ├── 4c/
-│   │   │   ├── 95/
-│   │   │   ├── aa/
-│   │   │   ├── da/
-│   │   │   ├── 78/
-│   │   │   ├── 50/
-│   │   │   ├── 36/
-│   │   │   ├── 1d/
-│   │   │   ├── 7c/
-│   │   │   ├── 38/
-│   │   │   ├── 2f/
-│   │   │   ├── 1e/
-│   │   │   ├── 6b/
-│   │   │   ├── a1/
-│   │   │   ├── 0f/
-│   │   │   ├── 7a/
-│   │   │   ├── 6d/
-│   │   │   ├── de/
-│   │   │   ├── 46/
-│   │   │   ├── a8/
-│   │   │   ├── d4/
-│   │   │   ├── 5f/
-│   │   │   ├── c8/
-│   │   │   ├── 7f/
-│   │   │   ├── 32/
-│   │   │   ├── e5/
-│   │   │   ├── 1a/
-│   │   │   ├── 73/
-│   │   │   ├── 40/
-│   │   │   ├── df/
-│   │   │   ├── d9/
-│   │   │   ├── 81/
-│   │   │   ├── 58/
-│   │   │   ├── cf/
-│   │   │   ├── 92/
-│   │   │   ├── c6/
-│   │   │   ├── b6/
-│   │   │   ├── 00/
-│   │   │   ├── e6/
-│   │   │   ├── 70/
-│   │   │   ├── 9b/
-│   │   │   ├── 72/
-│   │   │   ├── 06/
-│   │   │   ├── e0/
-│   │   │   ├── af/
-│   │   │   ├── b7/
-│   │   │   ├── e8/
-│   │   │   ├── b2/
-│   │   │   ├── 09/
-│   │   │   ├── e4/
-│   │   │   ├── db/
-│   │   │   ├── 2c/
-│   │   │   ├── 9c/
-│   │   │   ├── f5/
-│   │   │   ├── 6e/
-│   │   │   ├── 96/
-│   │   │   ├── 87/
-│   │   │   ├── b4/
-│   │   │   ├── 48/
-│   │   │   ├── 4e/
-│   │   │   ├── a9/
-│   │   │   ├── ba/
-│   │   │   ├── f0/
-│   │   │   ├── 30/
-│   │   │   ├── 35/
-│   │   │   ├── 83/
-│   │   │   ├── d8/
-│   │   │   ├── 04/
-│   │   │   ├── ec/
-│   │   │   ├── 8b/
-│   │   │   ├── 28/
-│   │   │   ├── 4b/
-│   │   │   ├── ee/
-│   │   │   ├── f8/
-│   │   │   ├── 10/
-│   │   │   ├── 3c/
-│   │   │   ├── ef/
-│   │   │   ├── 34/
-│   │   │   ├── 53/
-│   │   │   ├── 23/
-│   │   │   ├── 07/
-│   │   │   ├── 01/
-│   │   │   ├── ea/
-│   │   │   ├── 59/
-│   │   │   ├── eb/
-│   │   │   ├── 0e/
-│   │   │   ├── 66/
-│   │   │   ├── 03/
-│   │   │   ├── 18/
-│   │   │   ├── 4a/
-│   │   │   ├── 8d/
-│   │   │   ├── 97/
-│   │   │   ├── 0c/
-│   │   │   ├── 3a/
-│   │   │   ├── 80/
-│   │   │   ├── 45/
-│   │   │   ├── d3/
-│   │   │   ├── 3d/
-│   │   │   ├── a7/
-│   │   │   ├── 8f/
-│   │   │   ├── fd/
-│   │   │   ├── 0b/
-│   │   │   ├── 43/
-│   │   │   ├── b8/
-│   │   │   ├── 0a/
-│   │   │   ├── 5c/
-│   │   │   ├── e9/
-│   │   │   ├── bd/
-│   │   │   ├── 12/
-│   │   │   ├── 64/
-│   │   │   ├── f3/
-│   │   │   ├── 8c/
-│   │   │   ├── 51/
-│   │   │   ├── 68/
-│   │   │   ├── 27/
-│   │   │   ├── 57/
-│   │   │   ├── 98/
-│   │   │   ├── ca/
-│   │   │   ├── 39/
-│   │   │   ├── 86/
-│   │   │   ├── a3/
-│   │   │   ├── 9a/
-│   │   │   ├── 55/
-│   │   │   ├── 11/
-│   │   │   ├── 22/
-│   │   │   ├── 31/
-│   │   │   ├── 13/
-│   │   │   ├── 9f/
-│   │   │   ├── 7d/
-│   │   │   ├── ad/
-│   │   │   ├── 05/
-│   │   │   ├── b0/
-│   │   │   ├── 74/
-│   │   │   ├── c2/
-│   │   │   ├── 9d/
-│   │   │   ├── ce/
-│   │   │   ├── 29/
-│   │   │   ├── 2e/
-│   │   │   ├── bc/
-│   │   │   ├── 2d/
-│   │   │   ├── 5a/
-│   │   │   ├── 52/
-│   │   │   ├── d1/
-│   │   │   ├── dd/
-│   │   │   ├── f7/
-│   │   │   ├── fa/
-│   │   │   ├── 67/
-│   │   │   ├── 17/
-│   │   │   ├── 6c/
-│   │   │   ├── pack/
-│   │   │   ├── ab/
-│   │   │   ├── b1/
-│   │   │   ├── e2/
-│   │   │   ├── 93/
-│   │   │   ├── 69/
-│   │   │   ├── d7/
-│   │   │   ├── bb/
-│   │   │   ├── d5/
-│   │   │   ├── 6f/
-│   │   │   ├── 89/
-│   │   │   ├── 02/
-│   │   │   ├── c5/
-│   │   │   ├── 2b/
-│   │   │   ├── c4/
-│   │   │   ├── 65/
-│   │   │   ├── a2/
-│   │   │   ├── f1/
-│   │   │   ├── 26/
-│   │   │   ├── 88/
-│   │   │   ├── c0/
-│   │   │   ├── f4/
-│   │   ├── logs/
-│   │   │   ├── refs/
-│   │   │   │   ├── remotes/
-│   │   │   │   │   ├── origin/
-│   │   │   │   ├── heads/
-│   │   ├── hooks/
 ## 💻 Коды основных модулей
+### 📄 `RUN.md`
+
+```markdown
+# Запуск AI Factory
+
+## Требования
+
+- **Python 3.11+**
+- **Docker** — для запуска сгенерированного кода в изолированных контейнерах
+- **Ollama** — локальный LLM сервер
+
+## 1. Установка Docker
+
+```bash
+# Ubuntu/Debian
+sudo apt update && sudo apt install -y docker.io
+sudo systemctl start docker
+sudo usermod -aG docker $USER
+# Перелогиньтесь для применения группы
+```
+
+Проверка: `docker version`
+
+## 2. Установка Ollama
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Проверка: `ollama --version`
+
+## 3. Загрузка моделей
+
+По умолчанию система использует две модели:
+
+```bash
+ollama pull deepseek-coder:6.7b
+ollama pull qwen3:latest
+```
+
+Модели можно переопределить через `.env` (см. раздел "Конфигурация").
+
+## 4. Настройка окружения
+
+```bash
+cd ai_factory
+
+# Создание виртуального окружения
+python -m venv .venv_factory
+source .venv_factory/bin/activate
+
+# Установка зависимостей
+pip install -r requirements.txt
+
+# Копирование конфигурации
+cp .env.example .env
+# Отредактируйте .env — укажите PROJECT_BASE_DIR
+```
+
+## 5. Запуск
+
+```bash
+source .venv_factory/bin/activate
+python ai_factory.py
+```
+
+Система запросит:
+1. Подтверждение запуска (`yes`)
+2. Режим ротации моделей (`n` для стандартного)
+3. Имя проекта (латиница, например `my_app`)
+4. Язык (`python` / `typescript` / `rust`)
+5. Описание задачи
+
+## Конфигурация (.env)
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `PROJECT_BASE_DIR` | `/media/mikhail/RAD/py_proj` | Корневая папка для проектов |
+| `LLM_BASE_URL` | `http://localhost:11434/v1/` | URL Ollama API |
+| `LLM_API_KEY` | `ollama` | API ключ (для Ollama — любой) |
+| `LLM_TIMEOUT` | `300.0` | Таймаут LLM запроса (секунды) |
+| `LLM_MAX_TOKENS` | `16384` | Макс. токенов в ответе |
+| `LOG_LEVEL` | `INFO` | Уровень логирования |
+
+### Настройка моделей и серверов
+
+Вся конфигурация моделей — в файле `models_pool.py`. Каждый агент имеет запись
+с моделью, URL сервера, ключом и параметрами.
+
+Для локальной модели:
+```python
+"developer": [_local("deepseek-coder:6.7b")],
+```
+
+Для модели на удалённом сервере:
+```python
+"developer": [_remote("qwen3:32b",
+                       url="http://work-server:11434/v1/",
+                       key="secret",
+                       timeout=600,
+                       max_tokens=32768,
+                       num_ctx=32768)],
+```
+
+Откройте `models_pool.py` и замените `_local()` на `_remote()` для нужных агентов.
+Агенты с одинаковым URL переиспользуют одно соединение.
+
+## Структура проекта на выходе
+
+```
+<project_name>/
+├── src/                  # Исходный код (чистый контекст для Docker)
+│   ├── main.py           # Точка входа
+│   ├── *.py              # Модули проекта
+│   ├── requirements.txt  # Зависимости
+│   └── tests/            # Unit-тесты
+├── .factory/             # Метаданные (скрыты от Git)
+│   ├── artifacts/        # A0-A10 артефакты
+│   ├── logs/             # Логи агентов
+│   ├── state.json        # Состояние пайплайна
+│   └── cache.json        # Кэш ответов LLM
+├── ARCHITECTURE.md       # Архитектура проекта
+└── .gitignore
+```
+
+```
 ### 📄 `ai_factory.py`
 
 ```python
@@ -3033,6 +2946,7 @@ MAX_CONTEXT_CHARS   = 60_000
 MIN_COVERAGE        = 40
 MAX_ABSOLUTE_ITERS  = 500
 MAX_FILE_ATTEMPTS   = 15
+MAX_CUMULATIVE      = MAX_FILE_ATTEMPTS * 3  # Суммарных попыток до force-approve
 MAX_TEST_ATTEMPTS   = 6      # Попытки регенерации тестов перед де-аппрувом кода
 MAX_PHASE_TOTAL_FAILS = 90   # Абсолютный потолок фейлов одной фазы за весь проект
 MAX_SPEC_REVISIONS    = 9    # Максимум пересмотров спецификации за проект
@@ -4960,7 +4874,7 @@ SYNTAX_HIGHLIGHTING_MAP = {
 
 # Используем "сырую" строку (r""") или экранируем \
 # Также обновим заголовок для лучшего описания
-README_HEADER = r"""# 📄 Проект "Ситуационный центр"
+README_HEADER = r"""# 📄 Проект "Фабрика_разработки"
 
 ## 📝 Описание
 
@@ -5148,6 +5062,7 @@ if __name__ == "__main__":
 ### 📄 `infra.py`
 
 ```python
+import asyncio
 import hashlib
 import logging
 import subprocess
@@ -5165,6 +5080,7 @@ def run_command(
     cwd: Optional[Path] = None,
     timeout: Optional[int] = None,
 ) -> tuple[int, str, str]:
+    """Синхронный запуск команды. Используется для быстрых операций (git, docker version)."""
     try:
         proc = subprocess.Popen(
             args, cwd=cwd,
@@ -5187,6 +5103,37 @@ def run_command(
         return -1, "", f"Команда не найдена или недоступна: {e}"
 
 
+async def run_command_async(
+    args: list[str],
+    cwd: Optional[Path] = None,
+    timeout: Optional[int] = None,
+) -> tuple[int, str, str]:
+    """Асинхронный запуск команды. Не блокирует event loop."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout,
+            )
+            stdout = (stdout_bytes or b"").decode("utf-8", errors="replace")
+            stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
+            return proc.returncode or 0, stdout, stderr
+        except asyncio.TimeoutError:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            return -1, "", f"TIMEOUT: процесс не завершился за {timeout}с."
+    except OSError as e:
+        return -1, "", f"Команда не найдена или недоступна: {e}"
+
+
 def _make_container_name(src_path: Path) -> str:
     """Генерирует детерминированное имя контейнера по пути src_path."""
     return "factory_" + hashlib.sha256(str(src_path).encode()).hexdigest()[:12]
@@ -5197,7 +5144,7 @@ def _cleanup_docker_container(container_name: str) -> None:
     run_command(["docker", "rm", "-f", container_name])
 
 
-def run_in_docker(
+async def run_in_docker(
     src_path: Path,
     command: str,
     timeout: int,
@@ -5211,7 +5158,7 @@ def run_in_docker(
     image          = get_docker_image(language)
     container_name = _make_container_name(src_path)
     volume_spec    = f"{src_path}:/app:ro" if read_only else f"{src_path}:/app"
-    result = run_command(
+    result = await run_command_async(
         [
             "docker", "run", "--rm",
             "--name", container_name,
@@ -5230,9 +5177,9 @@ def run_in_docker(
     return result
 
 
-def build_docker_image(src_path: Path, tag: str) -> tuple[bool, str, str]:
+async def build_docker_image(src_path: Path, tag: str) -> tuple[bool, str, str]:
     """Dockerfile должен лежать в src/."""
-    rc, stdout, stderr = run_command(
+    rc, stdout, stderr = await run_command_async(
         ["docker", "build", "-t", tag, "."],
         cwd=src_path, timeout=RUN_TIMEOUT,
     )
@@ -5579,10 +5526,10 @@ from typing import Protocol, runtime_checkable
 
 import httpx
 
-from config import CACHEABLE_AGENTS, LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_NUM_CTX, MAX_LLM_RETRIES
+from config import CACHEABLE_AGENTS, MAX_LLM_RETRIES
 from cache import ThreadSafeCache, cache_key
 from exceptions import LLMError
-from log_utils import get_model, log_model_choice, log_interaction
+from log_utils import get_model_config, log_model_choice, log_interaction
 from json_utils import extract_json_from_text
 from lang_utils import get_system_prompt
 
@@ -5599,8 +5546,6 @@ def _strip_garbage_tokens(text: str) -> str:
 
 
 # ── LLM Backend Protocol ─────────────────────────────────────────────────────
-# Для смены провайдера (Ollama → OpenAI, Anthropic, litellm) достаточно
-# реализовать этот протокол и присвоить экземпляр в _backend.
 
 @runtime_checkable
 class LLMBackend(Protocol):
@@ -5619,11 +5564,17 @@ class LLMBackend(Protocol):
 class OllamaBackend:
     """Ollama native /api/chat streaming backend."""
 
-    def __init__(self, base_url: str, num_ctx: int, overall_timeout: float) -> None:
+    def __init__(
+        self, base_url: str, num_ctx: int, overall_timeout: float,
+        api_key: str = "",
+    ) -> None:
         ollama_base = base_url.rstrip("/").removesuffix("/v1").removesuffix("/v1/")
         self._chat_url = f"{ollama_base}/api/chat"
         self._num_ctx = num_ctx
         self._overall_timeout = overall_timeout
+        self._headers: dict[str, str] = {}
+        if api_key and api_key != "ollama":
+            self._headers["Authorization"] = f"Bearer {api_key}"
         # read=120с — только между чанками (stream=True)
         self._http_timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
 
@@ -5635,7 +5586,9 @@ class OllamaBackend:
         max_tokens: int,
         json_mode: bool = False,
     ) -> tuple[str, str]:
-        async with httpx.AsyncClient(timeout=self._http_timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=self._http_timeout, headers=self._headers,
+        ) as client:
             return await asyncio.wait_for(
                 self._stream(client, model, messages, temperature, max_tokens, json_mode),
                 timeout=self._overall_timeout,
@@ -5692,9 +5645,25 @@ class OllamaBackend:
         return content, done_reason
 
 
-# Бэкенд по умолчанию — Ollama. Для смены:
-#   import llm; llm._backend = MyCloudBackend(...)
-_backend: LLMBackend = OllamaBackend(LLM_BASE_URL, LLM_NUM_CTX, LLM_TIMEOUT)
+# ── Backend cache ─────────────────────────────────────────────────────────────
+# Бэкенды кэшируются по (url, num_ctx, timeout, key) — один инстанс на уникальный сервер.
+
+_backend_cache: dict[tuple, OllamaBackend] = {}
+
+
+def _get_or_create_backend(config: dict) -> OllamaBackend:
+    """Возвращает OllamaBackend для конфига, создаёт если нет в кэше."""
+    cache_key_tuple = (config["url"], config["num_ctx"], config["timeout"], config["key"])
+    backend = _backend_cache.get(cache_key_tuple)
+    if backend is None:
+        backend = OllamaBackend(
+            base_url=config["url"],
+            num_ctx=config["num_ctx"],
+            overall_timeout=config["timeout"],
+            api_key=config.get("key", ""),
+        )
+        _backend_cache[cache_key_tuple] = backend
+    return backend
 
 
 AGENT_TEMPERATURES: dict[str, float] = {
@@ -5742,7 +5711,11 @@ async def ask_agent(
     language: str = "python",
     max_retries: int = MAX_LLM_RETRIES,
 ) -> dict:
-    model = get_model(agent, attempt, randomize=randomize)
+    config = get_model_config(agent, attempt, randomize=randomize)
+    model = config["model"]
+    max_tokens = config["max_tokens"]
+    backend = _get_or_create_backend(config)
+
     log_model_choice(logger, agent, model, attempt)
 
     ckey = cache_key(agent, model, user_text, language) if agent in CACHEABLE_AGENTS and attempt == 0 else None
@@ -5768,13 +5741,13 @@ async def ask_agent(
             await asyncio.sleep(delay)
         raw: str | None = None
         try:
-            raw, done_reason = await _backend.chat(
-                model, messages, temperature, LLM_MAX_TOKENS, json_mode=True,
+            raw, done_reason = await backend.chat(
+                model, messages, temperature, max_tokens, json_mode=True,
             )
             if not raw:
                 raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json)")
             if done_reason == "length":
-                logger.warning(f"[{agent}:{model}] ответ обрезан (done_reason=length, num_predict={LLM_MAX_TOKENS})")
+                logger.warning(f"[{agent}:{model}] ответ обрезан (done_reason=length, num_predict={max_tokens})")
             result = json.loads(raw)
             if not isinstance(result, dict) or not result:
                 raise json.JSONDecodeError(
@@ -5791,8 +5764,8 @@ async def ask_agent(
                 continue  # retry без fallback на plain text
             logger.warning(f"[{agent}:{model}] json_object failed: {e}, пробую plain text...")
             try:
-                raw, done_reason = await _backend.chat(
-                    model, messages, temperature, LLM_MAX_TOKENS, json_mode=False,
+                raw, done_reason = await backend.chat(
+                    model, messages, temperature, max_tokens, json_mode=False,
                 )
                 if not raw:
                     raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (plain)")
@@ -5827,14 +5800,18 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from config import FACTORY_DIR, LOGS_DIR, LOG_LEVEL, LOG_FILE_MAX_BYTES, LOG_INTERACTION_CHARS
-from models_pool import MODEL_POOLS
+from models_pool import MODEL_POOLS, DEFAULT_CONFIG
+
+
+def get_model_config(agent: str, attempt: int = 0, randomize: bool = False) -> dict:
+    """Возвращает полный конфиг: {model, url, key, timeout, max_tokens, num_ctx}."""
+    pool = MODEL_POOLS.get(agent, [DEFAULT_CONFIG])
+    return random.choice(pool) if randomize else pool[attempt % len(pool)]
 
 
 def get_model(agent: str, attempt: int = 0, randomize: bool = False) -> str:
-    pool = MODEL_POOLS.get(agent, ["qwen3:latest"])
-    if randomize:
-        return random.choice(pool)
-    return pool[attempt % len(pool)]
+    """Возвращает имя модели (для логов и статистики)."""
+    return get_model_config(agent, attempt, randomize)["model"]
 
 
 def log_model_choice(logger: logging.Logger, agent: str, model: str, attempt: int) -> None:
@@ -5926,30 +5903,81 @@ def log_runtime_error(project_path: Path, stderr: str) -> None:
 ### 📄 `models_pool.py`
 
 ```python
-# ── Пулы моделей по роли ─────────────────────────────────────────────────────
-MODEL_POOLS: dict[str, list[str]] = {
-    "developer":        ["deepseek-coder:6.7b"],
-    "developer_patch":  ["deepseek-coder:6.7b"],
-    "reviewer":         ["deepseek-coder:6.7b"],
-    "e2e_architect":    ["qwen3:latest"],
-    "e2e_qa":           ["qwen3:latest"],
-    "qa_runtime":       ["deepseek-coder:6.7b"],
-    "business_analyst": ["qwen3:latest"],
-    "system_analyst":   ["deepseek-coder:6.7b"],
-    "architect":        ["deepseek-coder:6.7b"],
-    "spec_reviewer":    ["qwen3:latest"],
-    "test_generator":   ["deepseek-coder:6.7b"],
-    "documenter":       ["qwen3:latest"],
-    "devops_runtime":   ["qwen3:latest"],
-    "arch_validator":   ["deepseek-coder:6.7b"],
-    "supervisor":       ["qwen3:latest"],
-    "self_reflect":     ["deepseek-coder:6.7b"],
-    "contract_analyst": ["deepseek-coder:6.7b"],
-    "a5_validator":          ["deepseek-coder:6.7b"],
-    "a5_business_reviewer":  ["qwen3:latest"],
-    "a5_architect_reviewer": ["qwen3:latest"],
-    "a5_contract_reviewer":  ["deepseek-coder:6.7b"],
+"""
+Конфигурация моделей для каждого агента.
+
+Чтобы переключить агента на другой сервер или модель —
+просто отредактируй соответствующую запись в MODEL_POOLS.
+"""
+
+from config import LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_NUM_CTX
+
+# Значения по умолчанию (из .env / config.py) — чтобы не дублировать в каждой записи
+_D = {
+    "url": LLM_BASE_URL,
+    "key": LLM_API_KEY,
+    "timeout": LLM_TIMEOUT,
+    "max_tokens": LLM_MAX_TOKENS,
+    "num_ctx": LLM_NUM_CTX,
 }
+
+
+def _local(model: str) -> dict:
+    """Локальная модель с дефолтными параметрами."""
+    return {"model": model, **_D}
+
+
+def _remote(model: str, url: str, key: str = "ollama",
+            timeout: float = 0, max_tokens: int = 0, num_ctx: int = 0) -> dict:
+    """Удалённая модель с кастомными параметрами."""
+    return {
+        "model": model,
+        "url": url,
+        "key": key,
+        "timeout": timeout or _D["timeout"],
+        "max_tokens": max_tokens or _D["max_tokens"],
+        "num_ctx": num_ctx or _D["num_ctx"],
+    }
+
+
+# ── Пулы моделей по роли ─────────────────────────────────────────────────────
+# Каждая запись: {model, url, key, timeout, max_tokens, num_ctx}
+#
+# Примеры:
+#   _local("deepseek-coder:6.7b")           — локальный Ollama
+#   _local("qwen3:latest")                   — локальный Ollama, другая модель
+#   _remote("qwen3:32b",                     — удалённый сервер
+#           url="http://work-server:11434/v1/",
+#           key="secret", timeout=600,
+#           max_tokens=32768, num_ctx=32768)
+
+MODEL_POOLS: dict[str, list[dict]] = {
+    "developer":             [_local("deepseek-coder:6.7b")],
+    "developer_patch":       [_local("deepseek-coder:6.7b")],
+    "reviewer":              [_local("deepseek-coder:6.7b")],
+    "e2e_architect":         [_local("qwen3:latest")],
+    "e2e_qa":                [_local("qwen3:latest")],
+    "qa_runtime":            [_local("deepseek-coder:6.7b")],
+    "business_analyst":      [_local("qwen3:latest")],
+    "system_analyst":        [_local("deepseek-coder:6.7b")],
+    "architect":             [_local("deepseek-coder:6.7b")],
+    "spec_reviewer":         [_local("qwen3:latest")],
+    "test_generator":        [_local("deepseek-coder:6.7b")],
+    "documenter":            [_local("qwen3:latest")],
+    "devops_runtime":        [_local("qwen3:latest")],
+    "arch_validator":        [_local("deepseek-coder:6.7b")],
+    "supervisor":            [_local("qwen3:latest")],
+    "self_reflect":          [_local("deepseek-coder:6.7b")],
+    "contract_analyst":      [_local("deepseek-coder:6.7b")],
+    "a5_validator":          [_local("deepseek-coder:6.7b")],
+    "a5_business_reviewer":  [_local("qwen3:latest")],
+    "a5_architect_reviewer": [_local("qwen3:latest")],
+    "a5_contract_reviewer":  [_local("deepseek-coder:6.7b")],
+}
+
+# Конфиг по умолчанию (для неизвестных агентов)
+DEFAULT_CONFIG: dict = _local("deepseek-coder:6.7b")
+
 ```
 ### 📄 `phase_develop.py`
 
@@ -5962,11 +5990,9 @@ from pathlib import Path
 from typing import Optional
 
 from config import (
-    MAX_FILE_ATTEMPTS, MAX_CONTEXT_CHARS, SRC_DIR,
+    MAX_FILE_ATTEMPTS, MAX_CUMULATIVE, MAX_CONTEXT_CHARS, SRC_DIR,
     MAX_A5_PATCHES_PER_FILE, SELF_REFLECT_RETRIES, TRUNCATE_FEEDBACK,
 )
-
-MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3  # После 15 суммарных попыток — принудительный APPROVE
 
 from exceptions import LLMError
 from llm import ask_agent
@@ -6440,6 +6466,147 @@ def _build_dev_context(
     return dev_ctx
 
 
+def _try_force_approve(
+    logger: logging.Logger,
+    state: dict,
+    src_path: Path,
+    current_file: str,
+    total_attempts: int,
+    file_attempts: dict[str, int],
+) -> str:
+    """Проверяет force-approve mode. Возвращает: 'approved', 'write_without_checks', 'normal'."""
+    if total_attempts < MAX_CUMULATIVE:
+        return "normal"
+
+    file_path = src_path / current_file
+    if file_path.exists() and file_path.read_text(encoding="utf-8").strip():
+        gi = safe_contract(state).get("global_imports", {}).get(current_file, [])
+        if gi:
+            existing = file_path.read_text(encoding="utf-8")
+            patched = ensure_a5_imports(existing, gi)
+            if patched != existing:
+                file_path.write_text(patched, encoding="utf-8")
+                logger.info(f"  📎 {current_file}: A5 imports авто-инжектированы при force-approve")
+        logger.warning(
+            f"⚠️  {current_file} не прошёл ревью за {total_attempts} суммарных попыток "
+            f"→ принудительный APPROVE (код есть, проверим при интеграции)."
+        )
+        approved = state.setdefault("approved_files", [])
+        if current_file not in approved:
+            approved.append(current_file)
+        state["feedbacks"][current_file] = ""
+        file_attempts[current_file] = 0
+        return "approved"
+    else:
+        logger.warning(
+            f"⚠️  {current_file}: cumulative={total_attempts} но файла нет на диске "
+            f"→ пишем код без проверок."
+        )
+        file_attempts[current_file] = 0
+        return "write_without_checks"
+
+
+def _generate_skeleton(
+    logger: logging.Logger,
+    file_contract: list,
+    global_imports: list,
+    file_path: Path,
+    current_file: str,
+) -> str:
+    """Генерирует скелет из A5 контракта. Возвращает код скелета."""
+    logger.warning(f"  ⚠️  {current_file}: developer вернул код без функций/классов — генерирую скелет из A5")
+    skeleton_parts: list[str] = []
+    if global_imports:
+        for imp in global_imports:
+            if isinstance(imp, str):
+                skeleton_parts.append(imp)
+        skeleton_parts.append("")
+    for item in file_contract:
+        if not isinstance(item, dict):
+            continue
+        sig = item.get("signature", "")
+        hints = item.get("implementation_hints", "")
+        desc = item.get("description", "")
+        if sig.strip().startswith("class "):
+            skeleton_parts.append(f"{sig}:")
+            skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
+            skeleton_parts.append(f"    # TODO: {hints}")
+            skeleton_parts.append(f"    pass")
+            skeleton_parts.append("")
+        elif sig.strip().startswith(("def ", "async def ")):
+            skeleton_parts.append(f"{sig}:")
+            skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
+            skeleton_parts.append(f"    # Алгоритм: {hints}")
+            skeleton_parts.append(f"    pass")
+            skeleton_parts.append("")
+    skeleton_code = "\n".join(skeleton_parts)
+    file_path.write_text(skeleton_code, encoding="utf-8")
+    return skeleton_code
+
+
+async def _self_reflect_with_rollback(
+    logger: logging.Logger,
+    cache: ThreadSafeCache,
+    src_path: Path,
+    current_file: str,
+    code: str,
+    state: dict,
+    stats: ModelStats,
+    randomize: bool,
+    file_path: Path,
+    file_contract: list,
+    global_context: str,
+    global_imports: list,
+    language: str,
+) -> tuple[str, str]:
+    """Self-Reflect с откатом при ошибках. Возвращает (итоговый_код, sr_feedback)."""
+    sr_status, sr_feedback = await do_self_reflect(
+        logger, cache, src_path, current_file, code, state, stats, randomize
+    )
+    if sr_status == "NEEDS_IMPROVEMENT":
+        new_code = file_path.read_text(encoding="utf-8")
+        sr_check = _run_checks(
+            new_code, code, current_file, state, file_contract,
+            global_context, global_imports, language, src_path,
+        )
+        if sr_check:
+            logger.warning(f"  ⚠️  Self-reflect ввёл ошибки ({sr_check[0]}) → откат")
+            file_path.write_text(code, encoding="utf-8")
+        else:
+            code = new_code
+    return code, sr_feedback
+
+
+def _approve_file(
+    logger: logging.Logger,
+    state: dict,
+    project_path: Path,
+    current_file: str,
+    attempt: int,
+    dev_model: str,
+    stats: ModelStats,
+    file_attempts: dict[str, int],
+) -> None:
+    """Одобряет файл: обновляет статистику, state, записывает опыт."""
+    stats.record("developer", dev_model, True)
+    logger.info(f"✅ {current_file} одобрен.")
+    prev_feedback = state.get("feedbacks", {}).get(current_file, "")
+    if prev_feedback and attempt > 0:
+        record_experience(
+            error_pattern=prev_feedback[:500],
+            fix_description=f"Файл {current_file} исправлен на попытке {attempt + 1}",
+            category="develop",
+            file=current_file,
+        )
+    approved = state.setdefault("approved_files", [])
+    if current_file not in approved:
+        approved.append(current_file)
+    state["feedbacks"][current_file] = ""
+    state.setdefault("feedback_history", {})[current_file] = []
+    file_attempts[current_file] = 0
+    update_artifact_a9(project_path, current_file, f"Одобрен на попытке {attempt + 1}. Модель: {dev_model}.")
+
+
 async def phase_develop(
     logger: logging.Logger,
     project_path: Path,
@@ -6469,36 +6636,12 @@ async def phase_develop(
         total_attempts = cumulative_attempts.get(current_file, 0)
 
         # Предохранитель: файл не проходит ревью после множества попыток → принудительный approve
-        force_approve_mode = total_attempts >= MAX_CUMULATIVE
-        if force_approve_mode:
-            file_path = src_path / current_file
-            if file_path.exists() and file_path.read_text(encoding="utf-8").strip():
-                # Перед force-approve: инжектируем A5 imports в код на диске
-                gi = safe_contract(state).get("global_imports", {}).get(current_file, [])
-                if gi:
-                    existing = file_path.read_text(encoding="utf-8")
-                    patched = ensure_a5_imports(existing, gi)
-                    if patched != existing:
-                        file_path.write_text(patched, encoding="utf-8")
-                        logger.info(f"  📎 {current_file}: A5 imports авто-инжектированы при force-approve")
-                logger.warning(
-                    f"⚠️  {current_file} не прошёл ревью за {total_attempts} суммарных попыток "
-                    f"→ принудительный APPROVE (код есть, проверим при интеграции)."
-                )
-                approved = state.setdefault("approved_files", [])
-                if current_file not in approved:
-                    approved.append(current_file)
-                state["feedbacks"][current_file] = ""
-                file_attempts[current_file] = 0
-                continue
-            else:
-                # Файл не на диске — даём developer ещё попытку, approve после записи
-                logger.warning(
-                    f"⚠️  {current_file}: cumulative={total_attempts} но файла нет на диске "
-                    f"→ пишем код без проверок."
-                )
-                file_attempts[current_file] = 0
-                attempt = 0
+        fa_result = _try_force_approve(logger, state, src_path, current_file, total_attempts, file_attempts)
+        force_approve_mode = fa_result != "normal"
+        if fa_result == "approved":
+            continue
+        if fa_result == "write_without_checks":
+            attempt = 0
 
         if attempt >= MAX_FILE_ATTEMPTS:
             logger.warning(
@@ -6619,41 +6762,12 @@ async def phase_develop(
         code_lines = [ln for ln in code.splitlines() if ln.strip() and not ln.strip().startswith("#")]
         has_functions = any(ln.strip().startswith(("def ", "class ", "async def ")) for ln in code_lines)
         if not has_functions and file_contract and attempt < MAX_FILE_ATTEMPTS - 1:
-            logger.warning(
-                f"  ⚠️  {current_file}: developer вернул код без функций/классов — генерирую скелет из A5"
-            )
-            skeleton_parts = []
-            if global_imports:
-                for imp in global_imports:
-                    if isinstance(imp, str):
-                        skeleton_parts.append(imp)
-                skeleton_parts.append("")
-            for item in file_contract:
-                if not isinstance(item, dict):
-                    continue
-                sig = item.get("signature", "")
-                hints = item.get("implementation_hints", "")
-                desc = item.get("description", "")
-                if sig.strip().startswith("class "):
-                    skeleton_parts.append(f"{sig}:")
-                    skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
-                    skeleton_parts.append(f"    # TODO: {hints}")
-                    skeleton_parts.append(f"    pass")
-                    skeleton_parts.append("")
-                elif sig.strip().startswith(("def ", "async def ")):
-                    skeleton_parts.append(f"{sig}:")
-                    skeleton_parts.append(f"    \"\"\"{desc}\"\"\"")
-                    skeleton_parts.append(f"    # Алгоритм: {hints}")
-                    skeleton_parts.append(f"    pass")
-                    skeleton_parts.append("")
-            skeleton_code = "\n".join(skeleton_parts)
+            _generate_skeleton(logger, file_contract, global_imports, file_path, current_file)
             state["feedbacks"][current_file] = (
                 f"Ты вернул код БЕЗ функций/классов — только импорты.\n"
                 f"НИЖЕ — СКЕЛЕТ из A5 контракта. Заполни ВСЕ функции/классы реальным кодом.\n"
                 f"Убери pass и TODO, напиши ПОЛНУЮ рабочую реализацию по алгоритму в комментариях.\n"
             )
-            # Записываем скелет как existing_code для следующей попытки
-            file_path.write_text(skeleton_code, encoding="utf-8")
             file_attempts[current_file] = attempt + 1
             cumulative_attempts[current_file] = total_attempts + 1
             stats.record("developer", dev_model, False)
@@ -6692,23 +6806,11 @@ async def phase_develop(
 
         file_path.write_text(code, encoding="utf-8")
 
-        # Self-Reflect с проверкой A5
-        sr_status, sr_feedback = await do_self_reflect(
-            logger, cache, src_path, current_file, code, state, stats, randomize
+        # Self-Reflect с откатом при ошибках
+        code, sr_feedback = await _self_reflect_with_rollback(
+            logger, cache, src_path, current_file, code, state, stats, randomize,
+            file_path, file_contract, global_context, global_imports, language,
         )
-        if sr_status == "NEEDS_IMPROVEMENT":
-            # Перечитываем файл — self-reflect мог записать улучшенный код
-            new_code = file_path.read_text(encoding="utf-8")
-            # Повторяем проверки — если self-reflect ввёл ошибки, откатываем
-            sr_check = _run_checks(
-                new_code, code, current_file, state, file_contract,
-                global_context, global_imports, language, src_path,
-            )
-            if sr_check:
-                logger.warning(f"  ⚠️  Self-reflect ввёл ошибки ({sr_check[0]}) → откат")
-                file_path.write_text(code, encoding="utf-8")
-            else:
-                code = new_code
 
         # Внешний ревью
         rev_status, rev_feedback, needs_spec = await _review_file(
@@ -6717,25 +6819,7 @@ async def phase_develop(
         )
 
         if rev_status == "APPROVE":
-            stats.record("developer", dev_model, True)
-            logger.info(f"✅ {current_file} одобрен.")
-            # Записываем опыт: если файл был отклонён, а теперь одобрен → полезный паттерн
-            prev_feedback = state.get("feedbacks", {}).get(current_file, "")
-            if prev_feedback and attempt > 0:
-                record_experience(
-                    error_pattern=prev_feedback[:500],
-                    fix_description=f"Файл {current_file} исправлен на попытке {attempt + 1}",
-                    category="develop",
-                    file=current_file,
-                )
-            approved = state.setdefault("approved_files", [])
-            if current_file not in approved:
-                approved.append(current_file)
-            state["feedbacks"][current_file] = ""
-            state.setdefault("feedback_history", {})[current_file] = []
-            file_attempts[current_file] = 0
-            # Обновляем A9 (Implementation Logs)
-            update_artifact_a9(project_path, current_file, f"Одобрен на попытке {attempt + 1}. Модель: {dev_model}.")
+            _approve_file(logger, state, project_path, current_file, attempt, dev_model, stats, file_attempts)
         else:
             stats.record("developer", dev_model, False)
             combined = "\n".join(filter(None, [to_str(sr_feedback), to_str(rev_feedback)]))
@@ -6776,12 +6860,10 @@ import re
 from pathlib import Path
 
 from config import (
-    MAX_FILE_ATTEMPTS, MAX_TEST_ATTEMPTS, MIN_COVERAGE,
+    MAX_FILE_ATTEMPTS, MAX_CUMULATIVE, MAX_TEST_ATTEMPTS, MIN_COVERAGE,
     FACTORY_DIR, LOGS_DIR, SRC_DIR, RUN_TIMEOUT,
     TRUNCATE_FEEDBACK, TRUNCATE_LOG, TRUNCATE_ERROR_MSG,
 )
-
-MAX_CUMULATIVE = MAX_FILE_ATTEMPTS * 3
 
 from exceptions import LLMError
 from llm import ask_agent
@@ -7053,7 +7135,7 @@ async def phase_integration_test(
         build_success = False
         for build_attempt in range(1, 4):
             logger.info(f"\n🏗️ Сборка Docker-образа (попытка {build_attempt}/3) ...")
-            build_success, _, build_err = build_docker_image(src_path, image_tag)
+            build_success, _, build_err = await build_docker_image(src_path, image_tag)
             if build_success:
                 logger.info("✅ Образ собран.")
                 break
@@ -7093,7 +7175,7 @@ async def phase_integration_test(
             for orig, alt in (env_fixes.get("package_alternatives") or env_fixes.get("pip_alternatives") or {}).items():
                 update_requirements(src_path, orig, alt)
 
-        rc, stdout, stderr = run_in_docker(src_path, cmd, RUN_TIMEOUT, language)
+        rc, stdout, stderr = await run_in_docker(src_path, cmd, RUN_TIMEOUT, language)
 
         # Логи рантайма — в .factory/logs/
         logs_dir = project_path / FACTORY_DIR / LOGS_DIR
@@ -7338,7 +7420,7 @@ async def phase_unit_tests(
 
         logger.info("🚀 Запуск тестов в Docker ...")
         cmd = get_test_command(language)
-        rc, stdout, stderr = run_in_docker(src_path, cmd, RUN_TIMEOUT * 2, language)
+        rc, stdout, stderr = await run_in_docker(src_path, cmd, RUN_TIMEOUT * 2, language)
         last_stderr = stderr
         last_stdout = stdout
 
@@ -8317,6 +8399,8 @@ sniffio==1.3.1
 tqdm==4.67.3
 typing-inspection==0.4.2
 typing_extensions==4.15.0
+python-docx>=1.1.0
+pathspec>=0.12.0
 ```
 ### 📄 `state.py`
 
@@ -11069,7 +11153,9 @@ async def test_ask_agent_returns_dict():
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    with patch("llm._backend.chat", new=AsyncMock(return_value=('{"result": "ok"}', "stop"))):
+    mock_be = MagicMock()
+    mock_be.chat = AsyncMock(return_value=('{"result": "ok"}', "stop"))
+    with patch("llm._get_or_create_backend", return_value=mock_be):
         result = await ask_agent(
             logger, "developer", "test prompt", cache,
             attempt=0, language="python",
@@ -11093,14 +11179,15 @@ async def test_ask_agent_cache_hit():
     key = cache_key("business_analyst", model, "cached text", "python")
     cache[key] = {"cached": True}
 
-    mock_chat = AsyncMock()
-    with patch("llm._backend.chat", new=mock_chat):
+    mock_be = MagicMock()
+    mock_be.chat = AsyncMock()
+    with patch("llm._get_or_create_backend", return_value=mock_be):
         result = await ask_agent(
             logger, "business_analyst", "cached text", cache,
             attempt=0, language="python",
         )
     assert result == {"cached": True}
-    mock_chat.assert_not_called()
+    mock_be.chat.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -11115,9 +11202,9 @@ async def test_ask_agent_raises_llm_error_on_all_retries():
     logger = logging.getLogger("test")
     cache = ThreadSafeCache({})
 
-    with patch("llm._backend.chat", new=AsyncMock(
-        side_effect=httpx.ReadTimeout("timeout")
-    )):
+    mock_be = MagicMock()
+    mock_be.chat = AsyncMock(side_effect=httpx.ReadTimeout("timeout"))
+    with patch("llm._get_or_create_backend", return_value=mock_be):
         with pytest.raises(LLMError):
             await ask_agent(
                 logger, "developer", "fail prompt", cache,
@@ -11144,7 +11231,9 @@ async def test_ask_agent_fallback_plain_text():
             return ("not valid json", "stop")
         return ('some text {"fallback": true} more text', "stop")
 
-    with patch("llm._backend.chat", new=mock_backend_chat):
+    mock_be = MagicMock()
+    mock_be.chat = mock_backend_chat
+    with patch("llm._get_or_create_backend", return_value=mock_be):
         result = await ask_agent(
             logger, "developer", "test", cache,
             attempt=0, max_retries=1,

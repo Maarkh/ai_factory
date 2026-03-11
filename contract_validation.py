@@ -26,12 +26,24 @@ def _auto_add_requirement(requirements_path: Path, package_name: str, logger: lo
         content = requirements_path.read_text(encoding="utf-8")
     except OSError:
         return
-    # Проверяем, не добавлен ли уже
+    # Проверяем, не добавлен ли уже (с учётом семейств пакетов типа opencv)
     pkg_lower = package_name.lower()
+    pkg_norm = pkg_lower.replace("-", "_")
+    # Семейства пакетов, которые конфликтуют друг с другом
+    _PKG_FAMILIES: list[set[str]] = [
+        {"opencv_python", "opencv_python_headless",
+         "opencv_contrib_python", "opencv_contrib_python_headless"},
+    ]
+    pkg_family = {pkg_norm}
+    for family in _PKG_FAMILIES:
+        if pkg_norm in family:
+            pkg_family = family
+            break
     for line in content.splitlines():
         line_pkg = re.split(r"[=<>~!\[;]", line.strip())[0].strip().lower()
-        if line_pkg.replace("-", "_") == pkg_lower.replace("-", "_"):
-            return  # Уже есть
+        line_norm = line_pkg.replace("-", "_")
+        if line_norm == pkg_norm or line_norm in pkg_family:
+            return  # Уже есть (или есть вариант из того же семейства)
     # Добавляем
     if not content.endswith("\n"):
         content += "\n"
@@ -142,6 +154,15 @@ def _normalize_file_contracts(contract: dict) -> dict:
                     # Исправляем сломанные аннотации: ") - str" → ") -> str"
                     val = re.sub(r"\)\s*-\s+(\w)", r") -> \1", val)
                     item[key] = val
+            # Нормализуем class-сигнатуры: "class X: ... " → "class X"
+            # LLM пишет "class X: ..." чтобы показать "тут будут методы", но это
+            # ломает скелет-генерацию и ast.parse
+            sig = item.get("signature", "")
+            if isinstance(sig, str) and sig.strip().startswith("class "):
+                sig = re.sub(r"\s*:\s*\.{3,}\s*$", "", sig)   # "class X: ..." → "class X"
+                sig = re.sub(r"\s*\.{3,}\s*$", "", sig)        # "class X ..." → "class X"
+                sig = sig.rstrip(": ")                          # "class X:" → "class X"
+                item["signature"] = sig
     return contract
 
 
@@ -988,6 +1009,54 @@ def _validate_signature_types(
     return contract
 
 
+def _dedup_global_imports(
+    contract: dict,
+    logger: logging.Logger,
+) -> dict:
+    """Дедупликация global_imports: удаляет семантически одинаковые импорты.
+
+    Правила:
+    - Точные дубликаты удаляются.
+    - 'from X import Y' + 'import X' → оставляем 'from X import Y' (более специфичный).
+    - 'from X import Y' + 'from X import Z' → оставляем оба (разные имена).
+    """
+    gi = contract.get("global_imports", {})
+    if not gi:
+        return contract
+    for fname, imports in gi.items():
+        if not isinstance(imports, list):
+            continue
+        seen: set[str] = set()
+        # Собираем базовые модули из 'from X import Y' (если есть — 'import X' избыточен)
+        from_modules: set[str] = set()
+        for imp in imports:
+            if isinstance(imp, str):
+                m = re.match(r"from\s+(\S+)\s+import", imp.strip())
+                if m:
+                    from_modules.add(m.group(1))
+        deduped: list[str] = []
+        for imp in imports:
+            if not isinstance(imp, str):
+                deduped.append(imp)
+                continue
+            stripped = imp.strip()
+            if stripped in seen:
+                continue
+            # 'import X' избыточен если уже есть 'from X import ...'
+            m_bare = re.match(r"import\s+(\S+)$", stripped)
+            if m_bare and m_bare.group(1) in from_modules:
+                logger.debug(f"  A5 dedup: '{stripped}' для {fname} — есть from-импорт")
+                continue
+            seen.add(stripped)
+            deduped.append(imp)
+        if len(deduped) < len(imports):
+            logger.info(
+                f"  A5 dedup imports: {fname}: {len(imports)} → {len(deduped)}"
+            )
+        gi[fname] = deduped
+    return contract
+
+
 def _dedup_cross_file_classes(
     contract: dict,
     logger: logging.Logger,
@@ -1279,6 +1348,7 @@ def run_a5_validation_pipeline(
     contract = _inject_requirements_imports(contract, requirements_path, logger)
     contract = _inject_cross_file_imports(contract, logger)
     contract = _dedup_cross_file_classes(contract, logger)
+    contract = _dedup_global_imports(contract, logger)
     contract = _validate_signature_types(contract, files, logger)
     contract = _validate_import_consistency(contract, logger)
     contract = _detect_and_fix_circular_imports(contract, files, logger)
