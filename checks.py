@@ -548,6 +548,8 @@ def check_contract_compliance(code: str, file_contract: list) -> list[str]:
 
     missing = []
     for item in file_contract:
+        if not isinstance(item, dict):
+            continue
         if not item.get("required", False):
             continue
         sig = item.get("signature", "")

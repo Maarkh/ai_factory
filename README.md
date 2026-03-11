@@ -143,6 +143,7 @@
 │   │   │   ├── af/
 │   │   │   ├── b7/
 │   │   │   ├── e8/
+│   │   │   ├── b2/
 │   │   │   ├── 09/
 │   │   │   ├── e4/
 │   │   │   ├── db/
@@ -1791,6 +1792,139 @@ def classify_test_error(
         return "test_bug", ""
     return "app_bug", failing_app_file
 
+
+def diagnose_runtime_error(
+    stderr: str, stdout: str, project_files: list[str], src_path: Path,
+) -> dict | None:
+    """Детерминистская диагностика runtime-ошибок БЕЗ вызова LLM.
+
+    Парсит traceback, определяет тип ошибки и генерирует конкретный фидбэк.
+    Возвращает {"file": str, "fix": str, "missing_package": str} или None
+    если ошибка не распознана (нужен LLM).
+    """
+    combined = stderr + "\n" + stdout
+
+    # Извлекаем последнюю строку exception
+    exc_match = re.search(
+        r"^(\w+(?:\.\w+)*(?:Error|Exception|Warning)):\s*(.+)$",
+        combined, re.MULTILINE,
+    )
+    if not exc_match:
+        return None
+
+    exc_type = exc_match.group(1)
+    exc_msg = exc_match.group(2).strip()
+
+    # Файл из traceback (последний файл проекта)
+    from code_context import find_failing_file
+    failing_file = find_failing_file(stderr, stdout, project_files)
+
+    result: dict = {"file": failing_file, "fix": "", "missing_package": ""}
+
+    # ── ModuleNotFoundError / ImportError (отсутствующий пакет) ──
+    if exc_type in ("ModuleNotFoundError", "ImportError"):
+        mod_match = re.search(r"No module named ['\"]?(\w+)", exc_msg)
+        if mod_match:
+            missing_mod = mod_match.group(1)
+            # Маппинг import-имя → pip-пакет
+            from code_context import PIP_TO_IMPORT
+            import_to_pip = {v: k for k, v in PIP_TO_IMPORT.items()}
+            pip_pkg = import_to_pip.get(missing_mod, missing_mod)
+            result["missing_package"] = pip_pkg
+            result["fix"] = (
+                f"Отсутствует модуль '{missing_mod}'. "
+                f"Добавь '{pip_pkg}' в requirements.txt."
+            )
+            return result
+
+        # ImportError: cannot import name 'X' from 'Y'
+        name_match = re.search(
+            r"cannot import name ['\"](\w+)['\"] from ['\"](\w+)['\"]", exc_msg
+        )
+        if name_match:
+            import_name = name_match.group(1)
+            module_name = name_match.group(2)
+            target_file = module_name + ".py"
+            if target_file in project_files:
+                # Проверяем что реально определено в целевом файле
+                target_path = src_path / target_file
+                available = ""
+                if target_path.exists():
+                    try:
+                        from code_context import get_top_level_names
+                        names = get_top_level_names(
+                            target_path.read_text(encoding="utf-8")
+                        )
+                        available = ", ".join(sorted(names - {"__all__"})[:10])
+                    except (OSError, UnicodeDecodeError):
+                        pass
+                result["file"] = failing_file
+                result["fix"] = (
+                    f"ImportError: '{import_name}' не определён в {target_file}. "
+                    f"Доступные имена: {available or '(не удалось прочитать)'}. "
+                    f"Исправь import или добавь '{import_name}' в {target_file}."
+                )
+                return result
+
+    # ── NameError: name 'X' is not defined ──
+    if exc_type == "NameError":
+        name_match = re.search(r"name ['\"](\w+)['\"] is not defined", exc_msg)
+        if name_match:
+            undefined_name = name_match.group(1)
+            result["fix"] = (
+                f"NameError: '{undefined_name}' не определён. "
+                f"Добавь import или определи '{undefined_name}' перед использованием."
+            )
+            return result
+
+    # ── AttributeError: module/object has no attribute 'X' ──
+    if exc_type == "AttributeError":
+        attr_match = re.search(
+            r"(?:module |type object )?['\"]?(\w+)['\"]? has no attribute ['\"](\w+)['\"]",
+            exc_msg,
+        )
+        if attr_match:
+            obj_name = attr_match.group(1)
+            attr_name = attr_match.group(2)
+            # Если obj — файл проекта
+            target_file = obj_name + ".py"
+            if target_file in project_files:
+                result["fix"] = (
+                    f"AttributeError: модуль '{obj_name}' не имеет атрибута '{attr_name}'. "
+                    f"Добавь '{attr_name}' в {target_file} или исправь имя."
+                )
+            else:
+                result["fix"] = (
+                    f"AttributeError: '{obj_name}' не имеет атрибута '{attr_name}'. "
+                    f"Проверь имя метода/атрибута и совместимость API."
+                )
+            return result
+
+    # ── TypeError: missing required argument / got unexpected keyword ──
+    if exc_type == "TypeError":
+        if "missing" in exc_msg and "argument" in exc_msg:
+            result["fix"] = (
+                f"TypeError: {exc_msg}. "
+                f"Проверь сигнатуру вызываемой функции и передай все обязательные аргументы."
+            )
+            return result
+        if "unexpected keyword argument" in exc_msg:
+            result["fix"] = (
+                f"TypeError: {exc_msg}. "
+                f"Убери лишний именованный аргумент или обнови сигнатуру функции."
+            )
+            return result
+
+    # ── SyntaxError ──
+    if exc_type == "SyntaxError":
+        result["fix"] = (
+            f"SyntaxError: {exc_msg}. "
+            f"Проверь синтаксис Python в {failing_file} — скобки, двоеточия, отступы."
+        )
+        return result
+
+    return None
+
 ```
 ### 📄 `code_context.py`
 
@@ -1931,8 +2065,17 @@ def get_a5_deps(current_file: str, global_imports: list, files: list[str]) -> li
     return deps + rest
 
 
-def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
-    """Возвращает файлы в порядке топологической сортировки по импортам."""
+def build_dependency_order(
+    files: list[str],
+    src_path: Path,
+    file_attempts: dict[str, int] | None = None,
+) -> list[str]:
+    """Возвращает файлы в порядке топологической сортировки по импортам.
+
+    При равном indegree (несколько файлов готовы одновременно) приоритет:
+    1. Больше зависимых файлов (dependents) → раньше (разблокирует больше работы)
+    2. Меньше прошлых реджектов → раньше (выше шанс на approve)
+    """
     graph: dict[str, list[str]]  = defaultdict(list)
     indegree: dict[str, int]     = {f: 0 for f in files}
     file_set = set(files)
@@ -1958,15 +2101,25 @@ def build_dependency_order(files: list[str], src_path: Path) -> list[str]:
                 graph[dep].append(f)
                 indegree[f] += 1
 
-    q: deque[str] = deque(f for f in files if indegree[f] == 0)
+    # Подсчёт зависимых (сколько файлов разблокируется после генерации данного)
+    dependents_count = {f: len(graph.get(f, [])) for f in files}
+    attempts = file_attempts or {}
+
+    # Priority key: (-dependents, +attempts, name) — больше зависимых и меньше реджектов = раньше
+    import heapq
+    heap: list[tuple[int, int, str]] = []
+    for f in files:
+        if indegree[f] == 0:
+            heapq.heappush(heap, (-dependents_count[f], attempts.get(f, 0), f))
+
     order: list[str] = []
-    while q:
-        curr = q.popleft()
+    while heap:
+        _, _, curr = heapq.heappop(heap)
         order.append(curr)
         for dep in graph[curr]:
             indegree[dep] -= 1
             if indegree[dep] == 0:
-                q.append(dep)
+                heapq.heappush(heap, (-dependents_count[dep], attempts.get(dep, 0), dep))
 
     if len(order) < len(files):
         order.extend(f for f in files if f not in order)
@@ -6293,8 +6446,8 @@ async def phase_develop(
     """Возвращает (exhausted_files, spec_blocked_files)."""
     language  = state.get("language", "python")
     src_path  = project_path / SRC_DIR
-    order     = build_dependency_order(state["files"], src_path)
     file_attempts: dict[str, int] = state.setdefault("file_attempts", {})
+    order     = build_dependency_order(state["files"], src_path, file_attempts)
     exhausted_files: list[str] = []
     spec_blocked_files: list[str] = []
     # Суммарные попытки (не сбрасываются при revise_spec) — для предохранителя
@@ -6637,7 +6790,7 @@ from code_context import (
 from state import update_dependencies, update_dockerfile, update_requirements
 from infra import run_in_docker, build_docker_image
 from cache import ThreadSafeCache
-from checks import sanitize_llm_code, classify_test_error
+from checks import sanitize_llm_code, classify_test_error, diagnose_runtime_error
 
 # Детекция замаскированных ошибок (rc=0 но traceback в stdout)
 _EXCEPTION_LINE_RE = re.compile(
@@ -7033,24 +7186,34 @@ async def phase_integration_test(
                 logger.exception(f"DevOps (runtime) упал: {e}")
                 stats.record("devops_runtime", get_model("devops_runtime"), False)
 
-        qa_model = get_model("qa_runtime", run_attempt - 1, randomize)
-        fix         = "Смотри traceback."
-        missing_pkg = ""
-        try:
-            qa_resp     = await ask_agent(
-                logger, "qa_runtime",
-                f"Traceback:\n{stderr}\n\nФайл с ошибкой: {failing_file}",
-                cache, run_attempt - 1, randomize, language,
-            )
-            fix         = qa_resp.get("fix", "Смотри traceback.")
-            missing_pkg = qa_resp.get("missing_package", "").strip()
-            agent_file  = qa_resp.get("file", "").strip()
-            if agent_file and agent_file in state["files"]:
-                failing_file = agent_file
-            stats.record("qa_runtime", qa_model, True)
-        except (LLMError, ValueError) as e:
-            logger.exception(f"QA Runtime упал: {e}")
-            stats.record("qa_runtime", qa_model, False)
+        # Детерминистская диагностика — попытка решить без LLM
+        diag = diagnose_runtime_error(stderr, stdout, state["files"], src_path)
+        if diag:
+            fix = diag["fix"]
+            missing_pkg = diag.get("missing_package", "")
+            if diag["file"] and diag["file"] in state["files"]:
+                failing_file = diag["file"]
+            logger.info(f"🔧 Авто-диагностика (без LLM): {fix[:150]}")
+        else:
+            # LLM-анализ только если детерминистика не справилась
+            qa_model = get_model("qa_runtime", run_attempt - 1, randomize)
+            fix         = "Смотри traceback."
+            missing_pkg = ""
+            try:
+                qa_resp     = await ask_agent(
+                    logger, "qa_runtime",
+                    f"Traceback:\n{stderr}\n\nФайл с ошибкой: {failing_file}",
+                    cache, run_attempt - 1, randomize, language,
+                )
+                fix         = qa_resp.get("fix", "Смотри traceback.")
+                missing_pkg = qa_resp.get("missing_package", "").strip()
+                agent_file  = qa_resp.get("file", "").strip()
+                if agent_file and agent_file in state["files"]:
+                    failing_file = agent_file
+                stats.record("qa_runtime", qa_model, True)
+            except (LLMError, ValueError) as e:
+                logger.exception(f"QA Runtime упал: {e}")
+                stats.record("qa_runtime", qa_model, False)
 
         if missing_pkg:
             if language == "python":
@@ -10295,6 +10458,136 @@ class TestExperienceMemory:
         results = self._mod.search_experience("ImportError numpy")
         # First result should be the one with keywords in error field (score 2 per kw vs 1)
         assert "numpy missing" in results[0]["error"]
+
+
+# =====================================================
+# Dynamic File Priority (build_dependency_order)
+# =====================================================
+
+class TestBuildDependencyOrderPriority:
+    def setup_method(self):
+        from code_context import build_dependency_order
+        self.build = build_dependency_order
+
+    def test_more_dependents_first(self):
+        """File with more dependents should come before file with fewer dependents."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            # core.py: no imports (depended on by both a.py and b.py)
+            (src / "core.py").write_text("x = 1", encoding="utf-8")
+            # helpers.py: no imports (depended on by only a.py)
+            (src / "helpers.py").write_text("y = 2", encoding="utf-8")
+            # a.py: imports both core and helpers
+            (src / "a.py").write_text("from core import x\nfrom helpers import y", encoding="utf-8")
+            # b.py: imports only core
+            (src / "b.py").write_text("from core import x", encoding="utf-8")
+
+            files = ["a.py", "b.py", "core.py", "helpers.py"]
+            order = self.build(files, src)
+            # core.py has 2 dependents, helpers.py has 1 → core first
+            assert order.index("core.py") < order.index("helpers.py")
+            # Both come before their dependents
+            assert order.index("core.py") < order.index("a.py")
+            assert order.index("core.py") < order.index("b.py")
+
+    def test_fewer_attempts_first(self):
+        """Files with fewer past rejects should be prioritized when dependents are equal."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            # Two independent files, same dependents (0)
+            (src / "alpha.py").write_text("a = 1", encoding="utf-8")
+            (src / "beta.py").write_text("b = 2", encoding="utf-8")
+
+            files = ["alpha.py", "beta.py"]
+            # alpha has 5 past attempts, beta has 0
+            order = self.build(files, src, file_attempts={"alpha.py": 5, "beta.py": 0})
+            assert order.index("beta.py") < order.index("alpha.py")
+
+    def test_backward_compatible_without_attempts(self):
+        """Calling without file_attempts still works (backward compatibility)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            (src / "a.py").write_text("x = 1", encoding="utf-8")
+            order = self.build(["a.py"], src)
+            assert order == ["a.py"]
+
+
+# =====================================================
+# Deterministic Runtime Debugger (diagnose_runtime_error)
+# =====================================================
+
+class TestDiagnoseRuntimeError:
+    def setup_method(self):
+        from checks import diagnose_runtime_error
+        self.diagnose = diagnose_runtime_error
+
+    def test_module_not_found(self):
+        stderr = 'Traceback (most recent call last):\n  File "main.py", line 1\nModuleNotFoundError: No module named \'numpy\''
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert result["missing_package"] == "numpy"
+        assert "numpy" in result["fix"]
+
+    def test_module_not_found_pip_mapping(self):
+        """cv2 should map to opencv-python-headless pip package."""
+        stderr = "ModuleNotFoundError: No module named 'cv2'"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "opencv" in result["missing_package"]
+
+    def test_cannot_import_name(self):
+        stderr = "ImportError: cannot import name 'Foo' from 'models'"
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            (src / "models.py").write_text("class Bar:\n    pass\n", encoding="utf-8")
+            result = self.diagnose(stderr, "", ["main.py", "models.py"], src)
+        assert result is not None
+        assert "Foo" in result["fix"]
+        assert "Bar" in result["fix"]  # Shows available names
+
+    def test_name_error(self):
+        stderr = "NameError: name 'process_data' is not defined"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "process_data" in result["fix"]
+
+    def test_attribute_error_module(self):
+        stderr = "AttributeError: module 'utils' has no attribute 'helper'"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py", "utils.py"], Path(tmp))
+        assert result is not None
+        assert "helper" in result["fix"]
+        assert "utils" in result["fix"]
+
+    def test_type_error_missing_arg(self):
+        stderr = "TypeError: process() missing 1 required positional argument: 'data'"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "argument" in result["fix"].lower()
+
+    def test_syntax_error(self):
+        stderr = "SyntaxError: invalid syntax"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "синтаксис" in result["fix"].lower() or "Syntax" in result["fix"]
+
+    def test_unknown_error_returns_none(self):
+        stderr = "some random output without exceptions"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is None
+
+    def test_type_error_unexpected_kwarg(self):
+        stderr = "TypeError: foo() got an unexpected keyword argument 'bar'"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.diagnose(stderr, "", ["main.py"], Path(tmp))
+        assert result is not None
+        assert "аргумент" in result["fix"].lower() or "argument" in result["fix"].lower()
 
 ```
 ### 📄 `tests/test_modules.py`

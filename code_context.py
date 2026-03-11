@@ -330,8 +330,8 @@ def parse_requirements(path: Path) -> set[str]:
             continue
         pkg_lower = pkg.lower()
         # Пропускаем невалидные pip-пакеты (LLM-галлюцинации)
-        if pkg in WRONG_PIP_PACKAGES:
-            correct_pip, correct_import = WRONG_PIP_PACKAGES[pkg]
+        if pkg_lower in WRONG_PIP_PACKAGES:
+            correct_pip, correct_import = WRONG_PIP_PACKAGES[pkg_lower]
             result.add(correct_import.lower())
             result.add(correct_pip.lower().replace("-", "_"))
             continue

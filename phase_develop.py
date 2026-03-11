@@ -602,6 +602,7 @@ async def phase_develop(
         last_feedback = state.get("feedbacks", {}).get(current_file, "")
         use_patch = bool(existing_code and last_feedback and attempt >= 1)
         code = ""
+        dev_model = get_model("developer", attempt, randomize=randomize)
 
         if use_patch:
             patch_model = get_model("developer_patch", attempt, randomize=randomize)

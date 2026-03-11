@@ -51,6 +51,8 @@ def load_cache(project_path: Path) -> ThreadSafeCache:
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             import logging
             logging.getLogger(__name__).warning(f"⚠️  Повреждённый кэш {p}, начинаю с пустого.")
