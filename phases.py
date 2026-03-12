@@ -12,6 +12,7 @@ from lang_utils import LANG_DISPLAY
 from artifacts import save_artifact
 from contract import refresh_api_contract, phase_review_api_contract
 from cache import ThreadSafeCache
+from generate_docs import generate_docs_markdown
 
 # Re-exports: ai_factory.py imports these from phases
 from phase_develop import (  # noqa: F401
@@ -35,8 +36,11 @@ async def phase_document(
     cache: ThreadSafeCache,
     randomize: bool = False,
 ) -> None:
-    logger.info("📝 Генерация README.md (A10) ...")
+    src_path = project_path / SRC_DIR
     language = state.get("language", "python")
+
+    # 1) LLM-генерированный README (описание, архитектура, примеры)
+    logger.info("📝 Генерация README.md (A10) ...")
     try:
         resp = await ask_agent(
             logger, "documenter",
@@ -49,13 +53,23 @@ async def phase_document(
             cache, 0, randomize, language,
         )
         readme_text = resp.get("readme", "").strip()
-        # README.md — в корне src/ (виден пользователю)
-        (project_path / SRC_DIR / "README.md").write_text(readme_text, encoding="utf-8")
-        # Также сохраняем как артефакт A10
+        (src_path / "README.md").write_text(readme_text, encoding="utf-8")
         save_artifact(project_path, "A10", readme_text)
         logger.info("✅ README.md сгенерирован (A10 сохранён).")
     except (LLMError, ValueError) as e:
         logger.warning(f"⚠️  Documenter не справился: {e}")
+
+    # 2) Детерминистический справочник — дерево + все исходники
+    logger.info("📝 Генерация PROJECT_DOCS.md (полный код) ...")
+    try:
+        project_name = state.get("project_name", project_path.name)
+        docs_md = generate_docs_markdown(
+            src_path, description=state.get("task", ""), name=project_name,
+        )
+        (src_path / "PROJECT_DOCS.md").write_text(docs_md, encoding="utf-8")
+        logger.info("✅ PROJECT_DOCS.md сгенерирован.")
+    except Exception as e:
+        logger.warning(f"⚠️  generate_docs не справился: {e}")
 
 
 async def revise_spec(
