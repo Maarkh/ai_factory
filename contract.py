@@ -2,7 +2,7 @@ import json
 import logging
 from pathlib import Path
 
-from config import TRUNCATE_CODE
+from config import TRUNCATE_CODE, SRC_DIR
 from exceptions import LLMError
 from llm import ask_agent
 from json_utils import parse_if_str
@@ -107,6 +107,7 @@ async def _validate_and_patch_contract(
     return run_a5_validation_pipeline(
         contract, state.get("architecture", {}), files, logger,
         requirements_path=req_path if req_path.exists() else None,
+        src_path=project_path / SRC_DIR,
     )
 
 
@@ -177,6 +178,7 @@ async def patch_contract_for_file(
             contract = run_a5_validation_pipeline(
                 contract, state.get("architecture", {}), files_list, logger,
                 requirements_path=req_path if req_path.exists() else None,
+                src_path=project_path / SRC_DIR,
             )
             state["api_contract"] = contract
             save_artifact(project_path, "A5", contract)
@@ -290,6 +292,7 @@ async def phase_generate_api_contract(
         contract = run_a5_validation_pipeline(
             contract, arch_resp, files_list, logger,
             requirements_path=req_path if req_path.exists() else None,
+            src_path=project_path / SRC_DIR,
         )
         save_artifact(project_path, "A5", contract)
         logger.info("✅ A5 (API контракт) готов.")
@@ -343,6 +346,7 @@ async def refresh_api_contract(
         new_contract = run_a5_validation_pipeline(
             new_contract, state.get("architecture", {}), files_list, logger,
             requirements_path=req_path if req_path.exists() else None,
+            src_path=project_path / SRC_DIR,
         )
         # Восстановление: если новый A5 потерял валидные импорты из старого A5,
         # сохраняем их, затем прогоняем через validation pipeline для очистки phantom
@@ -365,6 +369,7 @@ async def refresh_api_contract(
             new_contract = run_a5_validation_pipeline(
                 new_contract, state.get("architecture", {}), files_list, logger,
                 requirements_path=req_path if req_path.exists() else None,
+                src_path=project_path / SRC_DIR,
             )
         # Sync: добавляем новые файлы, удаляем призраки
         from state import sync_files_with_a5

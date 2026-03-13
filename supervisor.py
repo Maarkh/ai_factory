@@ -77,9 +77,17 @@ def _is_fallback_unambiguous(state: dict) -> bool:
 
     Пропускаем LLM-вызов supervisor когда нет накопленных провалов фаз
     (LLM supervisor полезен только когда нужно выбрать между escalation/revise_spec).
+    Также пропускаем когда approved < total и develop не падал > 3 раз подряд —
+    ответ однозначно "develop", LLM тут не нужен и может сгаллюцинировать.
     """
     phase_fails = state.get("phase_fail_counts", {})
-    return not any(v > 0 for v in phase_fails.values())
+    if not any(v > 0 for v in phase_fails.values()):
+        return True
+    approved = len(state.get("approved_files", []))
+    total = len(state.get("files", []))
+    if approved < total and phase_fails.get("develop", 0) <= 3:
+        return True
+    return False
 
 
 async def ask_supervisor(
@@ -124,8 +132,21 @@ async def ask_supervisor(
     try:
         result = await ask_agent(logger, "supervisor", sup_ctx, cache, 0, randomize, language)
 
-        # Детерминистская защита от scope creep: максимум 3 revise_spec
         next_phase = result.get("next_phase", "")
+
+        # Детерминистская защита: revise_spec только если фаза реально падала >3 раз подряд
+        if next_phase == "revise_spec":
+            last_phase = state.get("last_phase", "")
+            consecutive = state.get("phase_fail_counts", {}).get(last_phase, 0)
+            if consecutive <= 3:
+                logger.warning(
+                    f"⚠️  Supervisor предложил revise_spec при consecutive={consecutive} <= 3. "
+                    "Принудительно продолжаем с fallback."
+                )
+                result = _fallback_phase(state, f"override: revise_spec при {last_phase} consecutive={consecutive}")
+                return result
+
+        # Детерминистская защита от scope creep: максимум N revise_spec
         spec_count = len(state.get("spec_history", []))
         if next_phase == "revise_spec" and spec_count >= MAX_SPEC_REVISIONS:
             logger.warning(

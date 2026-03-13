@@ -105,11 +105,41 @@ async def revise_spec(
     try:
         new_specs      = await ask_agent(logger, "spec_reviewer", ctx, cache, 0, randomize, language)
         change_summary = new_specs.get("change_summary", "нет описания")
+
+        # Детерминистская защита от scope creep: LLM не должен добавлять
+        # новые компоненты/data_models/business_rules, которых не было в спецификации.
+        old_specs = state.get("system_specs", {})
+        old_component_names = {c["name"] for c in old_specs.get("components", []) if isinstance(c, dict)}
+        old_model_names     = {m["name"] for m in old_specs.get("data_models", []) if isinstance(m, dict)}
+
+        new_components = new_specs.get("components", old_specs.get("components", []))
+        new_models     = new_specs.get("data_models", old_specs.get("data_models", []))
+        new_rules      = new_specs.get("business_rules", old_specs.get("business_rules", []))
+
+        if old_component_names:
+            filtered_components = [c for c in new_components if not isinstance(c, dict) or c.get("name") in old_component_names]
+            if len(filtered_components) < len(new_components):
+                stripped = [c.get("name", "?") for c in new_components if isinstance(c, dict) and c.get("name") not in old_component_names]
+                logger.warning(f"⚠️  spec_reviewer добавил лишние компоненты: {stripped} — отброшены (scope creep)")
+                new_components = filtered_components
+
+        if old_model_names:
+            filtered_models = [m for m in new_models if not isinstance(m, dict) or m.get("name") in old_model_names]
+            if len(filtered_models) < len(new_models):
+                stripped = [m.get("name", "?") for m in new_models if isinstance(m, dict) and m.get("name") not in old_model_names]
+                logger.warning(f"⚠️  spec_reviewer добавил лишние модели: {stripped} — отброшены (scope creep)")
+                new_models = filtered_models
+
+        old_rules_count = len(old_specs.get("business_rules", []))
+        if len(new_rules) > old_rules_count and old_rules_count > 0:
+            logger.warning(f"⚠️  spec_reviewer добавил лишние бизнес-правила ({len(new_rules)} > {old_rules_count}) — обрезаны до исходного количества")
+            new_rules = new_rules[:old_rules_count]
+
         state["system_specs"] = {
-            "data_models":     new_specs.get("data_models", state.get("system_specs", {}).get("data_models", [])),
-            "components":      new_specs.get("components", state.get("system_specs", {}).get("components", [])),
-            "business_rules":  new_specs.get("business_rules", state.get("system_specs", {}).get("business_rules", [])),
-            "external_systems": new_specs.get("external_systems", state.get("system_specs", {}).get("external_systems", [])),
+            "data_models":      new_models,
+            "components":       new_components,
+            "business_rules":   new_rules,
+            "external_systems": new_specs.get("external_systems", old_specs.get("external_systems", [])),
         }
 
         save_artifact(project_path, "A2", state["system_specs"])

@@ -397,12 +397,15 @@ def _validate_global_imports(
             from code_context import WRONG_PIP_PACKAGES
             if base_module in WRONG_PIP_PACKAGES:
                 correct_pip, correct_import = WRONG_PIP_PACKAGES[base_module]
-                corrected = imp_line.replace(base_module, correct_import, 1)
-                logger.warning(
-                    f"  ⚠️  A5 global_imports: '{imp_line}' для {fname} → "
-                    f"'{corrected}' ('{base_module}' невалидный модуль)"
-                )
-                valid_imports.append(corrected)
+                if base_module != correct_import:
+                    corrected = imp_line.replace(base_module, correct_import, 1)
+                    logger.warning(
+                        f"  ⚠️  A5 global_imports: '{imp_line}' для {fname} → "
+                        f"'{corrected}' ('{base_module}' невалидный модуль)"
+                    )
+                    valid_imports.append(corrected)
+                else:
+                    valid_imports.append(imp_line)
                 if requirements_path:
                     _auto_add_requirement(requirements_path, correct_pip, logger)
                 continue
@@ -456,12 +459,16 @@ def _validate_global_imports(
 def _validate_import_consistency(
     contract: dict,
     logger: logging.Logger,
+    src_path: Path | None = None,
 ) -> dict:
     """Проверяет что cross-file imports в global_imports ссылаются на имена из file_contracts.
 
     Для каждого `from project_file import Name`:
     - Если Name не найдено в file_contracts целевого файла → удалить import.
     - Если у целевого файла нет контрактов вовсе → оставить (неполный A5).
+
+    Дополнительно: если src_path доступен, извлекает реальные top-level имена из исходников
+    (class/def), чтобы не удалять импорты, которые есть в коде но отсутствуют в контракте.
     """
     fc = contract.get("file_contracts", {})
     gi = contract.get("global_imports", {})
@@ -482,6 +489,22 @@ def _validate_import_consistency(
                     if n:
                         names.add(n)
         defined_names[stem] = names
+
+    # Дополняем реальными top-level именами из исходников (class/def)
+    if src_path:
+        import ast as _ast
+        for fname in fc:
+            fpath = src_path / fname
+            if not fpath.exists():
+                continue
+            stem = Path(fname).stem
+            try:
+                tree = _ast.parse(fpath.read_text(encoding="utf-8"))
+                for node in _ast.iter_child_nodes(tree):
+                    if isinstance(node, (_ast.ClassDef, _ast.FunctionDef, _ast.AsyncFunctionDef)):
+                        defined_names.setdefault(stem, set()).add(node.name)
+            except (SyntaxError, OSError, UnicodeDecodeError):
+                pass
 
     cleaned_gi: dict[str, list[str]] = {}
     for fname, imports in gi.items():
@@ -1337,6 +1360,7 @@ def run_a5_validation_pipeline(
     files: list[str],
     logger: logging.Logger,
     requirements_path: Path | None = None,
+    src_path: Path | None = None,
 ) -> dict:
     """Полный конвейер детерминистских валидаций A5. Вызывается из 4 мест в contract.py."""
     contract = _validate_global_imports(
@@ -1350,7 +1374,7 @@ def run_a5_validation_pipeline(
     contract = _dedup_cross_file_classes(contract, logger)
     contract = _dedup_global_imports(contract, logger)
     contract = _validate_signature_types(contract, files, logger)
-    contract = _validate_import_consistency(contract, logger)
+    contract = _validate_import_consistency(contract, logger, src_path=src_path)
     contract = _detect_and_fix_circular_imports(contract, files, logger)
     contract = _remove_non_ascii_entries(contract)
     return contract
