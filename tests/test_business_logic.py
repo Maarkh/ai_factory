@@ -2279,3 +2279,78 @@ class TestWrongPipPackagesNoopFix:
         main_imports = result["global_imports"]["main.py"]
         assert any("from cv2 import VideoCapture" in imp for imp in main_imports), \
             f"from opencv должен замениться на from cv2, но imports={main_imports}"
+
+
+# =====================================================
+# strip_non_a5_cross_imports
+# =====================================================
+
+class TestStripNonA5CrossImports:
+    def setup_method(self):
+        from checks import strip_non_a5_cross_imports
+        self.strip = strip_non_a5_cross_imports
+
+    def test_removes_circular_import(self):
+        """Import из project-файла, которого нет в A5, должен быть удалён."""
+        code = (
+            "import cv2\n"
+            "from number_recognizer import recognize_number\n"
+            "from video_processor import process_frames\n"
+            "\ndef process(): pass\n"
+        )
+        a5_imports = ["import cv2", "from number_recognizer import recognize_number"]
+        project_files = ["video_processor.py", "number_recognizer.py", "main.py"]
+        result = self.strip(code, a5_imports, project_files)
+        assert "from video_processor import process_frames" not in result
+        assert "from number_recognizer import recognize_number" in result
+        assert "import cv2" in result
+
+    def test_keeps_stdlib_and_pip_imports(self):
+        """stdlib и pip-пакеты не считаются project files — не трогаем."""
+        code = (
+            "import os\n"
+            "import numpy as np\n"
+            "from typing import List\n"
+            "from api_client import send_data\n"
+            "\ndef main(): pass\n"
+        )
+        a5_imports = ["from api_client import send_data"]
+        project_files = ["api_client.py", "main.py"]
+        result = self.strip(code, a5_imports, project_files)
+        assert "import os" in result
+        assert "import numpy as np" in result
+        assert "from typing import List" in result
+        assert "from api_client import send_data" in result
+
+    def test_strips_wrong_names_from_valid_source(self):
+        """Если source есть в A5 но с другими именами — оставить только A5 имена."""
+        code = (
+            "from api_client import ApiClient, send_data, FooBar\n"
+            "\ndef main(): pass\n"
+        )
+        a5_imports = ["from api_client import ApiClient"]
+        project_files = ["api_client.py", "main.py"]
+        result = self.strip(code, a5_imports, project_files)
+        assert "ApiClient" in result
+        assert "send_data" not in result
+        assert "FooBar" not in result
+
+    def test_empty_global_imports_keeps_all(self):
+        """Без A5 imports — ничего не делаем."""
+        code = "from video_processor import process\n\ndef main(): pass\n"
+        result = self.strip(code, [], ["video_processor.py", "main.py"])
+        assert "from video_processor import process" in result
+
+    def test_preserves_non_import_lines(self):
+        """Обычный код не затрагивается."""
+        code = (
+            "from config import Config\n"
+            "\n"
+            "class Main:\n"
+            "    def run(self): pass\n"
+        )
+        a5_imports = ["from config import Config"]
+        project_files = ["config.py", "main.py"]
+        result = self.strip(code, a5_imports, project_files)
+        assert "class Main:" in result
+        assert "def run(self): pass" in result

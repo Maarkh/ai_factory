@@ -26,7 +26,7 @@ from contract import patch_contract_for_file
 from cache import ThreadSafeCache
 from checks import (
     sanitize_llm_code, check_truncated_code, ensure_a5_imports,
-    apply_search_replace,
+    strip_non_a5_cross_imports, apply_search_replace,
     check_function_preservation, check_class_duplication,
     check_import_shadowing, check_data_only_violations,
     check_stub_functions, check_contract_compliance,
@@ -515,6 +515,7 @@ def _try_force_approve(
         if gi:
             existing = file_path.read_text(encoding="utf-8")
             patched = ensure_a5_imports(existing, gi)
+            patched = strip_non_a5_cross_imports(patched, gi, state.get("files", []))
             if patched != existing:
                 file_path.write_text(patched, encoding="utf-8")
                 logger.info(f"  📎 {current_file}: A5 imports авто-инжектированы при force-approve")
@@ -827,6 +828,12 @@ async def phase_develop(
         # Авто-инъекция A5 импортов — developer часто забывает import numpy, from typing и т.д.
         if global_imports:
             code = ensure_a5_imports(code, global_imports)
+
+        # Удаление лишних cross-file project imports, которых нет в A5
+        # (LLM часто добавляет циклические / несуществующие импорты из других файлов)
+        project_files = state.get("files", [])
+        if project_files and global_imports:
+            code = strip_non_a5_cross_imports(code, global_imports, project_files)
 
         # Force-approve mode: файл не на диске после MAX_CUMULATIVE попыток →
         # записываем что есть и approve без проверок

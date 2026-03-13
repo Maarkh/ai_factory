@@ -221,6 +221,66 @@ def ensure_a5_imports(code: str, global_imports: list[str]) -> str:
     return code
 
 
+def strip_non_a5_cross_imports(
+    code: str,
+    global_imports: list[str],
+    project_files: list[str],
+) -> str:
+    """Удаляет из кода cross-file project imports, которых нет в A5 global_imports.
+
+    LLM часто добавляет лишние импорты из других файлов проекта (создавая
+    циклические зависимости или ссылаясь на несуществующие имена).
+    Не трогает stdlib, pip-пакеты — только import из файлов проекта.
+    """
+    if not project_files or not code.strip() or not global_imports:
+        return code
+
+    project_stems = {Path(f).stem for f in project_files}
+
+    # Нормализованные A5 imports: stem → set(imported names)
+    a5_sources: dict[str, set[str]] = {}
+    a5_bare: set[str] = set()  # import module (без from)
+    for imp in global_imports:
+        if not isinstance(imp, str):
+            continue
+        m = re.match(r"from\s+([\w.]+)\s+import\s+(.+)", imp.strip())
+        if m:
+            stem = m.group(1).split(".")[0]
+            if stem in project_stems:
+                names = {n.strip().split()[0] for n in m.group(2).split(",") if n.strip()}
+                a5_sources.setdefault(stem, set()).update(names)
+        else:
+            m2 = re.match(r"import\s+([\w.]+)", imp.strip())
+            if m2 and m2.group(1).split(".")[0] in project_stems:
+                a5_bare.add(m2.group(1).split(".")[0])
+
+    lines = code.split("\n")
+    cleaned: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        m = re.match(r"from\s+([\w.]+)\s+import\s+(.+)", stripped)
+        if m:
+            stem = m.group(1).split(".")[0]
+            if stem in project_stems:
+                if stem not in a5_sources:
+                    continue  # Весь import из этого файла — лишний
+                names = [n.strip() for n in m.group(2).split(",") if n.strip()]
+                allowed = [n for n in names if n.split()[0] in a5_sources[stem]]
+                if not allowed:
+                    continue  # Все имена лишние
+                if len(allowed) < len(names):
+                    cleaned.append(f"from {m.group(1)} import {', '.join(allowed)}")
+                    continue
+        else:
+            m2 = re.match(r"import\s+([\w.]+)", stripped)
+            if m2:
+                stem = m2.group(1).split(".")[0]
+                if stem in project_stems and stem not in a5_bare and stem not in a5_sources:
+                    continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
 def check_class_duplication(code: str, global_context: str, file_contract: list | None = None) -> list[str]:
     """Детерминистская проверка: не определяет ли код классы, которые уже есть в других файлах.
     file_contract — A5 контракт текущего файла; классы, ожидаемые по контракту, не считаются дублями.
