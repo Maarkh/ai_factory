@@ -89,7 +89,25 @@ def apply_search_replace(code: str, changes: list[dict]) -> str | None:
                 found = True
                 break
         if not found:
-            return None
+            # Нормализация внутренних пробелов (multiple → single, сохраняя leading whitespace)
+            def _norm_inner(s: str) -> str:
+                stripped = s.lstrip()
+                leading = s[:len(s) - len(stripped)]
+                return leading + re.sub(r" {2,}", " ", stripped)
+
+            norm_search = [_norm_inner(ln.rstrip()) for ln in search.splitlines()]
+            for i in range(len(code_lines) - len(norm_search) + 1):
+                if all(
+                    _norm_inner(code_lines[i + j].rstrip()) == norm_search[j]
+                    for j in range(len(norm_search))
+                ):
+                    replace_lines = replace.splitlines() if replace else [""]
+                    code_lines[i:i + len(norm_search)] = replace_lines
+                    code = "\n".join(code_lines)
+                    found = True
+                    break
+            if not found:
+                return None
     return code
 
 

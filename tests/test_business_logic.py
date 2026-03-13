@@ -1989,3 +1989,293 @@ class TestWrongPipPackagesOpencv(unittest.TestCase):
         from code_context import WRONG_PIP_PACKAGES
         assert "opencv_python_headless" in WRONG_PIP_PACKAGES
         assert WRONG_PIP_PACKAGES["opencv_python_headless"][1] == "cv2"
+
+
+# =====================================================
+# 26. TestFallbackUnambiguous (supervisor._is_fallback_unambiguous)
+# =====================================================
+
+class TestFallbackUnambiguous:
+    """Тестирует supervisor._is_fallback_unambiguous — пропуск LLM когда FSM однозначен."""
+
+    def setup_method(self):
+        from supervisor import _is_fallback_unambiguous
+        self.is_unambiguous = _is_fallback_unambiguous
+
+    def test_no_failures_is_unambiguous(self):
+        """Пустые phase_fail_counts → True (LLM не нужен)."""
+        state = {
+            "phase_fail_counts": {},
+            "approved_files": [],
+            "files": ["main.py"],
+        }
+        assert self.is_unambiguous(state) is True
+
+    def test_develop_low_fails_unambiguous(self):
+        """approved < total, develop=2 → True (ещё не порог для LLM)."""
+        state = {
+            "phase_fail_counts": {"develop": 2},
+            "approved_files": ["models.py"],
+            "files": ["main.py", "models.py", "utils.py"],
+        }
+        assert self.is_unambiguous(state) is True
+
+    def test_develop_high_fails_ambiguous(self):
+        """approved < total, develop=4 → False (нужен LLM supervisor)."""
+        state = {
+            "phase_fail_counts": {"develop": 4},
+            "approved_files": ["models.py"],
+            "files": ["main.py", "models.py", "utils.py"],
+        }
+        assert self.is_unambiguous(state) is False
+
+    def test_all_approved_with_fails_ambiguous(self):
+        """approved == total, e2e fail count > 0 → False (LLM решает escalation)."""
+        state = {
+            "phase_fail_counts": {"e2e_review": 2},
+            "approved_files": ["main.py", "models.py"],
+            "files": ["main.py", "models.py"],
+        }
+        assert self.is_unambiguous(state) is False
+
+
+# =====================================================
+# 27. TestReviseSpecScopeCreep (phases.revise_spec scope creep filter)
+# =====================================================
+
+class TestReviseSpecScopeCreep:
+    """Тестирует логику фильтрации scope creep из revise_spec (phases.py).
+
+    Логика inline: LLM не должен добавлять компоненты/модели/бизнес-правила,
+    которых не было в оригинальной спецификации.
+    """
+
+    def _filter_scope_creep(self, old_specs, new_specs):
+        """Копия логики scope creep фильтрации из phases.revise_spec."""
+        old_component_names = {
+            c["name"] for c in old_specs.get("components", [])
+            if isinstance(c, dict)
+        }
+        old_model_names = {
+            m["name"] for m in old_specs.get("data_models", [])
+            if isinstance(m, dict)
+        }
+
+        new_components = new_specs.get("components", old_specs.get("components", []))
+        new_models = new_specs.get("data_models", old_specs.get("data_models", []))
+        new_rules = new_specs.get("business_rules", old_specs.get("business_rules", []))
+
+        if old_component_names:
+            filtered_components = [
+                c for c in new_components
+                if not isinstance(c, dict) or c.get("name") in old_component_names
+            ]
+            if len(filtered_components) < len(new_components):
+                new_components = filtered_components
+
+        if old_model_names:
+            filtered_models = [
+                m for m in new_models
+                if not isinstance(m, dict) or m.get("name") in old_model_names
+            ]
+            if len(filtered_models) < len(new_models):
+                new_models = filtered_models
+
+        old_rules_count = len(old_specs.get("business_rules", []))
+        if len(new_rules) > old_rules_count and old_rules_count > 0:
+            new_rules = new_rules[:old_rules_count]
+
+        return {
+            "components": new_components,
+            "data_models": new_models,
+            "business_rules": new_rules,
+        }
+
+    def test_strips_new_components(self):
+        """old имеет [EventNotifier], new добавляет [EventNotifier, SupervisorEscalator] → только EventNotifier."""
+        old_specs = {
+            "components": [{"name": "EventNotifier", "type": "service"}],
+            "data_models": [],
+            "business_rules": [],
+        }
+        new_specs = {
+            "components": [
+                {"name": "EventNotifier", "type": "service"},
+                {"name": "SupervisorEscalator", "type": "service"},
+            ],
+            "data_models": [],
+            "business_rules": [],
+        }
+        result = self._filter_scope_creep(old_specs, new_specs)
+        names = [c["name"] for c in result["components"]]
+        assert "EventNotifier" in names
+        assert "SupervisorEscalator" not in names
+        assert len(result["components"]) == 1
+
+    def test_strips_new_business_rules(self):
+        """old имел 1 правило, new вернул 2 → обрезать до 1."""
+        old_specs = {
+            "components": [],
+            "data_models": [],
+            "business_rules": ["Rule A: do something"],
+        }
+        new_specs = {
+            "components": [],
+            "data_models": [],
+            "business_rules": ["Rule A: do something better", "Rule B: new scope"],
+        }
+        result = self._filter_scope_creep(old_specs, new_specs)
+        assert len(result["business_rules"]) == 1
+        assert result["business_rules"][0] == "Rule A: do something better"
+
+    def test_keeps_existing_components(self):
+        """Если new_specs имеет те же компоненты что old → не трогать."""
+        old_specs = {
+            "components": [
+                {"name": "EventNotifier", "type": "service"},
+                {"name": "DataProcessor", "type": "module"},
+            ],
+            "data_models": [{"name": "Event", "fields": []}],
+            "business_rules": ["Rule A"],
+        }
+        new_specs = {
+            "components": [
+                {"name": "EventNotifier", "type": "service", "description": "updated"},
+                {"name": "DataProcessor", "type": "module", "description": "updated"},
+            ],
+            "data_models": [{"name": "Event", "fields": ["id", "name"]}],
+            "business_rules": ["Rule A updated"],
+        }
+        result = self._filter_scope_creep(old_specs, new_specs)
+        assert len(result["components"]) == 2
+        assert len(result["data_models"]) == 1
+        assert len(result["business_rules"]) == 1
+
+
+# =====================================================
+# 28. TestValidateImportConsistencyWithSrc (contract_validation)
+# =====================================================
+
+class TestValidateImportConsistencyWithSrc:
+    """Тестирует _validate_import_consistency с параметром src_path.
+
+    Когда src_path доступен, функция извлекает реальные top-level имена (class/def)
+    из исходников и не удаляет импорты, которые есть в коде но отсутствуют в контракте.
+    """
+
+    def setup_method(self):
+        from contract_validation import _validate_import_consistency
+        self.validate = _validate_import_consistency
+        self.logger = logging.getLogger("test")
+
+    def test_allows_class_from_source(self):
+        """Контракт определяет только process_frame, но в src файле есть class VideoProcessor.
+        Import `from video_processor import VideoProcessor` должен СОХРАНИТЬСЯ."""
+        with tempfile.TemporaryDirectory() as td:
+            src_path = Path(td)
+            # Создаём src файл с классом, которого нет в контракте
+            (src_path / "video_processor.py").write_text(
+                "class VideoProcessor:\n    pass\n\ndef process_frame():\n    pass\n",
+                encoding="utf-8",
+            )
+            contract = {
+                "file_contracts": {
+                    "video_processor.py": [{"name": "process_frame"}],
+                    "main.py": [{"name": "main"}],
+                },
+                "global_imports": {
+                    "main.py": ["from video_processor import VideoProcessor"],
+                },
+            }
+            result = self.validate(contract, self.logger, src_path=src_path)
+            main_imports = result["global_imports"]["main.py"]
+            assert any("VideoProcessor" in imp for imp in main_imports), \
+                f"VideoProcessor должен сохраниться (есть в src), но imports={main_imports}"
+
+    def test_still_removes_phantom_imports(self):
+        """Если в src файле НЕТ класса FooBar → import удаляется."""
+        with tempfile.TemporaryDirectory() as td:
+            src_path = Path(td)
+            (src_path / "video_processor.py").write_text(
+                "def process_frame():\n    pass\n",
+                encoding="utf-8",
+            )
+            contract = {
+                "file_contracts": {
+                    "video_processor.py": [{"name": "process_frame"}],
+                    "main.py": [{"name": "main"}],
+                },
+                "global_imports": {
+                    "main.py": ["from video_processor import FooBar"],
+                },
+            }
+            result = self.validate(contract, self.logger, src_path=src_path)
+            main_imports = result["global_imports"]["main.py"]
+            assert not any("FooBar" in imp for imp in main_imports), \
+                f"FooBar должен быть удалён (нет в src), но imports={main_imports}"
+
+    def test_works_without_src_path(self):
+        """Без src_path работает как раньше — по контракту."""
+        contract = {
+            "file_contracts": {
+                "models.py": [{"name": "Camera"}],
+                "main.py": [{"name": "main"}],
+            },
+            "global_imports": {
+                "main.py": ["from models import Camera"],
+            },
+        }
+        result = self.validate(contract, self.logger, src_path=None)
+        main_imports = result["global_imports"]["main.py"]
+        assert any("Camera" in imp for imp in main_imports), \
+            f"Camera должен сохраниться (есть в контракте), но imports={main_imports}"
+
+
+# =====================================================
+# 29. TestWrongPipPackagesNoopFix (cv2 не false positive, opencv заменяется)
+# =====================================================
+
+class TestWrongPipPackagesNoopFix:
+    """Тестирует что `import cv2` не генерирует ложное предупреждение о замене,
+    а `import opencv` корректно заменяется на `import cv2`."""
+
+    def setup_method(self):
+        from contract_validation import _validate_global_imports
+        self.validate = _validate_global_imports
+        self.logger = logging.getLogger("test")
+
+    def test_import_cv2_stays_as_cv2(self):
+        """import cv2 → cv2 есть в WRONG_PIP_PACKAGES, но correct_import == 'cv2',
+        поэтому строка НЕ изменяется (noop: base_module == correct_import)."""
+        contract = {
+            "file_contracts": {"main.py": [{"name": "main"}]},
+            "global_imports": {"main.py": ["import cv2"]},
+        }
+        result = self.validate(contract, {}, ["main.py"], self.logger)
+        main_imports = result["global_imports"]["main.py"]
+        assert "import cv2" in main_imports, \
+            f"import cv2 должен остаться без изменений, но imports={main_imports}"
+
+    def test_import_opencv_replaced_with_cv2(self):
+        """import opencv → opencv в WRONG_PIP_PACKAGES, correct_import='cv2',
+        поэтому должен замениться на 'import cv2'."""
+        contract = {
+            "file_contracts": {"main.py": [{"name": "main"}]},
+            "global_imports": {"main.py": ["import opencv"]},
+        }
+        result = self.validate(contract, {}, ["main.py"], self.logger)
+        main_imports = result["global_imports"]["main.py"]
+        assert "import cv2" in main_imports, \
+            f"import opencv должен замениться на import cv2, но imports={main_imports}"
+        assert "import opencv" not in main_imports
+
+    def test_from_opencv_import_replaced(self):
+        """from opencv import VideoCapture → from cv2 import VideoCapture."""
+        contract = {
+            "file_contracts": {"main.py": [{"name": "main"}]},
+            "global_imports": {"main.py": ["from opencv import VideoCapture"]},
+        }
+        result = self.validate(contract, {}, ["main.py"], self.logger)
+        main_imports = result["global_imports"]["main.py"]
+        assert any("from cv2 import VideoCapture" in imp for imp in main_imports), \
+            f"from opencv должен замениться на from cv2, но imports={main_imports}"
