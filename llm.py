@@ -233,6 +233,13 @@ async def ask_agent(
                 raise json.JSONDecodeError(
                     f"Ожидался непустой dict, получен {type(result).__name__}", raw or "", 0
                 )
+            # Модели с reasoning mode (falcon3, qwen3) могут вернуть {"think": "..."}
+            # без полезных данных. Удаляем ключ think — если dict стал пустой, retry.
+            result.pop("think", None)
+            if not result:
+                raise json.JSONDecodeError(
+                    "Ответ содержит только 'think' без полезных данных", raw or "", 0
+                )
             log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
             if ckey is not None:
                 cache[ckey] = result
@@ -255,6 +262,11 @@ async def ask_agent(
                 if not isinstance(result, dict) or not result:
                     raise json.JSONDecodeError(
                         f"Ожидался непустой dict, получен {type(result).__name__}", raw or "", 0
+                    )
+                result.pop("think", None)
+                if not result:
+                    raise json.JSONDecodeError(
+                        "Ответ содержит только 'think' без полезных данных", raw or "", 0
                     )
                 log_interaction(logger, agent, model, sys_prompt + "\n\n" + user_text, raw or "")
                 if ckey is not None:
