@@ -89,20 +89,29 @@ def get_feedback_ctx(state: dict, filename: str) -> str:
     return "\n".join(parts)
 
 
+def _is_valid_filename(f: str) -> bool:
+    """Проверяет что строка — валидное имя файла (не директория, имеет расширение)."""
+    return bool(re.match(r'^[\w/\-\.]+\.\w+$', f) and ".." not in f and not f.startswith("/"))
+
+
 def sync_files_with_a5(state: dict, a5_files: set[str], logger: logging.Logger) -> None:
     """Синхронизирует state['files'] с файлами из A5 контракта.
 
     Добавляет новые файлы из A5, удаляет файлы-призраки (есть в state но нет в A5).
+    Фильтрует невалидные имена (директории без расширения, пустые строки).
     """
     files_list = state.setdefault("files", [])
     # Добавляем новые файлы из A5
     for f in a5_files:
+        if not _is_valid_filename(f):
+            logger.warning(f"  ⚠️  A5 содержит невалидное имя файла: '{f}' — пропущено")
+            continue
         if f not in files_list:
             files_list.append(f)
         state.setdefault("feedbacks", {}).setdefault(f, "")
-    # Удаляем файлы-призраки
+    # Удаляем файлы-призраки и невалидные имена
     for f in list(files_list):
-        if f not in a5_files:
+        if f not in a5_files or not _is_valid_filename(f):
             logger.info(f"  🗑️  Удалён файл-призрак: {f} (нет в A5)")
             files_list.remove(f)
             state.setdefault("feedbacks", {}).pop(f, None)

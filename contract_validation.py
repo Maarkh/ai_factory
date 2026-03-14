@@ -137,6 +137,18 @@ def _normalize_file_contracts(contract: dict) -> dict:
         contract["global_imports"] = {}
     # Удаляем записи с не-ASCII именами (LLM может вернуть русские имена из A2)
     contract = _remove_non_ascii_entries(contract)
+    # Удаляем невалидные ключи (директории без расширения: "models/", "data/")
+    _VALID_FILE_RE = re.compile(r'^[\w/\-\.]+\.\w+$')
+    fc_raw = contract.get("file_contracts", {})
+    if isinstance(fc_raw, dict):
+        invalid_keys = [k for k in fc_raw if not _VALID_FILE_RE.match(k) or ".." in k]
+        for k in invalid_keys:
+            del fc_raw[k]
+    gi_raw = contract.get("global_imports", {})
+    if isinstance(gi_raw, dict):
+        invalid_gi = [k for k in gi_raw if not _VALID_FILE_RE.match(k) or ".." in k]
+        for k in invalid_gi:
+            del gi_raw[k]
     # Чистим остаточные garbage tokens из сигнатур (если LLM-level strip не применён)
     _GRB_RE = re.compile(r"<[｜|][\w▁]+[｜|]>")
     fc = contract.get("file_contracts", {})

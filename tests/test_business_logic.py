@@ -2354,3 +2354,80 @@ class TestStripNonA5CrossImports:
         result = self.strip(code, a5_imports, project_files)
         assert "class Main:" in result
         assert "def run(self): pass" in result
+
+
+# =====================================================
+# Invalid file names filtering
+# =====================================================
+
+class TestInvalidFileNameFiltering:
+    def setup_method(self):
+        from state import sync_files_with_a5, _is_valid_filename
+        self.sync = sync_files_with_a5
+        self.is_valid = _is_valid_filename
+        self.logger = logging.getLogger("test")
+
+    def test_directory_names_rejected(self):
+        """'models/' и 'data/' без расширения — невалидные имена файлов."""
+        assert not self.is_valid("models/")
+        assert not self.is_valid("data/")
+        assert not self.is_valid("src/")
+
+    def test_normal_files_accepted(self):
+        """Обычные файлы с расширением — валидны."""
+        assert self.is_valid("main.py")
+        assert self.is_valid("models/event.py")
+        assert self.is_valid("src/utils.ts")
+
+    def test_sync_skips_directory_names(self):
+        """sync_files_with_a5 не добавляет 'models/' и 'data/' в state."""
+        state = {"files": ["main.py"], "feedbacks": {"main.py": ""}}
+        a5_files = {"main.py", "models/", "data/", "models/event.py"}
+        self.sync(state, a5_files, self.logger)
+        assert "models/" not in state["files"]
+        assert "data/" not in state["files"]
+        assert "main.py" in state["files"]
+        assert "models/event.py" in state["files"]
+
+    def test_sync_removes_existing_invalid_names(self):
+        """Если невалидное имя уже в state — удаляется при sync."""
+        state = {
+            "files": ["main.py", "models/", "data/"],
+            "feedbacks": {"main.py": "", "models/": "", "data/": ""},
+            "approved_files": ["data/"],
+        }
+        a5_files = {"main.py", "models/", "data/"}
+        self.sync(state, a5_files, self.logger)
+        assert "models/" not in state["files"]
+        assert "data/" not in state["files"]
+        assert "data/" not in state["approved_files"]
+        assert "main.py" in state["files"]
+
+
+class TestNormalizeFileContractsInvalidKeys:
+    def setup_method(self):
+        from contract_validation import _normalize_file_contracts
+        self.normalize = _normalize_file_contracts
+
+    def test_strips_directory_keys(self):
+        """Ключи без расширения удаляются из file_contracts и global_imports."""
+        contract = {
+            "file_contracts": {
+                "main.py": [{"name": "main"}],
+                "models/": [{"name": "Model"}],
+                "data/": [{"name": "Data"}],
+                "models/event.py": [{"name": "Event"}],
+            },
+            "global_imports": {
+                "main.py": ["import os"],
+                "models/": ["from data import X"],
+            },
+        }
+        result = self.normalize(contract)
+        fc = result["file_contracts"]
+        gi = result["global_imports"]
+        assert "main.py" in fc
+        assert "models/event.py" in fc
+        assert "models/" not in fc
+        assert "data/" not in fc
+        assert "models/" not in gi
