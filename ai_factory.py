@@ -538,7 +538,10 @@ async def _run_initial_pipeline(
         )
         state["api_contract"] = api_contract
         a5_files = set(api_contract.get("file_contracts", {}).keys())
-        sync_files_with_a5(state, a5_files, logger)
+        if a5_files:
+            sync_files_with_a5(state, a5_files, logger)
+        else:
+            logger.warning("⚠️  A5 контракт пуст — файлы архитектуры сохранены без синхронизации.")
         state["_prev_file_contracts"] = api_contract.get("file_contracts", {})
         if await phase_review_api_contract(
             logger, project_path, state, cache, stats,

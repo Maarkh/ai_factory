@@ -300,8 +300,17 @@ async def phase_generate_api_contract(
     except (LLMError, ValueError) as e:
         logger.exception(f"Contract Analyst упал: {e}")
         stats.record("contract_analyst", get_model("contract_analyst"), False)
-        logger.warning(f"⚠️  Contract Analyst не справился: {e}. Контракт будет пустым.")
-        return {"file_contracts": {}, "global_imports": {}}
+        # Строим скелетный контракт из архитектуры вместо пустого —
+        # иначе sync_files_with_a5 удалит все файлы проекта
+        files_list = [f.get("path", f) if isinstance(f, dict) else f
+                      for f in arch_resp.get("files", state.get("files", []))]
+        skeleton_fc = {f: [] for f in files_list if f}
+        skeleton_gi = {f: [] for f in files_list if f}
+        logger.warning(
+            f"⚠️  Contract Analyst не справился: {e}. "
+            f"Скелетный контракт из архитектуры ({len(skeleton_fc)} файлов)."
+        )
+        return {"file_contracts": skeleton_fc, "global_imports": skeleton_gi}
 
 
 async def refresh_api_contract(
@@ -374,7 +383,10 @@ async def refresh_api_contract(
         # Sync: добавляем новые файлы, удаляем призраки
         from state import sync_files_with_a5
         a5_files = set(new_contract.get("file_contracts", {}).keys())
-        sync_files_with_a5(state, a5_files, logger)
+        if a5_files:
+            sync_files_with_a5(state, a5_files, logger)
+        else:
+            logger.warning("⚠️  Каскадный A5 пуст — файлы не синхронизированы.")
         state["api_contract"] = new_contract
         save_artifact(project_path, "A5", new_contract)
         logger.info("✅ A5 обновлён каскадно.")

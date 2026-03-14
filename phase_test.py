@@ -50,6 +50,9 @@ async def phase_e2e_review(
     randomize: bool = False,
 ) -> bool:
     logger.info("\n🧐 Parallel E2E-ревью (Architect + QA) ...")
+    if not state.get("files"):
+        logger.warning("⚠️  Нет файлов для E2E-ревью — пропускаю.")
+        return True
     language = state.get("language", "python")
     src_path = project_path / SRC_DIR
     all_code = get_full_context(src_path, state["files"])
@@ -88,7 +91,9 @@ async def phase_e2e_review(
                         continue
                     target = issue.get("file", "").strip()
                     if target not in state["files"]:
-                        target = state["files"][0]
+                        target = state["files"][0] if state["files"] else ""
+                    if not target:
+                        continue
                     element  = issue.get("element", "")
                     severity = issue.get("severity", "MAJOR")
                     problem  = issue.get("problem", "")
@@ -98,7 +103,9 @@ async def phase_e2e_review(
                 logger.warning(f"❌ E2E [{label}] REJECT: {len(issues)} issues")
             else:
                 # Fallback: старый формат target_file + feedback
-                target   = resp.get("target_file", "").strip() or state["files"][0]
+                target   = resp.get("target_file", "").strip() or (state["files"][0] if state["files"] else "")
+                if not target:
+                    continue
                 feedback = to_str(resp.get("feedback", ""))
                 logger.warning(f"❌ E2E [{label}] REJECT на {target}: {feedback[:TRUNCATE_FEEDBACK]}")
                 rejections.append((agent_key, target, feedback))
@@ -305,7 +312,8 @@ async def phase_integration_test(
         build_success = True
 
     if not build_success:
-        state["feedbacks"][state["files"][0]] = "Не удалось собрать Docker-образ."
+        if state.get("files"):
+            state["feedbacks"][state["files"][0]] = "Не удалось собрать Docker-образ."
         return False
 
     # ── Запуск приложения ────────────────────────────────────────────────────

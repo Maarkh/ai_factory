@@ -17,9 +17,9 @@ _D = {
 }
 
 
-def _local(model: str) -> dict:
+def _local(model: str, **overrides) -> dict:
     """Локальная модель с дефолтными параметрами."""
-    return {"model": model, **_D}
+    return {"model": model, **_D, **overrides}
 
 
 def _remote(model: str, url: str, key: str = "ollama",
@@ -63,8 +63,8 @@ MODEL_POOLS: dict[str, list[dict]] = {
     "arch_validator":        [_local("deepseek-coder:6.7b")],
     "supervisor":            [_local("qwen3.5:9b")],
     "self_reflect":          [_local("deepseek-coder:6.7b")],
-    "contract_analyst":      [_local("qwen3.5:9b")],
-    "a5_validator":          [_local("qwen3.5:9b")],
+    "contract_analyst":      [_local("qwen3.5:9b", timeout=600.0)],
+    "a5_validator":          [_local("qwen3.5:9b", timeout=600.0)],
     "a5_business_reviewer":  [_local("qwen3.5:9b")],
     "a5_architect_reviewer": [_local("qwen3.5:9b")],
     "a5_contract_reviewer":  [_local("deepseek-coder:6.7b")],
