@@ -435,6 +435,16 @@ def _build_dev_context(
             f"{json.dumps(global_imports, ensure_ascii=False, indent=2)}\n\n"
         )
 
+    # Список файлов проекта (для ясности, что можно импортировать)
+    project_files = state.get("files", [])
+    other_files = [f for f in project_files if f != current_file]
+    if other_files:
+        dev_ctx += (
+            f"ФАЙЛЫ ПРОЕКТА (можно импортировать ТОЛЬКО из них):\n"
+            + ", ".join(other_files) + "\n"
+            "⛔ Импорт из несуществующих модулей проекта будет отклонён.\n\n"
+        )
+
     # requirements.txt
     req_path = src_path / "requirements.txt"
     if req_path.exists():
