@@ -109,14 +109,25 @@ def sync_files_with_a5(state: dict, a5_files: set[str], logger: logging.Logger) 
         if f not in files_list:
             files_list.append(f)
         state.setdefault("feedbacks", {}).setdefault(f, "")
-    # Удаляем файлы-призраки и невалидные имена
+    # Удаляем файлы-призраки и невалидные имена (но НЕ одобренные валидные файлы)
+    approved = set(state.get("approved_files", []))
     for f in list(files_list):
-        if f not in a5_files or not _is_valid_filename(f):
-            logger.info(f"  🗑️  Удалён файл-призрак: {f} (нет в A5)")
+        if not _is_valid_filename(f):
+            # Невалидные имена удаляем всегда (даже если approved — такого быть не должно)
+            logger.info(f"  🗑️  Удалён невалидный файл: {f}")
             files_list.remove(f)
             state.setdefault("feedbacks", {}).pop(f, None)
             if f in state.get("approved_files", []):
                 state["approved_files"].remove(f)
+            state.setdefault("file_attempts", {}).pop(f, None)
+            state.setdefault("cumulative_file_attempts", {}).pop(f, None)
+        elif f not in a5_files:
+            if f in approved:
+                logger.warning(f"  🛡️  {f} нет в новом A5, но уже одобрен — оставляю.")
+                continue
+            logger.info(f"  🗑️  Удалён файл-призрак: {f} (нет в A5)")
+            files_list.remove(f)
+            state.setdefault("feedbacks", {}).pop(f, None)
             state.setdefault("file_attempts", {}).pop(f, None)
             state.setdefault("cumulative_file_attempts", {}).pop(f, None)
 

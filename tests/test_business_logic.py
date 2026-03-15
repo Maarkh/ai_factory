@@ -1423,17 +1423,17 @@ class TestSyncFilesWithA5:
         assert state["feedbacks"]["utils.py"] == ""
 
     def test_removes_ghost_files(self):
+        """Unapproved файлы удаляются если их нет в A5."""
         state = {
             "files": ["main.py", "old.py"],
             "feedbacks": {"main.py": "", "old.py": "fb"},
-            "approved_files": ["old.py"],
+            "approved_files": [],
             "file_attempts": {"old.py": 3},
             "cumulative_file_attempts": {"old.py": 5},
         }
         self.sync(state, {"main.py"}, self.logger)
         assert "old.py" not in state["files"]
         assert "old.py" not in state["feedbacks"]
-        assert "old.py" not in state["approved_files"]
         assert "old.py" not in state["file_attempts"]
         assert "old.py" not in state["cumulative_file_attempts"]
 
@@ -2522,3 +2522,138 @@ class TestLocalModelOverrides(unittest.TestCase):
         assert "url" in cfg
         assert "key" in cfg
         assert "max_tokens" in cfg
+
+
+# ── 29. Module vs Package conflict detection ────────────────────────────────
+
+class TestModuleVsPackageConflict(unittest.TestCase):
+    """_normalize_file_contracts удаляет X.py если есть X/ пакет."""
+
+    def setUp(self):
+        from contract_validation import _normalize_file_contracts
+        self.normalize = _normalize_file_contracts
+
+    def test_models_py_removed_when_models_package_exists(self):
+        """models.py удаляется если есть models/__init__.py."""
+        contract = {
+            "file_contracts": {
+                "main.py": [],
+                "models.py": [{"name": "Foo", "signature": "class Foo"}],
+                "models/__init__.py": [],
+                "models/camera.py": [{"name": "Camera", "signature": "class Camera"}],
+            },
+            "global_imports": {
+                "main.py": ["import os"],
+                "models.py": ["from models.camera import Camera"],
+                "models/__init__.py": [],
+                "models/camera.py": [],
+            },
+        }
+        result = self.normalize(contract)
+        fc = result["file_contracts"]
+        gi = result["global_imports"]
+        assert "models.py" not in fc, "models.py должен быть удалён (конфликт с models/)"
+        assert "models.py" not in gi
+        assert "main.py" in fc
+        assert "models/__init__.py" in fc
+        assert "models/camera.py" in fc
+
+    def test_no_conflict_without_package(self):
+        """models.py остаётся если нет models/ пакета."""
+        contract = {
+            "file_contracts": {
+                "main.py": [],
+                "models.py": [{"name": "Foo", "signature": "class Foo"}],
+            },
+            "global_imports": {
+                "main.py": [],
+                "models.py": [],
+            },
+        }
+        result = self.normalize(contract)
+        assert "models.py" in result["file_contracts"]
+
+    def test_utils_py_removed_when_utils_package_exists(self):
+        """utils.py удаляется если есть utils/helper.py."""
+        contract = {
+            "file_contracts": {
+                "main.py": [],
+                "utils.py": [],
+                "utils/helper.py": [],
+            },
+            "global_imports": {},
+        }
+        result = self.normalize(contract)
+        assert "utils.py" not in result["file_contracts"]
+        assert "utils/helper.py" in result["file_contracts"]
+
+    def test_multiple_conflicts_resolved(self):
+        """Несколько конфликтов module vs package разрешаются."""
+        contract = {
+            "file_contracts": {
+                "main.py": [],
+                "models.py": [],
+                "models/a.py": [],
+                "utils.py": [],
+                "utils/b.py": [],
+            },
+            "global_imports": {},
+        }
+        result = self.normalize(contract)
+        fc = result["file_contracts"]
+        assert "models.py" not in fc
+        assert "utils.py" not in fc
+        assert "models/a.py" in fc
+        assert "utils/b.py" in fc
+        assert "main.py" in fc
+
+
+# ── 30. sync_files_with_a5 защищает approved файлы ─────────────────────────
+
+class TestSyncProtectsApprovedFiles(unittest.TestCase):
+    """sync_files_with_a5 не удаляет файлы из approved_files."""
+
+    def setUp(self):
+        from state import sync_files_with_a5
+        self.sync = sync_files_with_a5
+
+    def test_approved_file_not_removed(self):
+        """Одобренный файл не удаляется даже если его нет в A5."""
+        state = {
+            "files": ["main.py", "old.py", "utils.py"],
+            "approved_files": ["old.py"],
+            "feedbacks": {"main.py": "", "old.py": "", "utils.py": ""},
+        }
+        a5_files = {"main.py", "new.py"}
+        self.sync(state, a5_files, logging.getLogger("test"))
+        assert "old.py" in state["files"], "approved файл не должен удаляться"
+        assert "old.py" in state["approved_files"]
+        assert "utils.py" not in state["files"]
+        assert "new.py" in state["files"]
+
+    def test_unapproved_file_removed_normally(self):
+        """Не одобренный файл удаляется если его нет в A5."""
+        state = {
+            "files": ["main.py", "ghost.py"],
+            "approved_files": [],
+            "feedbacks": {"main.py": "", "ghost.py": ""},
+        }
+        a5_files = {"main.py"}
+        self.sync(state, a5_files, logging.getLogger("test"))
+        assert "ghost.py" not in state["files"]
+
+    def test_multiple_approved_preserved(self):
+        """Несколько одобренных файлов сохраняются при каскадном A5."""
+        state = {
+            "files": ["a.py", "b.py", "c.py", "d.py"],
+            "approved_files": ["a.py", "c.py"],
+            "feedbacks": {"a.py": "", "b.py": "", "c.py": "", "d.py": ""},
+        }
+        # Новый A5 потерял a.py и d.py
+        a5_files = {"b.py", "c.py", "e.py"}
+        self.sync(state, a5_files, logging.getLogger("test"))
+        assert "a.py" in state["files"], "approved a.py должен остаться"
+        assert "c.py" in state["files"]
+        assert "b.py" in state["files"]
+        assert "e.py" in state["files"]
+        assert "d.py" not in state["files"], "unapproved d.py должен быть удалён"

@@ -149,6 +149,29 @@ def _normalize_file_contracts(contract: dict) -> dict:
         invalid_gi = [k for k in gi_raw if not _VALID_FILE_RE.match(k) or ".." in k]
         for k in invalid_gi:
             del gi_raw[k]
+    # Удаляем конфликты module vs package: X.py не может существовать рядом с X/
+    fc_clean = contract.get("file_contracts", {})
+    if isinstance(fc_clean, dict):
+        # Собираем все пакеты (каталоги из путей вида "X/file.py")
+        package_dirs: set[str] = set()
+        for k in fc_clean:
+            parts = k.split("/")
+            if len(parts) > 1:
+                package_dirs.add(parts[0])
+        # Удаляем X.py если X/ — пакет
+        conflict_keys = [
+            k for k in fc_clean
+            if "/" not in k and k.endswith(".py") and k[:-3] in package_dirs
+        ]
+        for k in conflict_keys:
+            import logging as _clog
+            _clog.getLogger(__name__).warning(
+                f"  ⚠️  A5: удалён '{k}' — конфликт с пакетом '{k[:-3]}/' (module vs package)"
+            )
+            del fc_clean[k]
+            gi_clean = contract.get("global_imports", {})
+            if isinstance(gi_clean, dict):
+                gi_clean.pop(k, None)
     # Чистим остаточные garbage tokens из сигнатур (если LLM-level strip не применён)
     _GRB_RE = re.compile(r"<[｜|][\w▁]+[｜|]>")
     fc = contract.get("file_contracts", {})
