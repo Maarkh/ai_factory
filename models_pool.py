@@ -47,27 +47,30 @@ def _remote(model: str, url: str, key: str = "ollama",
 #           max_tokens=32768, num_ctx=32768)
 
 MODEL_POOLS: dict[str, list[dict]] = {
+    # Код / патчи — deepseek-coder (быстрый, целиком в VRAM)
     "developer":             [_local("deepseek-coder:6.7b")],
     "developer_patch":       [_local("deepseek-coder:6.7b")],
     "reviewer":              [_local("deepseek-coder:6.7b")],
-    "e2e_architect":         [_local("qwen3.5:9b")],
-    "e2e_qa":                [_local("qwen3.5:9b")],
-    "qa_runtime":            [_local("deepseek-coder:6.7b")],
-    "business_analyst":      [_local("qwen3.5:9b")],
-    "system_analyst":        [_local("qwen3.5:9b")],
-    "architect":             [_local("qwen3.5:9b")],
-    "spec_reviewer":         [_local("qwen3.5:9b")],
     "test_generator":        [_local("deepseek-coder:6.7b")],
-    "documenter":            [_local("qwen3.5:9b")],
-    "devops_runtime":        [_local("qwen3.5:9b")],
-    "arch_validator":        [_local("deepseek-coder:6.7b")],
-    "supervisor":            [_local("qwen3.5:9b")],
     "self_reflect":          [_local("deepseek-coder:6.7b")],
-    "contract_analyst":      [_local("qwen3.5:9b", timeout=600.0)],
-    "a5_validator":          [_local("qwen3.5:9b", timeout=600.0)],
-    "a5_business_reviewer":  [_local("qwen3.5:9b")],
-    "a5_architect_reviewer": [_local("qwen3.5:9b")],
+    "qa_runtime":            [_local("deepseek-coder:6.7b")],
+    # JSON-генерация / валидация — deepseek-coder (скорость критична)
+    "contract_analyst":      [_local("deepseek-coder:6.7b")],
+    "a5_validator":          [_local("deepseek-coder:6.7b")],
+    "a5_business_reviewer":  [_local("deepseek-coder:6.7b")],
+    "a5_architect_reviewer": [_local("deepseek-coder:6.7b")],
     "a5_contract_reviewer":  [_local("deepseek-coder:6.7b")],
+    "arch_validator":        [_local("deepseek-coder:6.7b")],
+    "devops_runtime":        [_local("deepseek-coder:6.7b")],
+    # Рассуждение / понимание — qwen3 (лучше для анализа задач)
+    "business_analyst":      [_local("qwen3:latest")],
+    "system_analyst":        [_local("qwen3:latest")],
+    "architect":             [_local("qwen3:latest")],
+    "spec_reviewer":         [_local("qwen3:latest")],
+    "supervisor":            [_local("qwen3:latest")],
+    "e2e_architect":         [_local("qwen3:latest")],
+    "e2e_qa":                [_local("qwen3:latest")],
+    "documenter":            [_local("qwen3:latest")],
 }
 
 # Конфиг по умолчанию (для неизвестных агентов)
