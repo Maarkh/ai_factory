@@ -109,8 +109,8 @@ async def revise_spec(
         # Детерминистская защита от scope creep: LLM не должен добавлять
         # новые компоненты/data_models/business_rules, которых не было в спецификации.
         old_specs = state.get("system_specs", {})
-        old_component_names = {c["name"] for c in old_specs.get("components", []) if isinstance(c, dict)}
-        old_model_names     = {m["name"] for m in old_specs.get("data_models", []) if isinstance(m, dict)}
+        old_component_names = {c["name"] for c in old_specs.get("components", []) if isinstance(c, dict) and "name" in c}
+        old_model_names     = {m["name"] for m in old_specs.get("data_models", []) if isinstance(m, dict) and "name" in m}
 
         new_components = new_specs.get("components", old_specs.get("components", []))
         new_models     = new_specs.get("data_models", old_specs.get("data_models", []))

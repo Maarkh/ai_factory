@@ -2054,11 +2054,11 @@ class TestReviseSpecScopeCreep:
         """Копия логики scope creep фильтрации из phases.revise_spec."""
         old_component_names = {
             c["name"] for c in old_specs.get("components", [])
-            if isinstance(c, dict)
+            if isinstance(c, dict) and "name" in c
         }
         old_model_names = {
             m["name"] for m in old_specs.get("data_models", [])
-            if isinstance(m, dict)
+            if isinstance(m, dict) and "name" in m
         }
 
         new_components = new_specs.get("components", old_specs.get("components", []))
@@ -2150,6 +2150,28 @@ class TestReviseSpecScopeCreep:
         assert len(result["components"]) == 2
         assert len(result["data_models"]) == 1
         assert len(result["business_rules"]) == 1
+
+    def test_data_models_without_name_key(self):
+        """data_models может содержать dict без ключа 'name' — не должно падать."""
+        old_specs = {
+            "components": [],
+            "data_models": [
+                {"type": "LicensePlate", "fields": ["number", "region"]},
+                {"description": "some model"},
+            ],
+            "business_rules": [],
+        }
+        new_specs = {
+            "components": [],
+            "data_models": [
+                {"type": "LicensePlate", "fields": ["number", "region"]},
+                {"name": "NewModel", "fields": []},
+            ],
+            "business_rules": [],
+        }
+        # Не должно падать с KeyError
+        result = self._filter_scope_creep(old_specs, new_specs)
+        assert isinstance(result["data_models"], list)
 
 
 # =====================================================
