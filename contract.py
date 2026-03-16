@@ -214,6 +214,38 @@ async def phase_review_api_contract(
     language = state.get("language", "python")
     logger.info("🔍 Ревью A5 (API Contract) ...")
 
+    # Детерминистская pre-check: классы без методов → REJECT (LLM ревью бесполезен)
+    fc = contract.get("file_contracts", {})
+    empty_classes = []
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        classes: dict[str, list[str]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sig = item.get("signature", "")
+            name = item.get("name", "")
+            if sig.startswith("class "):
+                classes.setdefault(name, [])
+            elif "(self" in sig or "(cls" in sig:
+                if classes:
+                    last_cls = list(classes.keys())[-1]
+                    classes[last_cls].append(name)
+        for cls_name, methods in classes.items():
+            # Пропускаем dataclass / models (им методы не нужны)
+            if Path(fname).stem in ("models", "data_models", "schemas", "types"):
+                continue
+            non_init = [m for m in methods if m != "__init__"]
+            if not non_init:
+                empty_classes.append(f"{cls_name} в {fname}")
+    if empty_classes:
+        logger.warning(
+            f"⛔ A5 REJECT (детерминистский): классы без публичных методов: "
+            + ", ".join(empty_classes)
+        )
+        return False
+
     files_list = [f.get("path", f) if isinstance(f, dict) else f
                   for f in arch_resp.get("files", state.get("files", []))]
 

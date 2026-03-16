@@ -364,12 +364,31 @@ def _run_checks(
     # 7. Функции-заглушки (pass, ..., NotImplementedError)
     stub_warnings = check_stub_functions(code)
     if stub_warnings:
+        # Подставляем implementation_hints из A5 для заглушечных функций
+        stub_names = set()
+        for w in stub_warnings:
+            # "функция 'detect' — заглушка..." → извлекаем имя
+            m = re.match(r"функция '(\w+)'", w)
+            if m:
+                stub_names.add(m.group(1))
+        hints_ctx = ""
+        if file_contract and stub_names:
+            for item in file_contract:
+                if isinstance(item, dict):
+                    name = item.get("name", "")
+                    sig = item.get("signature", "")
+                    # Совпадение по имени функции или имени в сигнатуре
+                    if name in stub_names or any(sn in sig for sn in stub_names):
+                        hints = item.get("implementation_hints", "")
+                        if hints:
+                            hints_ctx += f"\n  АЛГОРИТМ для {name}: {hints}"
         return "stubs", (
             "АВТОМАТИЧЕСКИЙ REJECT — функции-заглушки:\n"
             + "\n".join(f"  - {w}" for w in stub_warnings)
             + "\n\nВесь код должен быть полностью рабочим. Заглушки (pass, ..., "
             "raise NotImplementedError) и фиктивные реализации "
             "(захардкоженные return без использования параметров) ЗАПРЕЩЕНЫ."
+            + (f"\n\nРЕАЛИЗУЙ по этим алгоритмам:{hints_ctx}" if hints_ctx else "")
         )
 
     # 8. Все required функции/классы из A5 контракта присутствуют

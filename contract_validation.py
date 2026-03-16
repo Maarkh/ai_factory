@@ -1389,6 +1389,109 @@ def _detect_and_fix_circular_imports(
     return contract
 
 
+# ─────────────────────────────────────────────
+# Проверки полноты A5 контракта
+# ─────────────────────────────────────────────
+
+
+def _validate_class_methods(contract: dict, logger: logging.Logger) -> dict:
+    """Проверяет что классы в A5 имеют публичные методы (не только __init__).
+
+    Если класс содержит только __init__ — логирует WARNING.
+    Не блокирует (auto-fix невозможен), но информирует.
+    """
+    fc = contract.get("file_contracts", {})
+    for fname, items in fc.items():
+        if not isinstance(items, list):
+            continue
+        # Собираем классы и их методы
+        classes: dict[str, list[str]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sig = item.get("signature", "")
+            name = item.get("name", "")
+            if sig.startswith("class "):
+                classes.setdefault(name, [])
+            elif "(self" in sig or "(cls" in sig:
+                # Метод класса — находим к какому классу относится
+                for cls_name in classes:
+                    if name.startswith(cls_name + ".") or any(
+                        name == m for m in [name]
+                    ):
+                        classes[cls_name].append(name)
+                        break
+                else:
+                    # Метод без привязки к классу — привяжем к последнему
+                    if classes:
+                        last_cls = list(classes.keys())[-1]
+                        classes[last_cls].append(name)
+        # Проверяем: есть ли классы без методов
+        for cls_name, methods in classes.items():
+            non_init = [m for m in methods if m != "__init__"]
+            if not non_init:
+                logger.warning(
+                    f"  ⚠️  A5: класс '{cls_name}' в {fname} не имеет публичных методов "
+                    f"(только __init__). Другие файлы не смогут вызвать его методы."
+                )
+    return contract
+
+
+def _validate_cross_file_calls(contract: dict, logger: logging.Logger) -> dict:
+    """Проверяет консистентность вызовов между файлами в implementation_hints.
+
+    Если hints файла A упоминают функцию/метод из файла B —
+    проверяет что это имя реально есть в контракте B.
+    """
+    fc = contract.get("file_contracts", {})
+    gi = contract.get("global_imports", {})
+
+    # Собираем все имена из каждого файла
+    file_names: dict[str, set[str]] = {}
+    for fname, items in fc.items():
+        names: set[str] = set()
+        for item in items:
+            if isinstance(item, dict):
+                n = item.get("name", "")
+                if n:
+                    names.add(n)
+                # Из сигнатуры: def method_name(...)
+                sig = item.get("signature", "")
+                m = re.match(r"(?:class|def|async def)\s+(\w+)", sig.strip())
+                if m:
+                    names.add(m.group(1))
+        file_names[fname] = names
+
+    # Для каждого файла проверяем: импортируемые имена из проекта есть в целевом файле?
+    project_stems = {Path(f).stem for f in fc}
+    for fname in fc:
+        imports = gi.get(fname, [])
+        for imp in imports:
+            if not isinstance(imp, str):
+                continue
+            m = re.match(r"from\s+([\w.]+)\s+import\s+(.+)", imp)
+            if not m:
+                continue
+            stem = m.group(1).split(".")[0]
+            if stem not in project_stems:
+                continue
+            target_file = None
+            for f in fc:
+                if Path(f).stem == stem:
+                    target_file = f
+                    break
+            if not target_file:
+                continue
+            imported_names = [n.strip().split()[0] for n in m.group(2).split(",")]
+            for iname in imported_names:
+                if iname and iname not in file_names.get(target_file, set()):
+                    logger.warning(
+                        f"  ⚠️  A5: {fname} импортирует '{iname}' из {target_file}, "
+                        f"но '{iname}' не определён в контракте {target_file}"
+                    )
+    return contract
+
+
 def run_a5_validation_pipeline(
     contract: dict,
     arch_resp: dict,
@@ -1412,4 +1515,7 @@ def run_a5_validation_pipeline(
     contract = _validate_import_consistency(contract, logger, src_path=src_path)
     contract = _detect_and_fix_circular_imports(contract, files, logger)
     contract = _remove_non_ascii_entries(contract)
+    # Проверки полноты (warnings, не блокируют)
+    contract = _validate_class_methods(contract, logger)
+    contract = _validate_cross_file_calls(contract, logger)
     return contract

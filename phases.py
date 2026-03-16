@@ -193,6 +193,23 @@ async def revise_spec(
             state["architecture"] = arch_resp.get("architecture", state.get("architecture", ""))
             state["arch_resp"] = arch_resp
             save_artifact(project_path, "A3", arch_resp)
+            # Обновляем requirements.txt из новых dependencies
+            new_deps = arch_resp.get("dependencies", [])
+            if new_deps:
+                req_path = project_path / SRC_DIR / "requirements.txt"
+                existing = set()
+                if req_path.exists():
+                    existing = {line.strip().lower().split("==")[0].split(">=")[0]
+                                for line in req_path.read_text().splitlines() if line.strip() and not line.startswith("#")}
+                added = []
+                for dep in new_deps:
+                    dep_name = dep.strip().lower().split("==")[0].split(">=")[0]
+                    if dep_name and dep_name not in existing:
+                        added.append(dep.strip())
+                if added:
+                    with open(req_path, "a", encoding="utf-8") as f:
+                        f.write("\n" + "\n".join(added) + "\n")
+                    logger.info(f"📦 requirements.txt: добавлены {added}")
             logger.info(f"✅ Архитектура обновлена.")
         except (LLMError, ValueError) as e:
             logger.warning(f"⚠️  Не удалось обновить архитектуру: {e}. Продолжаем со старой.")
