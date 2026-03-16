@@ -8,6 +8,7 @@ from typing import Optional
 from config import (
     MAX_FILE_ATTEMPTS, MAX_CUMULATIVE, MAX_CONTEXT_CHARS, SRC_DIR,
     MAX_A5_PATCHES_PER_FILE, SELF_REFLECT_RETRIES, TRUNCATE_FEEDBACK,
+    MAX_FEEDBACK_HISTORY,
 )
 
 from exceptions import LLMError
@@ -397,8 +398,15 @@ def _build_dev_context(
         f"Задача:\n{state['task']}\n\n"
         f"СИСТЕМНЫЕ СПЕЦИФИКАЦИИ (A2):\n"
         f"{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}\n\n"
-        f"Файл для написания: `{current_file}`.\n\n"
     )
+    # Краткое описание архитектуры (A3) — общая картина проекта
+    arch_text = state.get("architecture", "")
+    if arch_text:
+        # Ограничиваем 1000 символов чтобы не раздувать контекст
+        arch_summary = arch_text[:1000] + ("..." if len(arch_text) > 1000 else "")
+        dev_ctx += f"АРХИТЕКТУРА ПРОЕКТА (A3):\n{arch_summary}\n\n"
+
+    dev_ctx += f"Файл для написания: `{current_file}`.\n\n"
 
     # Специальная инструкция для entry point
     if current_file == state.get("entry_point"):
@@ -757,6 +765,7 @@ async def phase_develop(
         code = ""
         dev_model = get_model("developer", attempt, randomize=randomize)
 
+        patch_applied = False
         if use_patch:
             patch_model = get_model("developer_patch", attempt, randomize=randomize)
             logger.info(
@@ -776,6 +785,7 @@ async def phase_develop(
                     patched = apply_search_replace(existing_code, changes)
                     if patched is not None:
                         code = sanitize_llm_code(patched)
+                        patch_applied = True
                         stats.record("developer_patch", patch_model, True)
                         logger.info(f"  ✅ Patch applied: {len(changes)} change(s)")
                     else:
@@ -867,6 +877,21 @@ async def phase_develop(
             file_attempts[current_file] = 0
             continue
 
+        # Детекция зацикливания: если все последние feedback одинаковы — auto-approve
+        # (ловит циклы и на детерминистских проверках, и на reviewer)
+        fb_history = state.get("feedback_history", {}).get(current_file, [])
+        feedback_looping = (
+            len(fb_history) >= MAX_FEEDBACK_HISTORY
+            and len(set(fb_history[-MAX_FEEDBACK_HISTORY:])) == 1
+        )
+        if feedback_looping:
+            file_path.write_text(code, encoding="utf-8")
+            logger.warning(
+                f"⚠️  {current_file}: одинаковый feedback {MAX_FEEDBACK_HISTORY} раз → auto-approve"
+            )
+            _approve_file(logger, state, project_path, current_file, attempt, dev_model, stats, file_attempts)
+            continue
+
         # Детерминистские проверки (9 штук)
         check_result = _run_checks(
             code, existing_code, current_file, state, file_contract,
@@ -882,23 +907,13 @@ async def phase_develop(
         file_path.write_text(code, encoding="utf-8")
 
         # Self-Reflect с откатом при ошибках
-        code, sr_feedback = await _self_reflect_with_rollback(
-            logger, cache, src_path, current_file, code, state, stats, randomize,
-            file_path, file_contract, global_context, global_imports, language,
-        )
-
-        # Детекция зацикливания reviewer: если все последние feedback одинаковы — auto-approve
-        fb_history = state.get("feedback_history", {}).get(current_file, [])
-        reviewer_looping = (
-            len(fb_history) >= MAX_FEEDBACK_HISTORY
-            and len(set(fb_history[-MAX_FEEDBACK_HISTORY:])) == 1
-        )
-        if reviewer_looping:
-            logger.warning(
-                f"⚠️  {current_file}: reviewer зациклился (одинаковый feedback {MAX_FEEDBACK_HISTORY} раз) → auto-approve"
+        # Пропускаем после успешного patch — self_reflect часто затирает целевые исправления
+        sr_feedback = ""
+        if not patch_applied:
+            code, sr_feedback = await _self_reflect_with_rollback(
+                logger, cache, src_path, current_file, code, state, stats, randomize,
+                file_path, file_contract, global_context, global_imports, language,
             )
-            _approve_file(logger, state, project_path, current_file, attempt, dev_model, stats, file_attempts)
-            continue
 
         # Внешний ревью
         rev_status, rev_feedback, needs_spec = await _review_file(

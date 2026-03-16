@@ -102,6 +102,36 @@ async def revise_spec(
         f"Текущая спецификация (A2):\n{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}\n\n"
         f"Проблема:\n{problem}"
     )
+
+    # История предыдущих ревизий — чтобы не повторять неудачные изменения
+    spec_history = state.get("spec_history", [])
+    if spec_history:
+        history_lines = []
+        for i, entry in enumerate(spec_history, 1):
+            history_lines.append(
+                f"  Ревизия {i} (итерация {entry.get('iteration', '?')}): "
+                f"проблема: {entry.get('problem', '?')[:200]} → "
+                f"изменение: {entry.get('change', '?')[:200]}"
+            )
+        ctx += (
+            f"\n\n⚠️ ИСТОРИЯ РЕВИЗИЙ (НЕ повторяй те же изменения):\n"
+            + "\n".join(history_lines)
+        )
+
+    # Статус разработки — какие файлы работают, какие зациклились
+    approved = state.get("approved_files", [])
+    all_files = state.get("files", [])
+    stuck_files = []
+    for f in all_files:
+        if f not in approved:
+            fb = state.get("feedbacks", {}).get(f, "")
+            cum = state.get("cumulative_file_attempts", {}).get(f, 0)
+            if cum >= 3 and fb:
+                stuck_files.append(f"{f} ({cum} попыток): {fb[:150]}")
+    if approved or stuck_files:
+        ctx += f"\n\nСТАТУС РАЗРАБОТКИ: одобрено {len(approved)}/{len(all_files)} файлов."
+        if stuck_files:
+            ctx += "\nЗАСТРЯВШИЕ ФАЙЛЫ (учти при ревизии):\n" + "\n".join(f"  - {s}" for s in stuck_files)
     try:
         new_specs      = await ask_agent(logger, "spec_reviewer", ctx, cache, 0, randomize, language)
         change_summary = new_specs.get("change_summary", "нет описания")
@@ -145,13 +175,35 @@ async def revise_spec(
         save_artifact(project_path, "A2", state["system_specs"])
 
         _stats = stats or ModelStats(project_path)
+
+        # Обновляем архитектуру (A3) под изменённую A2
+        language = state.get("language", "python")
+        try:
+            logger.info("🏗️  Обновляю архитектуру (A3) под новую спецификацию ...")
+            arch_ctx = (
+                f"Запрос:\n{state['task']}\n\n"
+                f"Обновлённая спецификация (A2):\n{json.dumps(state['system_specs'], ensure_ascii=False, indent=2)}\n\n"
+                f"Текущая архитектура:\n{state.get('architecture', '')}\n\n"
+                f"Текущие файлы проекта: {state.get('files', [])}\n\n"
+                f"Целевой язык: {LANG_DISPLAY.get(language, language)}\n\n"
+                f"ВАЖНО: адаптируй архитектуру под изменения в A2. "
+                f"Сохрани существующие файлы и модули. Меняй только то, что затронуто."
+            )
+            arch_resp = await ask_agent(logger, "architect", arch_ctx, cache, 0, randomize, language)
+            state["architecture"] = arch_resp.get("architecture", state.get("architecture", ""))
+            state["arch_resp"] = arch_resp
+            save_artifact(project_path, "A3", arch_resp)
+            logger.info(f"✅ Архитектура обновлена.")
+        except (LLMError, ValueError) as e:
+            logger.warning(f"⚠️  Не удалось обновить архитектуру: {e}. Продолжаем со старой.")
+
         await refresh_api_contract(logger, project_path, state, cache,
                                     _stats, randomize)
 
         a5_ok = await phase_review_api_contract(
             logger, project_path, state, cache, _stats,
             state.get("api_contract", {}),
-            {"architecture": state.get("architecture", ""), "files": state.get("files", [])},
+            state.get("arch_resp", {"architecture": state.get("architecture", ""), "files": state.get("files", [])}),
             state.get("system_specs", {}),
             randomize,
         )

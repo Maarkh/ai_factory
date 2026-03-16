@@ -10,7 +10,7 @@ from config import CACHEABLE_AGENTS, MAX_LLM_RETRIES
 from cache import ThreadSafeCache, cache_key
 from exceptions import LLMError
 from log_utils import get_model_config, log_model_choice, log_interaction
-from json_utils import extract_json_from_text
+from json_utils import extract_json_from_text, repair_truncated_json
 from lang_utils import get_system_prompt
 
 # Regex для garbage tokens deepseek-coder (begin_of_sentence и т.п.)
@@ -339,7 +339,17 @@ async def ask_agent(
                 raise LLMError(f"[{agent}:{model}] пустой ответ от LLM (json)")
             if done_reason == "length":
                 logger.warning(f"[{agent}:{model}] ответ обрезан (done_reason=length, num_predict={max_tokens})")
-            result = json.loads(raw)
+            # Парсим JSON; при обрезке — пробуем repair перед fallback на plain text
+            result: dict | None = None
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError:
+                if done_reason == "length":
+                    result = repair_truncated_json(raw)
+                    if result is not None:
+                        logger.info(f"[{agent}:{model}] обрезанный JSON восстановлен")
+                if result is None:
+                    result = extract_json_from_text(raw)
             if not isinstance(result, dict) or not result:
                 raise json.JSONDecodeError(
                     f"Ожидался непустой dict, получен {type(result).__name__}", raw or "", 0

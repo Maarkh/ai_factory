@@ -511,6 +511,7 @@ async def _run_initial_pipeline(
         "business_requirements": ba_resp,
         "system_specs":         sa_resp,
         "architecture":         arch_resp.get("architecture", ""),
+        "arch_resp":            arch_resp,  # полный dict (dependencies, files) для каскадных обновлений
         "api_contract":         {},
         "test_plan":            {},
         "files":                files_list,

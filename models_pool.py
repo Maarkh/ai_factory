@@ -83,20 +83,20 @@ MODEL_POOL_local: dict[str, list[dict]] = {
 #MODEL_POOLS_works: dict[str, list[dict]] = {
 MODEL_POOLS: dict[str, list[dict]] = {
     # Код / патчи — deepseek-coder (быстрый, целиком в VRAM)
-    "developer":             [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "developer_patch":       [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "reviewer":              [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "test_generator":        [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "self_reflect":          [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "qa_runtime":            [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
+    "developer":             [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "developer_patch":       [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "reviewer":              [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "test_generator":        [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "self_reflect":          [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "qa_runtime":            [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
     # JSON-генерация / валидация — deepseek-coder (скорость критична)
-    "contract_analyst":      [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "a5_validator":          [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "a5_business_reviewer":  [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "a5_architect_reviewer": [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "a5_contract_reviewer":  [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "arch_validator":        [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
-    "devops_runtime":        [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
+    "contract_analyst":      [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "a5_validator":          [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "a5_business_reviewer":  [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "a5_architect_reviewer": [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "a5_contract_reviewer":  [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "arch_validator":        [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
+    "devops_runtime":        [_remote("qwen3-coder-30b-a3b-instruct-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=90000, num_ctx=31955)],
     # Рассуждение / понимание — qwen3 (лучше для анализа задач)
     "business_analyst":      [_remote("qwen3-32b-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],
     "system_analyst":        [_remote("qwen3-32b-fp8",url="https://ai-mlops.russianpost.ru/v1",key="gpustack_637ff66f84deff05_401f764d059e39ce24a2182b3acb2ccb",timeout=600, max_tokens=24000, num_ctx=31955)],

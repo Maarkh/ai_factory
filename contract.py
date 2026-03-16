@@ -105,7 +105,7 @@ async def _validate_and_patch_contract(
     contract["file_contracts"] = fc
     contract["global_imports"]  = gi
     return run_a5_validation_pipeline(
-        contract, state.get("architecture", {}), files, logger,
+        contract, state.get("arch_resp", {}), files, logger,
         requirements_path=req_path if req_path.exists() else None,
         src_path=project_path / SRC_DIR,
     )
@@ -176,7 +176,7 @@ async def patch_contract_for_file(
             contract["global_imports"] = gi
             files_list = state.get("files", [])
             contract = run_a5_validation_pipeline(
-                contract, state.get("architecture", {}), files_list, logger,
+                contract, state.get("arch_resp", {}), files_list, logger,
                 requirements_path=req_path if req_path.exists() else None,
                 src_path=project_path / SRC_DIR,
             )
@@ -353,7 +353,7 @@ async def refresh_api_contract(
             new_contract, state.get("system_specs", {}), files_list, logger
         )
         new_contract = run_a5_validation_pipeline(
-            new_contract, state.get("architecture", {}), files_list, logger,
+            new_contract, state.get("arch_resp", {}), files_list, logger,
             requirements_path=req_path if req_path.exists() else None,
             src_path=project_path / SRC_DIR,
         )
@@ -376,7 +376,7 @@ async def refresh_api_contract(
                     new_gi[fname] = new_imports
         if restored_any:
             new_contract = run_a5_validation_pipeline(
-                new_contract, state.get("architecture", {}), files_list, logger,
+                new_contract, state.get("arch_resp", {}), files_list, logger,
                 requirements_path=req_path if req_path.exists() else None,
                 src_path=project_path / SRC_DIR,
             )
