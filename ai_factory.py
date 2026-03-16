@@ -4,6 +4,7 @@
 
 """
 
+import argparse
 import asyncio
 import json
 import re
@@ -738,5 +739,43 @@ async def main() -> None:
         print_iteration_table(state)
 
 
+def _parse_args() -> argparse.Namespace:
+    from models_pool import get_profile_names
+    profiles = get_profile_names()
+
+    parser = argparse.ArgumentParser(
+        description="Мультифайловая Фабрика Агентов v15.0",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"Доступные cloud профили: {', '.join(profiles)}",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--local", action="store_true", default=True,
+        help="Локальный Ollama (по умолчанию)",
+    )
+    group.add_argument(
+        "--cloud", metavar="PROFILE", type=str, default=None,
+        help=f"Облачный профиль: {', '.join(p for p in profiles if p != 'local')}",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = _parse_args()
+    if args.cloud:
+        from models_pool import set_profile, get_profile_names
+        if args.cloud not in get_profile_names():
+            print(f"❌ Неизвестный профиль '{args.cloud}'. Доступные: {', '.join(get_profile_names())}")
+            exit(1)
+        set_profile(args.cloud)
+        # Проверка что API ключ заполнен
+        from models_pool import MODEL_POOLS
+        sample_key = next(iter(MODEL_POOLS.values()))[0].get("key", "")
+        if not sample_key:
+            env_var = f"{args.cloud.upper()}_API_KEY"
+            print(f"❌ Ключ не задан. Заполни {env_var} в .env")
+            exit(1)
+        print(f"☁️  Профиль: {args.cloud}")
+    else:
+        print("🏠 Профиль: local (Ollama)")
     asyncio.run(main())
