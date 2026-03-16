@@ -790,6 +790,13 @@ async def phase_develop(
 
         if not code:
             dev_model = get_model("developer", attempt, randomize=randomize)
+            # Если patch не сработал — усилить инструкцию не терять функции
+            if use_patch and existing_code:
+                dev_ctx += (
+                    "\n\n⛔ ВНИМАНИЕ: patch-режим не сработал, ты пишешь ПОЛНЫЙ файл.\n"
+                    "ОБЯЗАТЕЛЬНО сохрани ВСЕ существующие функции и классы из ТЕКУЩЕГО КОДА.\n"
+                    "Удаление функций = автоматический REJECT.\n"
+                )
             logger.info(
                 f"💻 [{dev_model}] Разработчик пишет {current_file} (попытка {attempt + 1}/{MAX_FILE_ATTEMPTS}) ..."
             )
@@ -839,11 +846,11 @@ async def phase_develop(
         if global_imports:
             code = ensure_a5_imports(code, global_imports)
 
-        # Удаление лишних cross-file project imports, которых нет в A5
-        # (LLM часто добавляет циклические / несуществующие импорты из других файлов)
+        # Удаление cross-file project imports несуществующих имён
+        # (LLM часто выдумывает импорты; оставляем если имя есть в A5 или реально в файле)
         project_files = state.get("files", [])
-        if project_files and global_imports:
-            code = strip_non_a5_cross_imports(code, global_imports, project_files)
+        if project_files:
+            code = strip_non_a5_cross_imports(code, global_imports, project_files, global_context)
 
         # Force-approve mode: файл не на диске после MAX_CUMULATIVE попыток →
         # записываем что есть и approve без проверок
@@ -879,6 +886,19 @@ async def phase_develop(
             logger, cache, src_path, current_file, code, state, stats, randomize,
             file_path, file_contract, global_context, global_imports, language,
         )
+
+        # Детекция зацикливания reviewer: если все последние feedback одинаковы — auto-approve
+        fb_history = state.get("feedback_history", {}).get(current_file, [])
+        reviewer_looping = (
+            len(fb_history) >= MAX_FEEDBACK_HISTORY
+            and len(set(fb_history[-MAX_FEEDBACK_HISTORY:])) == 1
+        )
+        if reviewer_looping:
+            logger.warning(
+                f"⚠️  {current_file}: reviewer зациклился (одинаковый feedback {MAX_FEEDBACK_HISTORY} раз) → auto-approve"
+            )
+            _approve_file(logger, state, project_path, current_file, attempt, dev_model, stats, file_attempts)
+            continue
 
         # Внешний ревью
         rev_status, rev_feedback, needs_spec = await _review_file(

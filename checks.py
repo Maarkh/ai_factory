@@ -106,6 +106,21 @@ def apply_search_replace(code: str, changes: list[dict]) -> str | None:
                     code = "\n".join(code_lines)
                     found = True
                     break
+            # Fuzzy fallback: ищем блок с наибольшим сходством (>= 0.7)
+            if not found and len(search_lines) >= 1:
+                search_text = "\n".join(search_lines)
+                best_ratio, best_i = 0.0, -1
+                window = len(search_lines)
+                for i in range(len(code_lines) - window + 1):
+                    candidate = "\n".join(code_lines[i:i + window])
+                    ratio = difflib.SequenceMatcher(None, search_text, candidate).ratio()
+                    if ratio > best_ratio:
+                        best_ratio, best_i = ratio, i
+                if best_ratio >= 0.7 and best_i >= 0:
+                    replace_lines = replace.splitlines() if replace else [""]
+                    code_lines[best_i:best_i + window] = replace_lines
+                    code = "\n".join(code_lines)
+                    found = True
             if not found:
                 return None
     return code
@@ -225,14 +240,17 @@ def strip_non_a5_cross_imports(
     code: str,
     global_imports: list[str],
     project_files: list[str],
+    global_context: str = "",
 ) -> str:
-    """Удаляет из кода cross-file project imports, которых нет в A5 global_imports.
+    """Удаляет из кода cross-file project imports несуществующих имён.
 
-    LLM часто добавляет лишние импорты из других файлов проекта (создавая
-    циклические зависимости или ссылаясь на несуществующие имена).
+    Оставляет импорт если:
+      1) имя есть в A5 global_imports, ИЛИ
+      2) имя реально существует в public API целевого файла (global_context).
+    Удаляет только импорты имён, которых нигде нет (LLM выдумал).
     Не трогает stdlib, pip-пакеты — только import из файлов проекта.
     """
-    if not project_files or not code.strip() or not global_imports:
+    if not project_files or not code.strip():
         return code
 
     project_stems = {Path(f).stem for f in project_files}
@@ -240,7 +258,7 @@ def strip_non_a5_cross_imports(
     # Нормализованные A5 imports: stem → set(imported names)
     a5_sources: dict[str, set[str]] = {}
     a5_bare: set[str] = set()  # import module (без from)
-    for imp in global_imports:
+    for imp in (global_imports or []):
         if not isinstance(imp, str):
             continue
         m = re.match(r"from\s+([\w.]+)\s+import\s+(.+)", imp.strip())
@@ -254,6 +272,31 @@ def strip_non_a5_cross_imports(
             if m2 and m2.group(1).split(".")[0] in project_stems:
                 a5_bare.add(m2.group(1).split(".")[0])
 
+    # Реально существующие имена из public API: stem → set(names)
+    real_names: dict[str, set[str]] = {}
+    if global_context:
+        _cur_stem = ""
+        for gc_line in global_context.splitlines():
+            if gc_line.startswith("--- ") and gc_line.endswith(" PUBLIC API ---"):
+                fname = gc_line.split("---")[1].strip().replace(" PUBLIC API", "").strip()
+                _cur_stem = Path(fname).stem
+            elif _cur_stem:
+                gm = re.match(r"(?:class|def|async def)\s+(\w+)", gc_line.strip())
+                if gm:
+                    real_names.setdefault(_cur_stem, set()).add(gm.group(1))
+                # Top-level assignments: NAME = ...
+                am = re.match(r"(\w+)\s*=", gc_line.strip())
+                if am and not gc_line.strip().startswith(("_", "#")):
+                    real_names.setdefault(_cur_stem, set()).add(am.group(1))
+
+    def _is_allowed(stem: str, name: str) -> bool:
+        """Имя разрешено если есть в A5 ИЛИ реально существует в файле."""
+        if stem in a5_sources and name in a5_sources[stem]:
+            return True
+        if stem in real_names and name in real_names[stem]:
+            return True
+        return False
+
     lines = code.split("\n")
     cleaned: list[str] = []
     for line in lines:
@@ -262,12 +305,10 @@ def strip_non_a5_cross_imports(
         if m:
             stem = m.group(1).split(".")[0]
             if stem in project_stems:
-                if stem not in a5_sources:
-                    continue  # Весь import из этого файла — лишний
                 names = [n.strip() for n in m.group(2).split(",") if n.strip()]
-                allowed = [n for n in names if n.split()[0] in a5_sources[stem]]
+                allowed = [n for n in names if _is_allowed(stem, n.split()[0])]
                 if not allowed:
-                    continue  # Все имена лишние
+                    continue  # Все имена — выдуманные
                 if len(allowed) < len(names):
                     cleaned.append(f"from {m.group(1)} import {', '.join(allowed)}")
                     continue
@@ -275,7 +316,7 @@ def strip_non_a5_cross_imports(
             m2 = re.match(r"import\s+([\w.]+)", stripped)
             if m2:
                 stem = m2.group(1).split(".")[0]
-                if stem in project_stems and stem not in a5_bare and stem not in a5_sources:
+                if stem in project_stems and stem not in a5_bare and stem not in a5_sources and stem not in real_names:
                     continue
         cleaned.append(line)
     return "\n".join(cleaned)

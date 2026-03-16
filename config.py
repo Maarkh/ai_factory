@@ -10,7 +10,7 @@ load_dotenv()
 # ─────────────────────────────────────────────
 
 BASE_DIR     = Path(os.getenv("PROJECT_BASE_DIR", "/media/mikhail/RAD/py_proj"))
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434")
 LLM_API_KEY  = os.getenv("LLM_API_KEY",  "ollama")
 LLM_TIMEOUT  = float(os.getenv("LLM_TIMEOUT", "300.0"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "16384"))
@@ -35,7 +35,7 @@ MAX_FEEDBACK_HISTORY = 3
 MAX_A5_PATCHES_PER_FILE = 2   # Лимит патч-ресетов контракта A5 на файл
 MAX_ITERS_DEFAULT       = 200 # Начальный max_iters для нового проекта
 MAX_ITERS_INCREMENT     = 15  # Добавляем к max_iters при запросе продолжения
-MAX_LLM_RETRIES         = 3   # Число retry для ask_agent
+MAX_LLM_RETRIES         = 5   # Число retry для ask_agent (5xx нужен запас на рестарт)
 SELF_REFLECT_RETRIES    = 1   # max_retries для self_reflect (модель слабая)
 FLUSH_EVERY = 20              # сбрасывать на диск каждые N записей
 

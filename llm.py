@@ -16,13 +16,16 @@ from lang_utils import get_system_prompt
 # Regex для garbage tokens deepseek-coder (begin_of_sentence и т.п.)
 _GARBAGE_TOKEN_RE = re.compile(r"<[｜|][\w▁]+[｜|]>")
 _GARBAGE_DEDUP_RE = re.compile(r"(\w+)" + r"<[｜|][\w▁]+[｜|]>" + r"\1")
+# <think>...</think> блоки qwen3 reasoning mode
+_THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>")
 
 
 def _strip_garbage_tokens(text: str) -> str:
-    """Убирает garbage tokens LLM (deepseek-coder) из любого текста."""
+    """Убирает garbage tokens LLM и <think> блоки из текста."""
+    text = _THINK_TAG_RE.sub("", text)
     text = _GARBAGE_DEDUP_RE.sub(r"\1", text)
     text = _GARBAGE_TOKEN_RE.sub("", text)
-    return text
+    return text.strip()
 
 
 # ── LLM Backend Protocol ─────────────────────────────────────────────────────
@@ -125,18 +128,124 @@ class OllamaBackend:
         return content, done_reason
 
 
+class OpenAIBackend:
+    """OpenAI-compatible /v1/chat/completions streaming backend (GPUstack, vLLM и т.п.)."""
+
+    def __init__(
+        self, base_url: str, num_ctx: int, overall_timeout: float,
+        api_key: str = "",
+    ) -> None:
+        api_base = base_url.rstrip("/")
+        if not api_base.endswith("/v1"):
+            api_base += "/v1"
+        self._chat_url = f"{api_base}/chat/completions"
+        self._num_ctx = num_ctx          # хранится, но не передаётся (сервер задаёт сам)
+        self._overall_timeout = overall_timeout
+        self._headers: dict[str, str] = {}
+        if api_key and api_key != "ollama":
+            self._headers["Authorization"] = f"Bearer {api_key}"
+        self._http_timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+
+    async def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool = False,
+    ) -> tuple[str, str]:
+        async with httpx.AsyncClient(
+            timeout=self._http_timeout, headers=self._headers,
+        ) as client:
+            return await asyncio.wait_for(
+                self._stream(client, model, messages, temperature, max_tokens, json_mode),
+                timeout=self._overall_timeout,
+            )
+
+    async def _stream(
+        self,
+        client: httpx.AsyncClient,
+        model: str,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> tuple[str, str]:
+        payload: dict = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
+        content_parts: list[str] = []
+        done_reason = "stop"
+
+        async with client.stream("POST", self._chat_url, json=payload) as resp:
+            if resp.status_code >= 400:
+                body = await resp.aread()
+                raise httpx.HTTPStatusError(
+                    f"OpenAI {resp.status_code}: {body[:500].decode(errors='replace')}",
+                    request=resp.request,
+                    response=resp,
+                )
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line or line.startswith(":"):
+                    continue
+                # SSE формат: "data: {...}" или "data:{...}"
+                if line.startswith("data: "):
+                    data = line[6:]
+                elif line.startswith("data:"):
+                    data = line[5:]
+                else:
+                    continue
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                # content — полезный текст; reasoning_content (qwen3) пропускаем
+                if delta.get("content"):
+                    content_parts.append(delta["content"])
+                finish = choices[0].get("finish_reason")
+                if finish == "length":
+                    done_reason = "length"
+
+        content = _strip_garbage_tokens("".join(content_parts))
+        return content, done_reason
+
+
 # ── Backend cache ─────────────────────────────────────────────────────────────
-# Бэкенды кэшируются по (url, num_ctx, timeout, key) — один инстанс на уникальный сервер.
+# Бэкенды кэшируются по (url, num_ctx, timeout, key, api) — один инстанс на уникальный сервер.
 
-_backend_cache: dict[tuple, OllamaBackend] = {}
+_backend_cache: dict[tuple, LLMBackend] = {}
 
 
-def _get_or_create_backend(config: dict) -> OllamaBackend:
-    """Возвращает OllamaBackend для конфига, создаёт если нет в кэше."""
-    cache_key_tuple = (config["url"], config["num_ctx"], config["timeout"], config["key"])
+def _detect_api_type(url: str) -> str:
+    """Автоопределение типа API по URL: /v1 → openai, иначе ollama."""
+    clean = url.rstrip("/")
+    return "openai" if clean.endswith("/v1") else "ollama"
+
+
+def _get_or_create_backend(config: dict) -> LLMBackend:
+    """Возвращает бэкенд для конфига, создаёт если нет в кэше."""
+    api_type = config.get("api", "auto")
+    if api_type == "auto":
+        api_type = _detect_api_type(config["url"])
+    cache_key_tuple = (config["url"], config["num_ctx"], config["timeout"], config["key"], api_type)
     backend = _backend_cache.get(cache_key_tuple)
     if backend is None:
-        backend = OllamaBackend(
+        cls = OpenAIBackend if api_type == "openai" else OllamaBackend
+        backend = cls(
             base_url=config["url"],
             num_ctx=config["num_ctx"],
             overall_timeout=config["timeout"],
@@ -214,11 +323,13 @@ async def ask_agent(
     ]
 
     last_exc: Exception = LLMError("Нет попыток")
+    server_error = False  # предыдущий retry был 5xx — нужен длинный backoff
     for retry in range(max_retries):
         if retry > 0:
-            delay = 2 ** retry
+            delay = min(15 * (2 ** (retry - 1)), 60) if server_error else 2 ** retry
             logger.info(f"[{agent}:{model}] Backoff {delay}с (retry={retry})")
             await asyncio.sleep(delay)
+        server_error = False
         raw: str | None = None
         try:
             raw, done_reason = await backend.chat(
@@ -249,6 +360,11 @@ async def ask_agent(
             if isinstance(e, (httpx.TimeoutException, asyncio.TimeoutError)):
                 logger.warning(f"[{agent}:{model}] таймаут ({type(e).__name__}), retry {retry+1}/{max_retries}")
                 continue  # retry без fallback на plain text
+            # 5xx — сервер перегружен/рестартуется, fallback бесполезен, ждём дольше
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code >= 500:
+                server_error = True
+                logger.warning(f"[{agent}:{model}] сервер {e.response.status_code}, retry {retry+1}/{max_retries}")
+                continue
             logger.warning(f"[{agent}:{model}] json_object failed: {e}, пробую plain text...")
             try:
                 raw, done_reason = await backend.chat(
