@@ -240,9 +240,13 @@ async def phase_review_api_contract(
             if not non_init:
                 empty_classes.append(f"{cls_name} в {fname}")
     if empty_classes:
-        logger.warning(
-            f"⛔ A5 REJECT (детерминистский): классы без публичных методов: "
-            + ", ".join(empty_classes)
+        from experience import record_experience
+        msg = f"A5 классы без методов: {', '.join(empty_classes)}"
+        logger.warning(f"⛔ A5 REJECT (детерминистский): {msg}")
+        record_experience(
+            error_pattern=msg,
+            fix_description="Contract analyst должен генерировать ВСЕ публичные методы классов, не только __init__",
+            category="a5_contract",
         )
         return False
 
@@ -306,6 +310,18 @@ async def phase_generate_api_contract(
         f"Файлы: {arch_resp.get('files', [])}\n\n"
         f"Доступные pip-пакеты (requirements.txt):\n{req_content}"
     )
+    # Feedback от предыдущей попытки (если A5 был отклонён)
+    a5_fb = state.get("_a5_rejection_feedback", "")
+    if a5_fb:
+        ctx += f"\n\n⛔ ПРЕДЫДУЩАЯ ВЕРСИЯ A5 ОТКЛОНЕНА:\n{a5_fb}\nИСПРАВЬ эти проблемы."
+
+    # Опыт: антипаттерны A5 из прошлых проектов
+    from experience import search_experience, format_experience_context
+    a5_exp = search_experience("A5 классы методы контракт", category="a5_contract")
+    a5_exp += search_experience("contract", category="antipattern")
+    exp_ctx = format_experience_context(a5_exp)
+    if exp_ctx:
+        ctx += f"\n\n{exp_ctx}"
 
     try:
         contract = await ask_agent(logger, "contract_analyst", ctx, cache, 0, randomize, language)

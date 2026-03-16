@@ -132,6 +132,14 @@ async def revise_spec(
         ctx += f"\n\nСТАТУС РАЗРАБОТКИ: одобрено {len(approved)}/{len(all_files)} файлов."
         if stuck_files:
             ctx += "\nЗАСТРЯВШИЕ ФАЙЛЫ (учти при ревизии):\n" + "\n".join(f"  - {s}" for s in stuck_files)
+
+    # Опыт прошлых проектов: антипаттерны и spec revisions
+    from experience import search_experience, format_experience_context
+    past_exp = search_experience(problem, category="antipattern")
+    past_exp += search_experience(problem, category="spec_revision")
+    exp_ctx = format_experience_context(past_exp)
+    if exp_ctx:
+        ctx += f"\n\n{exp_ctx}"
     try:
         new_specs      = await ask_agent(logger, "spec_reviewer", ctx, cache, 0, randomize, language)
         change_summary = new_specs.get("change_summary", "нет описания")
@@ -277,6 +285,14 @@ async def revise_spec(
             "reset_files":    affected_files,
             "kept_files":     unchanged,
         })
+
+        # Записываем опыт: какие проблемы спецификации возникли и как решились
+        from experience import record_experience
+        record_experience(
+            error_pattern=f"Spec revision: {problem[:300]}",
+            fix_description=f"Изменение: {change_summary[:200]}. Сброшены: {', '.join(affected_files) or 'нет'}",
+            category="spec_revision",
+        )
 
         arch_path = project_path / "ARCHITECTURE.md"
         arch_md   = arch_path.read_text(encoding="utf-8") if arch_path.exists() else ""

@@ -9,9 +9,15 @@ from pathlib import Path
 # ─────────────────────────────────────────────
 
 
-def _auto_add_requirement(requirements_path: Path, package_name: str, logger: logging.Logger) -> None:
+def _auto_add_requirement(
+    requirements_path: Path, package_name: str, logger: logging.Logger,
+    project_stems: set[str] | None = None,
+) -> None:
     """Авто-добавляет пакет в requirements.txt если его ещё нет."""
     if not requirements_path or not requirements_path.exists():
+        return
+    # Не добавляем файлы проекта как pip-пакеты (models, config, utils и т.д.)
+    if project_stems and package_name.lower().replace("-", "_") in project_stems:
         return
     # Исправляем невалидные pip-имена (LLM часто пишет import-имя вместо pip-имени)
     from code_context import WRONG_PIP_PACKAGES
@@ -369,8 +375,12 @@ def _validate_global_imports(
 
     # Допустимые имена: stdlib
     stdlib = sys.stdlib_module_names if hasattr(sys, "stdlib_module_names") else set()
-    # Модули проекта (без расширения)
+    # Модули проекта (без расширения) + корневые package-директории
     project_modules = {Path(f).stem for f in project_files}
+    for f in project_files:
+        parts = Path(f).parts
+        if len(parts) > 1:
+            project_modules.add(parts[0])  # models/ → "models"
     # pip-пакеты из dependencies архитектуры
     deps = arch_resp.get("dependencies", []) if isinstance(arch_resp, dict) else []
     pip_names: set[str] = set()

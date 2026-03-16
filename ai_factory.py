@@ -474,13 +474,20 @@ async def _run_initial_pipeline(
             print(f"  ⏳ Пауза {delay}с перед попыткой {arch_attempt + 1}/5 ...")
             await asyncio.sleep(delay)
         try:
+            arch_ctx = (
+                f"Запрос:\n{task}\n\n"
+                f"Спецификация от SA (A2):\n{json.dumps(sa_resp, ensure_ascii=False, indent=2)}\n\n"
+                f"Целевой язык: {LANG_DISPLAY.get(language, language)}"
+            )
+            # Опыт прошлых проектов для архитектора
+            from experience import search_experience, format_experience_context
+            arch_exp = search_experience(task, category="spec_revision")
+            arch_exp += search_experience(task, category="antipattern")
+            arch_exp_ctx = format_experience_context(arch_exp)
+            if arch_exp_ctx:
+                arch_ctx += f"\n\n{arch_exp_ctx}"
             arch_resp = await ask_agent(
-                logger, "architect",
-                (
-                    f"Запрос:\n{task}\n\n"
-                    f"Спецификация от SA (A2):\n{json.dumps(sa_resp, ensure_ascii=False, indent=2)}\n\n"
-                    f"Целевой язык: {LANG_DISPLAY.get(language, language)}"
-                ),
+                logger, "architect", arch_ctx,
                 cache, arch_attempt, randomize_models, language,
             )
             if await phase_validate_architecture(
@@ -533,12 +540,16 @@ async def _run_initial_pipeline(
         "document_generated":   False,
     }
 
+    a5_rejection_feedback = ""
     for a5_attempt in range(MAX_A5_REVIEW_ATTEMPTS):
+        if a5_rejection_feedback:
+            state["_a5_rejection_feedback"] = a5_rejection_feedback
         api_contract = await phase_generate_api_contract(
             logger, project_path, state, cache, stats,
             arch_resp, sa_resp, randomize_models,
         )
         state["api_contract"] = api_contract
+        state.pop("_a5_rejection_feedback", None)
         a5_files = set(api_contract.get("file_contracts", {}).keys())
         if a5_files:
             sync_files_with_a5(state, a5_files, logger)
@@ -550,6 +561,34 @@ async def _run_initial_pipeline(
             api_contract, arch_resp, sa_resp, randomize_models,
         ):
             break
+        # Собираем feedback для следующей попытки
+        fc = api_contract.get("file_contracts", {})
+        empty_cls = []
+        for fname, items in fc.items():
+            if not isinstance(items, list):
+                continue
+            classes = {}
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                sig = item.get("signature", "")
+                name = item.get("name", "")
+                if sig.startswith("class "):
+                    classes.setdefault(name, [])
+                elif "(self" in sig or "(cls" in sig:
+                    if classes:
+                        classes[list(classes.keys())[-1]].append(name)
+            for cn, methods in classes.items():
+                if Path(fname).stem not in ("models", "data_models", "schemas", "types"):
+                    if not [m for m in methods if m != "__init__"]:
+                        empty_cls.append(f"{cn} в {fname}")
+        if empty_cls:
+            a5_rejection_feedback = (
+                f"A5 ОТКЛОНЁН: классы без публичных методов: {', '.join(empty_cls)}. "
+                "Добавь ВСЕ публичные методы для каждого бизнес-класса."
+            )
+        else:
+            a5_rejection_feedback = "A5 ОТКЛОНЁН ревьюером. Проверь полноту контрактов."
         logger.warning(f"🔄 A5 отклонён, перегенерация (попытка {a5_attempt + 2}/{MAX_A5_REVIEW_ATTEMPTS}) ...")
     else:
         logger.warning(f"⚠️  A5 не прошёл ревью за {MAX_A5_REVIEW_ATTEMPTS} попыток, продолжаем с текущим.")

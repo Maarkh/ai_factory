@@ -56,6 +56,13 @@ async def _review_file(
             rev_ctx += f"API КОНТРАКТ (A5) для {current_file}:\n{json.dumps(file_contract, ensure_ascii=False, indent=2)}\n\n"
         if global_imports:
             rev_ctx += f"ОЖИДАЕМЫЕ ИМПОРТЫ (A5):\n{json.dumps(global_imports, ensure_ascii=False, indent=2)}\n\n"
+        # Опыт: антипаттерны — за что не стоит reject-ить (уже приводило к зацикливанию)
+        rev_exp = search_experience(current_file, category="antipattern")
+        if rev_exp:
+            rev_ctx += "⚠️ АНТИПАТТЕРНЫ (эти замечания ранее приводили к зацикливанию — НЕ ПОВТОРЯЙ):\n"
+            for exp in rev_exp[:3]:
+                rev_ctx += f"  - {exp.get('error', '')[:150]}\n"
+            rev_ctx += "\n"
         rev_ctx += f"Файл: {current_file}\nКод:\n{code}"
         result   = await ask_agent(logger, "reviewer", rev_ctx,
                                    cache, attempt, randomize, language)
@@ -504,10 +511,11 @@ def _build_dev_context(
                 + "\n\n"
             )
 
-    # Опыт прошлых проектов (если есть feedback — ищем релевантный опыт)
+    # Опыт прошлых проектов (ищем по feedback + антипаттернам)
     last_fb = state.get("feedbacks", {}).get(current_file, "")
     if last_fb:
         experiences = search_experience(last_fb, category="develop")
+        experiences += search_experience(last_fb, category="antipattern")
         exp_ctx = format_experience_context(experiences)
         if exp_ctx:
             dev_ctx += exp_ctx
@@ -672,10 +680,18 @@ def _approve_file(
     stats.record("developer", dev_model, True)
     logger.info(f"✅ {current_file} одобрен.")
     prev_feedback = state.get("feedbacks", {}).get(current_file, "")
+    fb_history = state.get("feedback_history", {}).get(current_file, [])
     if prev_feedback and attempt > 0:
+        # Описываем ЧТО помогло: последний feedback (проблема) + сколько попыток
+        fix_desc = (
+            f"Файл {current_file}: проблема решена на попытке {attempt + 1}. "
+            f"Проблема: {prev_feedback[:200]}. "
+            f"Всего попыток: {attempt + 1}, "
+            f"уникальных замечаний: {len(set(fb_history))}"
+        )
         record_experience(
             error_pattern=prev_feedback[:500],
-            fix_description=f"Файл {current_file} исправлен на попытке {attempt + 1}",
+            fix_description=fix_desc[:500],
             category="develop",
             file=current_file,
         )
@@ -797,6 +813,11 @@ async def phase_develop(
             if file_contract:
                 patch_ctx += f"API КОНТРАКТ (A5):\n{json.dumps(file_contract, ensure_ascii=False, indent=2)}\n\n"
             patch_ctx += f"ЗАМЕЧАНИЯ (исправь ТОЛЬКО эти проблемы):\n{last_feedback}\n"
+            # Опыт: как исправлялись похожие проблемы
+            patch_exp = search_experience(last_feedback, category="develop")
+            patch_exp_ctx = format_experience_context(patch_exp)
+            if patch_exp_ctx:
+                patch_ctx += f"\n{patch_exp_ctx}"
             try:
                 patch_resp = await ask_agent(logger, "developer_patch", patch_ctx, cache, attempt, randomize, language)
                 changes = patch_resp.get("changes", [])
@@ -888,6 +909,13 @@ async def phase_develop(
             logger.warning(
                 f"⚠️  {current_file}: force-approve mode → код записан и одобрен без проверок."
             )
+            last_fb = state.get("feedbacks", {}).get(current_file, "")
+            record_experience(
+                error_pattern=f"Force-approve {current_file} после {total_attempts} попыток: {last_fb[:200]}",
+                fix_description="Файл не удалось исправить — проблема в A5 контракте или спецификации, не в коде",
+                category="antipattern",
+                file=current_file,
+            )
             stats.record("developer", dev_model, True)
             approved = state.setdefault("approved_files", [])
             if current_file not in approved:
@@ -907,6 +935,12 @@ async def phase_develop(
             file_path.write_text(code, encoding="utf-8")
             logger.warning(
                 f"⚠️  {current_file}: одинаковый feedback {MAX_FEEDBACK_HISTORY} раз → auto-approve"
+            )
+            record_experience(
+                error_pattern=f"Feedback loop {current_file}: {fb_history[-1][:200]}",
+                fix_description="Developer не может исправить — нужен патч A5 контракта или revise_spec",
+                category="antipattern",
+                file=current_file,
             )
             _approve_file(logger, state, project_path, current_file, attempt, dev_model, stats, file_attempts)
             continue
