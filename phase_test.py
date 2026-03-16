@@ -125,47 +125,38 @@ async def phase_e2e_review(
             )
         target_files = list(file_feedbacks.keys())
 
-        # Если targets пуст или покрывает > 50% файлов — полный сброс
-        if not target_files or len(target_files) > len(state["files"]) * 0.5:
-            combined_fb = "\n\n".join(
-                f"[{agents_map.get(ak, ak)}] → {t}:\n{fb}"
-                for ak, t, fb in rejections
-            )
-            logger.warning(f"❌ E2E REJECT — сброс ВСЕХ файлов (затронуто >{50 if target_files else 0}%).")
-            state["approved_files"] = []
-            for f in state["files"]:
-                state["feedbacks"][f] = f"E2E REJECT (кросс-файловая проблема):\n{combined_fb}"
-            files_to_reset = set(state["files"])
-        else:
-            # Находим зависимые файлы (импортирующие target_files)
-            gi = safe_contract(state).get("global_imports", {})
-            target_stems = {Path(t).stem for t in target_files}
-            dependent_files = set()
-            for f in state["files"]:
-                if f in target_files:
-                    continue
-                file_imports = gi.get(f, [])
-                imports_str = " ".join(file_imports) if isinstance(file_imports, list) else str(file_imports)
-                if any(stem in imports_str for stem in target_stems):
-                    dependent_files.add(f)
-            files_to_reset = set(target_files) | dependent_files
-            logger.warning(
-                f"❌ E2E REJECT — селективный сброс: {', '.join(sorted(files_to_reset))} "
-                f"(targets: {', '.join(target_files)}, зависимые: {', '.join(sorted(dependent_files)) or 'нет'})"
-            )
-            state["approved_files"] = [f for f in state.get("approved_files", []) if f not in files_to_reset]
-            for f in files_to_reset:
-                if f in file_feedbacks:
-                    state["feedbacks"][f] = (
-                        "E2E REJECT — проблемы в ЭТОМ файле:\n"
-                        + "\n\n".join(file_feedbacks[f])
-                    )
-                else:
-                    related = [t for t in target_files if t != f]
-                    state["feedbacks"][f] = (
-                        f"E2E REJECT (зависимый файл, затронут изменениями в: "
-                        f"{', '.join(related) if related else 'проект'})"
-                    )
+        # Селективный сброс: только target_files + зависимые от них
+        # (полный сброс удалён — он уничтожал весь прогресс при >50% targets)
+        if not target_files:
+            target_files = list(state["files"])[:1]  # fallback: первый файл
+        gi = safe_contract(state).get("global_imports", {})
+        target_stems = {Path(t).stem for t in target_files}
+        dependent_files = set()
+        for f in state["files"]:
+            if f in target_files:
+                continue
+            file_imports = gi.get(f, [])
+            imports_str = " ".join(file_imports) if isinstance(file_imports, list) else str(file_imports)
+            if any(stem in imports_str for stem in target_stems):
+                dependent_files.add(f)
+        files_to_reset = set(target_files) | dependent_files
+        logger.warning(
+            f"❌ E2E REJECT — селективный сброс: {', '.join(sorted(files_to_reset))} "
+            f"(targets: {', '.join(target_files)}, зависимые: {', '.join(sorted(dependent_files)) or 'нет'})"
+        )
+        state["approved_files"] = [f for f in state.get("approved_files", []) if f not in files_to_reset]
+        for f in files_to_reset:
+            if f in file_feedbacks:
+                state["feedbacks"][f] = (
+                    "E2E REJECT — проблемы в ЭТОМ файле:\n"
+                    + "\n\n".join(file_feedbacks[f])
+                )
+            else:
+                related = [t for t in target_files if t != f]
+                state["feedbacks"][f] = (
+                    f"E2E REJECT (зависимый файл, затронут изменениями в: "
+                    f"{', '.join(related) if related else 'проект'})"
+                )
 
         # Сброс счётчиков: первый E2E-сброс → частичный reset (дать 5 попыток),
         # повторные → не сбрасывать (developer уже пробовал с E2E фидбэком).
