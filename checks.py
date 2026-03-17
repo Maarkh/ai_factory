@@ -923,3 +923,53 @@ def diagnose_runtime_error(
         return result
 
     return None
+
+
+def check_runtime_imports(
+    src_path: Path,
+    project_files: list[str],
+) -> dict[str, str]:
+    """Лёгкая runtime-проверка: пытается импортировать каждый файл проекта.
+
+    Запускает `python -c "import module"` в subprocess для каждого файла.
+    Ловит ImportError, NameError, AttributeError без Docker.
+
+    Возвращает {filename: error_message} для файлов с ошибками. Пустой dict = OK.
+    """
+    import subprocess
+
+    issues: dict[str, str] = {}
+    project_stems = {Path(f).stem for f in project_files}
+    # Добавляем package dirs
+    for f in project_files:
+        parts = Path(f).parts
+        if len(parts) > 1:
+            project_stems.add(parts[0])
+
+    for fname in project_files:
+        if not fname.endswith(".py"):
+            continue
+        stem = Path(fname).stem
+        if "/" in fname:
+            stem = fname.replace("/", ".").removesuffix(".py")
+        try:
+            result = subprocess.run(
+                ["python", "-c", f"import {stem}"],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(src_path),
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                last_line = stderr.splitlines()[-1] if stderr else "Unknown error"
+                # Пропускаем ModuleNotFoundError для внешних пакетов (cv2, torch)
+                if "ModuleNotFoundError" in last_line:
+                    m = re.search(r"No module named '([\w.]+)'", last_line)
+                    if m:
+                        import_name = m.group(1).split(".")[0]
+                        if import_name not in project_stems:
+                            continue  # Внешний пакет — не баг кода
+                issues[fname] = last_line
+        except (subprocess.TimeoutExpired, Exception):
+            continue
+
+    return issues

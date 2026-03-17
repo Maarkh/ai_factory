@@ -83,9 +83,23 @@ def get_feedback_ctx(state: dict, filename: str) -> str:
             "НЕ используй ту же архитектуру классов/функций.\n\n"
             f"ЗАМЕЧАНИЕ:\n{history[-1]}"
         )
+    # Дедупликация: показываем только уникальные замечания (с количеством повторов)
+    seen: dict[str, int] = {}
+    order: list[str] = []
+    for fb in history:
+        if fb in seen:
+            seen[fb] += 1
+        else:
+            seen[fb] = 1
+            order.append(fb)
+
     parts = ["ИСТОРИЯ ЗАМЕЧАНИЙ (не повторяй одни и те же ошибки):"]
-    for i, fb in enumerate(history, 1):
-        parts.append(f"--- Попытка {i} ---\n{fb}")
+    for fb in order:
+        count = seen[fb]
+        prefix = f"[повторялось {count}x] " if count > 1 else ""
+        # Сжимаем длинные замечания
+        truncated = fb[:300] + "..." if len(fb) > 300 else fb
+        parts.append(f"  {prefix}{truncated}")
     return "\n".join(parts)
 
 

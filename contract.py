@@ -302,12 +302,20 @@ async def phase_generate_api_contract(
     req_path = _get_req_path(project_path)
     req_content = _read_req_content(req_path)
 
+    # Компактная архитектура для contract_analyst: только files + dependencies + описание
+    compact_arch = {
+        "files": arch_resp.get("files", []),
+        "dependencies": arch_resp.get("dependencies", []),
+    }
+    arch_text = arch_resp.get("architecture", "")
+    if arch_text:
+        compact_arch["architecture"] = arch_text[:1500]
+
     ctx = (
         f"Запрос: {state['task']}\n\n"
         f"Системная спецификация (A2):\n{json.dumps(sa_resp, ensure_ascii=False, indent=2)}\n\n"
-        f"Архитектура (A3/A4):\n{json.dumps(arch_resp, ensure_ascii=False, indent=2)}\n\n"
+        f"Архитектура (A3):\n{json.dumps(compact_arch, ensure_ascii=False, indent=2)}\n\n"
         f"Язык: {LANG_DISPLAY.get(language, language)}\n\n"
-        f"Файлы: {arch_resp.get('files', [])}\n\n"
         f"Доступные pip-пакеты (requirements.txt):\n{req_content}"
     )
     # Feedback от предыдущей попытки (если A5 был отклонён)

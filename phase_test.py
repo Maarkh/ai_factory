@@ -195,7 +195,13 @@ def phase_cross_file_check(
 
     src_path = project_path / SRC_DIR
     from code_context import validate_project_consistency
+    from checks import check_runtime_imports
     issues = validate_project_consistency(src_path, state["files"])
+
+    # Runtime import check — ловит ошибки, невидимые статическому анализу
+    runtime_issues = check_runtime_imports(src_path, state["files"])
+    for fname, error in runtime_issues.items():
+        issues.setdefault(fname, []).append(f"Runtime import error: {error}")
 
     if not issues:
         logger.info("✅ Кросс-файловая проверка проекта пройдена.")

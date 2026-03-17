@@ -420,17 +420,26 @@ def _build_dev_context(
     src_path: Path,
 ) -> str:
     """Собирает контекст для агента-разработчика."""
-    dev_ctx = (
-        f"Задача:\n{state['task']}\n\n"
-        f"СИСТЕМНЫЕ СПЕЦИФИКАЦИИ (A2):\n"
-        f"{json.dumps(state.get('system_specs', {}), ensure_ascii=False, indent=2)}\n\n"
-    )
-    # Краткое описание архитектуры (A3) — общая картина проекта
+    # A2 — только релевантные секции (data_models + components), без business_rules
+    specs = state.get("system_specs", {})
+    compact_specs = {}
+    if specs.get("data_models"):
+        compact_specs["data_models"] = specs["data_models"]
+    if specs.get("components"):
+        compact_specs["components"] = specs["components"]
+
+    dev_ctx = f"Задача:\n{state['task']}\n\n"
+    if compact_specs:
+        dev_ctx += (
+            f"СПЕЦИФИКАЦИЯ (A2, ключевое):\n"
+            f"{json.dumps(compact_specs, ensure_ascii=False, indent=2)}\n\n"
+        )
+
+    # Архитектура — краткое описание
     arch_text = state.get("architecture", "")
     if arch_text:
-        # Ограничиваем 1000 символов чтобы не раздувать контекст
-        arch_summary = arch_text[:1000] + ("..." if len(arch_text) > 1000 else "")
-        dev_ctx += f"АРХИТЕКТУРА ПРОЕКТА (A3):\n{arch_summary}\n\n"
+        arch_summary = arch_text[:800] + ("..." if len(arch_text) > 800 else "")
+        dev_ctx += f"АРХИТЕКТУРА (A3):\n{arch_summary}\n\n"
 
     dev_ctx += f"Файл для написания: `{current_file}`.\n\n"
 
@@ -701,6 +710,31 @@ def _approve_file(
     state["feedbacks"][current_file] = ""
     state.setdefault("feedback_history", {})[current_file] = []
     file_attempts[current_file] = 0
+
+    # Cross-file impact: если новый файл сломал вызовы в других одобренных файлах → де-апрув
+    src_path = project_path / SRC_DIR
+    from code_context import validate_cross_file_names
+    for other_file in list(approved):
+        if other_file == current_file:
+            continue
+        other_path = src_path / other_file
+        if not other_path.exists():
+            continue
+        try:
+            other_code = other_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        cross_warnings = validate_cross_file_names(other_code, other_file, state["files"], src_path)
+        if cross_warnings:
+            # Новый файл сломал другой одобренный → де-апрув другого
+            approved.remove(other_file)
+            feedback = (
+                f"Де-апрув: после изменения {current_file} сломались вызовы:\n"
+                + "\n".join(f"  - {w}" for w in cross_warnings)
+            )
+            state["feedbacks"][other_file] = feedback
+            state["file_attempts"][other_file] = 0
+            logger.warning(f"  ⚠️  {other_file}: де-апрув (сломан изменением {current_file})")
     update_artifact_a9(project_path, current_file, f"Одобрен на попытке {attempt + 1}. Модель: {dev_model}.")
 
 
@@ -924,17 +958,28 @@ async def phase_develop(
             file_attempts[current_file] = 0
             continue
 
-        # Детекция зацикливания: если все последние feedback одинаковы — auto-approve
-        # (ловит циклы и на детерминистских проверках, и на reviewer)
+        # Детекция зацикливания: если все последние feedback одинаковы
         fb_history = state.get("feedback_history", {}).get(current_file, [])
         feedback_looping = (
             len(fb_history) >= MAX_FEEDBACK_HISTORY
             and len(set(fb_history[-MAX_FEEDBACK_HISTORY:])) == 1
         )
         if feedback_looping:
+            last_fb_text = fb_history[-1] if fb_history else ""
+            is_deterministic = last_fb_text.startswith("АВТОМАТИЧЕСКИЙ REJECT")
+            if is_deterministic:
+                # Детерминистский reject (imports, stubs, syntax, contract) →
+                # developer НЕ МОЖЕТ исправить → эскалация на A5 patch, НЕ auto-approve
+                logger.warning(
+                    f"⚠️  {current_file}: детерминистский reject повторяется {MAX_FEEDBACK_HISTORY} раз → эскалация на A5 patch"
+                )
+                _reject_file(state, file_attempts, cumulative_attempts, current_file,
+                             attempt, total_attempts, last_fb_text, stats, dev_model, logger)
+                continue
+            # Reviewer loop → auto-approve (субъективное замечание)
             file_path.write_text(code, encoding="utf-8")
             logger.warning(
-                f"⚠️  {current_file}: одинаковый feedback {MAX_FEEDBACK_HISTORY} раз → auto-approve"
+                f"⚠️  {current_file}: reviewer зациклился ({MAX_FEEDBACK_HISTORY} раз) → auto-approve"
             )
             record_experience(
                 error_pattern=f"Feedback loop {current_file}: {fb_history[-1][:200]}",
