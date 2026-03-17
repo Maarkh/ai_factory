@@ -124,8 +124,8 @@ PROFILES["local"] = _fill(
 
 # ── work: рабочий GPUstack (.env: WORK_API_KEY) ─────────────────────────────
 PROFILES["work"] = _fill(
-    code_cfg   = _work("qwen3-coder-30b-a3b-instruct-fp8", max_tokens=90000),
-    json_cfg   = _work("qwen3-coder-30b-a3b-instruct-fp8", max_tokens=90000),
+    code_cfg   = _work("qwen3-coder-30b-a3b-instruct-fp8", max_tokens=32000),
+    json_cfg   = _work("qwen3-coder-30b-a3b-instruct-fp8", max_tokens=32000),
     reason_cfg = _work("qwen3-32b-fp8"),
 )
 

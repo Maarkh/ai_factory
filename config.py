@@ -41,7 +41,7 @@ FLUSH_EVERY = 20              # сбрасывать на диск каждые 
 
 # Пороги безопасности фаз (сколько провалов до пропуска/эскалации)
 MAX_ARCH_ATTEMPTS       = 5   # Попытки генерации архитектуры
-MAX_A5_REVIEW_ATTEMPTS  = 3   # Попытки ревью A5 контракта
+MAX_A5_REVIEW_ATTEMPTS  = 5   # Попытки ревью A5 контракта
 DEVELOP_STALL_THRESHOLD = 6   # develop без прогресса → revise_spec
 E2E_TOTAL_SKIP          = 6   # E2E суммарных провалов → пропуск
 E2E_CONSECUTIVE_REVISE  = 3   # E2E подряд → revise_spec

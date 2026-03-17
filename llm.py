@@ -163,10 +163,11 @@ class OpenAIBackend:
                     timeout=self._overall_timeout,
                 )
             except httpx.HTTPStatusError as e:
-                # 400 "max_tokens too large" → retry без max_tokens
-                if e.response.status_code == 400 and "max_tokens" in str(e) and max_tokens > 0:
+                # 400 "max_tokens too large" → retry с уменьшенным max_tokens
+                if e.response.status_code == 400 and "max_tokens" in str(e) and max_tokens > 16384:
+                    fallback_tokens = min(max_tokens // 2, 16384)
                     return await asyncio.wait_for(
-                        self._stream(client, model, messages, temperature, 0, json_mode),
+                        self._stream(client, model, messages, temperature, fallback_tokens, json_mode),
                         timeout=self._overall_timeout,
                     )
                 raise
@@ -185,10 +186,12 @@ class OpenAIBackend:
             "messages": messages,
             "stream": True,
             "temperature": temperature,
+            "max_tokens": max_tokens if max_tokens > 0 else 16384,
         }
-        # max_tokens=0 означает "не отправлять" — сервер сам рассчитает
-        if max_tokens > 0:
-            payload["max_tokens"] = max_tokens
+        # Отключаем thinking mode для qwen3 (экономия ~30-50% токенов)
+        # chat_template_kwargs работает на vLLM/GPUstack
+        if "qwen" in model.lower():
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 

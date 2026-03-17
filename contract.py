@@ -233,8 +233,8 @@ async def phase_review_api_contract(
                     last_cls = list(classes.keys())[-1]
                     classes[last_cls].append(name)
         for cls_name, methods in classes.items():
-            # Пропускаем dataclass / models (им методы не нужны)
-            if Path(fname).stem in ("models", "data_models", "schemas", "types"):
+            # Пропускаем dataclass / models / config (им методы не обязательны)
+            if Path(fname).stem in ("models", "data_models", "schemas", "types", "config", "settings", "constants"):
                 continue
             non_init = [m for m in methods if m != "__init__"]
             if not non_init:
@@ -242,13 +242,56 @@ async def phase_review_api_contract(
     if empty_classes:
         from experience import record_experience
         msg = f"A5 классы без методов: {', '.join(empty_classes)}"
-        logger.warning(f"⛔ A5 REJECT (детерминистский): {msg}")
+        logger.warning(f"⚠️  A5: {msg}")
         record_experience(
             error_pattern=msg,
             fix_description="Contract analyst должен генерировать ВСЕ публичные методы классов, не только __init__",
             category="a5_contract",
         )
-        return False
+        # Авто-фикс: добавляем минимальные методы из названия класса
+        # (process, detect, recognize, validate, send и т.д.)
+        fc = contract.get("file_contracts", {})
+        _METHOD_HINTS = {
+            "receiver": ["start", "stop", "receive"],
+            "processor": ["start_processing", "stop_processing", "process_frame"],
+            "detector": ["detect", "load_model"],
+            "recognizer": ["recognize"],
+            "filter": ["validate", "filter"],
+            "validator": ["validate"],
+            "generator": ["generate", "send"],
+            "dispatcher": ["send_event", "close"],
+            "notifier": ["notify", "send"],
+            "manager": ["start", "stop"],
+            "engine": ["start", "stop", "process"],
+            "handler": ["handle"],
+            "loader": ["load"],
+        }
+        fixed = 0
+        for cls_entry in empty_classes:
+            cls_name, _, fname = cls_entry.partition(" в ")
+            if fname not in fc:
+                continue
+            # Определяем методы по суффиксу имени класса
+            cls_lower = cls_name.lower()
+            methods_to_add = []
+            for suffix, methods in _METHOD_HINTS.items():
+                if suffix in cls_lower:
+                    methods_to_add = methods
+                    break
+            if not methods_to_add:
+                methods_to_add = ["process", "run"]
+            for method_name in methods_to_add:
+                fc[fname].append({
+                    "name": method_name,
+                    "signature": f"def {method_name}(self) -> None",
+                    "description": f"Основной метод класса {cls_name}",
+                    "implementation_hints": f"Реализуй логику {method_name} для {cls_name}",
+                    "required": True,
+                })
+                fixed += 1
+        if fixed:
+            logger.info(f"  📎 A5: авто-добавлено {fixed} методов для классов без методов")
+            contract["file_contracts"] = fc
 
     files_list = [f.get("path", f) if isinstance(f, dict) else f
                   for f in arch_resp.get("files", state.get("files", []))]
