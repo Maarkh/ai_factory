@@ -1024,7 +1024,18 @@ def validate_project_consistency(
                             f"'{alias.name}' не определён в {target_fname}"
                         )
 
-        # 2b. Проверяем type annotations на неимпортированные имена
+        # 2b. Проверяем method calls на импортированных классах
+        def _get_cached_for_consistency(stem: str):
+            target_file = project_stems.get(stem)
+            if not target_file or target_file not in file_codes:
+                return None
+            return (symbol_table.get(stem, set()), file_codes[target_file])
+
+        imported_classes = _collect_imported_classes(tree, project_stems, _get_cached_for_consistency)
+        method_warnings = _validate_method_calls(tree, imported_classes, project_stems)
+        file_warnings.extend(method_warnings)
+
+        # 2c. Проверяем type annotations на неимпортированные имена
         imported_names = _get_all_bound_names(code)
         annotation_names: set[str] = set()
 

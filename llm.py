@@ -157,10 +157,19 @@ class OpenAIBackend:
         async with httpx.AsyncClient(
             timeout=self._http_timeout, headers=self._headers,
         ) as client:
-            return await asyncio.wait_for(
-                self._stream(client, model, messages, temperature, max_tokens, json_mode),
-                timeout=self._overall_timeout,
-            )
+            try:
+                return await asyncio.wait_for(
+                    self._stream(client, model, messages, temperature, max_tokens, json_mode),
+                    timeout=self._overall_timeout,
+                )
+            except httpx.HTTPStatusError as e:
+                # 400 "max_tokens too large" → retry без max_tokens
+                if e.response.status_code == 400 and "max_tokens" in str(e) and max_tokens > 0:
+                    return await asyncio.wait_for(
+                        self._stream(client, model, messages, temperature, 0, json_mode),
+                        timeout=self._overall_timeout,
+                    )
+                raise
 
     async def _stream(
         self,
@@ -176,8 +185,10 @@ class OpenAIBackend:
             "messages": messages,
             "stream": True,
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+        # max_tokens=0 означает "не отправлять" — сервер сам рассчитает
+        if max_tokens > 0:
+            payload["max_tokens"] = max_tokens
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
