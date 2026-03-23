@@ -384,11 +384,18 @@ def _run_checks(
                 if isinstance(item, dict):
                     name = item.get("name", "")
                     sig = item.get("signature", "")
-                    # Совпадение по имени функции или имени в сигнатуре
-                    if name in stub_names or any(sn in sig for sn in stub_names):
-                        hints = item.get("implementation_hints", "")
-                        if hints:
-                            hints_ctx += f"\n  АЛГОРИТМ для {name}: {hints}"
+                    hints = item.get("implementation_hints", "")
+                    if not hints:
+                        continue
+                    # Совпадение: точное имя, имя в сигнатуре, или частичное (detect в detect_vehicles)
+                    matched = (
+                        name in stub_names
+                        or any(sn in sig for sn in stub_names)
+                        or any(sn in name for sn in stub_names)
+                        or any(name in sn for sn in stub_names if name)
+                    )
+                    if matched:
+                        hints_ctx += f"\n  АЛГОРИТМ для {name}: {hints}"
         return "stubs", (
             "АВТОМАТИЧЕСКИЙ REJECT — функции-заглушки:\n"
             + "\n".join(f"  - {w}" for w in stub_warnings)
@@ -712,10 +719,15 @@ def _approve_file(
     file_attempts[current_file] = 0
 
     # Cross-file impact: если новый файл сломал вызовы в других одобренных файлах → де-апрув
+    # Но НЕ де-апрувим файлы с высоким cumulative (уже с трудом одобрены)
     src_path = project_path / SRC_DIR
+    cumulative = state.get("cumulative_file_attempts", {})
     from code_context import validate_cross_file_names
     for other_file in list(approved):
         if other_file == current_file:
+            continue
+        # Не де-апрувим файлы которые уже прошли через 20+ попыток
+        if cumulative.get(other_file, 0) >= 20:
             continue
         other_path = src_path / other_file
         if not other_path.exists():
@@ -968,8 +980,27 @@ async def phase_develop(
             last_fb_text = fb_history[-1] if fb_history else ""
             is_deterministic = last_fb_text.startswith("АВТОМАТИЧЕСКИЙ REJECT")
             if is_deterministic:
-                # Детерминистский reject (imports, stubs, syntax, contract) →
-                # developer НЕ МОЖЕТ исправить → эскалация на A5 patch, НЕ auto-approve
+                # Различаем: stubs/syntax = модель слабая → force-approve лучше чем цикл
+                # imports/contract/cross_file = проблема A5 → эскалация
+                is_model_limitation = (
+                    "функции-заглушки" in last_fb_text
+                    or "SyntaxError" in last_fb_text
+                )
+                if is_model_limitation:
+                    # Модель не может написать реализацию → force-approve (с кодом что есть)
+                    file_path.write_text(code, encoding="utf-8")
+                    logger.warning(
+                        f"⚠️  {current_file}: stubs/syntax повторяется {MAX_FEEDBACK_HISTORY} раз → force-approve"
+                    )
+                    record_experience(
+                        error_pattern=f"Stubs loop {current_file}: {last_fb_text[:200]}",
+                        fix_description="Модель не может реализовать метод — stubs остались после 5 попыток",
+                        category="antipattern",
+                        file=current_file,
+                    )
+                    _approve_file(logger, state, project_path, current_file, attempt, dev_model, stats, file_attempts)
+                    continue
+                # Imports/contract/cross_file → эскалация на A5 patch
                 logger.warning(
                     f"⚠️  {current_file}: детерминистский reject повторяется {MAX_FEEDBACK_HISTORY} раз → эскалация на A5 patch"
                 )

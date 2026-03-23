@@ -280,12 +280,22 @@ async def phase_review_api_contract(
                     break
             if not methods_to_add:
                 methods_to_add = ["process", "run"]
+            # Берём hints от родительского класса (если есть)
+            parent_hints = ""
+            for item in fc[fname]:
+                if isinstance(item, dict) and item.get("name") == cls_name:
+                    parent_hints = item.get("implementation_hints", "")
+                    break
             for method_name in methods_to_add:
+                # Составляем конкретный hint из названия метода + контекст класса
+                hint = f"Реализуй {method_name}() для {cls_name}"
+                if parent_hints:
+                    hint += f". Контекст: {parent_hints[:200]}"
                 fc[fname].append({
                     "name": method_name,
                     "signature": f"def {method_name}(self) -> None",
-                    "description": f"Основной метод класса {cls_name}",
-                    "implementation_hints": f"Реализуй логику {method_name} для {cls_name}",
+                    "description": f"Публичный метод класса {cls_name}",
+                    "implementation_hints": hint,
                     "required": True,
                 })
                 fixed += 1

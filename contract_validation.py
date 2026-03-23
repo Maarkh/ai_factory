@@ -141,6 +141,17 @@ def _normalize_file_contracts(contract: dict) -> dict:
         _log.getLogger(__name__).warning(
             f"⚠️  A5 global_imports вернулся как list (ожидался dict) — сброс в {{}}")
         contract["global_imports"] = {}
+    # Нормализация name: "ClassName.method_name" → "method_name"
+    # (LLM часто возвращает полные пути, но checks ищет только имя метода)
+    for fname, items in contract.get("file_contracts", {}).items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and "name" in item:
+                name = item["name"]
+                if "." in name and not name.startswith("__"):
+                    item["name"] = name.rsplit(".", 1)[1]
+
     # Удаляем записи с не-ASCII именами (LLM может вернуть русские имена из A2)
     contract = _remove_non_ascii_entries(contract)
     # Удаляем невалидные ключи (директории без расширения: "models/", "data/")

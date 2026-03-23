@@ -709,6 +709,9 @@ def check_contract_compliance(code: str, file_contract: list) -> list[str]:
                 missing.append(f"ОТСУТСТВУЕТ: {sig} — добавь определение класса {class_name}{hint}")
         elif sig.startswith("def ") or sig.startswith("async def "):
             func_name = name or sig.split("def ", 1)[1].split("(")[0].strip()
+            # "ClassName.method_name" → ищем только "method_name"
+            if "." in func_name:
+                func_name = func_name.rsplit(".", 1)[1]
             # Ищем как top-level функцию (^def) так и метод класса (с отступом)
             if not re.search(rf'^\s*(?:async\s+)?def\s+{re.escape(func_name)}\s*\(', code, re.MULTILINE):
                 hint = _fuzzy_name_hint(func_name, all_code_names)
